@@ -1,0 +1,12 @@
+{
+  "name": "usage-monitor",
+  "displayName": "Usage & Speed Monitor",
+  "version": "1.0.0",
+  "description": "实时监控 Token/s 生成测速、首字延迟(TTFT)、缓存命中率、上下文窗口占用、5h 会话限额倒计时以及今日/每周累计消耗。",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "打开测速与额度监控面板查看当前会话性能",
+    "分析当前会话的 Token 消耗与缓存命中率",
+    "查看今日和本周各模型的累计 Token 与费用明细"
+  ]
+}

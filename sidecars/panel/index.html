@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>测速与额度监控</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/preload.js"></script>
+</head>
+<body>
+  <main class="monitor-container">
+    <!-- Top Workspace / Session Selector Bar (Matches the top pill in screenshot) -->
+    <div class="session-pill-bar">
+      <div class="session-pill-left">
+        <span class="session-title" id="conv-title">当前会话</span>
+        <select id="conv-select" class="conv-select" title="切换监控会话"></select>
+      </div>
+      <div class="session-pill-right">
+        <span id="live-status-pill" class="live-pill">实时 2s</span>
+        <button id="refresh-btn" class="icon-btn" type="button" title="立即刷新">↻</button>
+      </div>
+    </div>
+
+    <!-- Compact Speed & Token Status Strip (1:1 replica of the left status bar above input) -->
+    <section class="status-strip-card" aria-label="实时测速与消耗状态栏">
+      <div class="strip-row strip-row-main">
+        <span class="speed-group" title="点击切换「纯输出流速度」与「含思考整体速度」" id="speed-mode-toggle">
+          <span id="speed-dot" class="speed-dot"></span>
+          <strong id="tok-per-sec" class="speed-value">0.0 tok/s</strong>
+        </span>
+        <span class="metric-item">首字 <strong id="ttft-value">0.0s</strong></span>
+        <span class="metric-item">均速 <strong id="avg-speed-value">0.0</strong></span>
+        <span class="strip-divider">|</span>
+        <strong id="session-cost-value" class="cost-value">$0.00</strong>
+        <span class="metric-item">缓存 <strong id="cache-hit-value" class="cache-value">0%</strong></span>
+        <span class="strip-divider">|</span>
+        <span class="metric-item ctx-inline-trigger" id="ctx-inline-trigger" title="点击展开上下文细分">
+          上下文
+          <span id="ctx-parallelograms" class="parallelogram-group" aria-hidden="true"></span>
+        </span>
+      </div>
+
+      <div class="strip-row strip-row-sub">
+        <span class="model-tag" id="model-tag-trigger" title="当前步骤模型">
+          <span class="swap-icon">⇄</span>
+          <strong id="active-model-short">argon-4</strong>
+        </span>
+        <span class="today-summary">
+          今日 <strong id="today-tokens">0</strong> · ≈<strong id="today-cost">$0.00</strong>
+        </span>
+        <span class="speed-mode-label muted" id="speed-mode-badge">输出流测速</span>
+      </div>
+    </section>
+
+    <!-- Quota & Context Popover Card (1:1 replica of the right popover card in screenshot) -->
+    <section class="quota-popover-card" aria-label="上下文窗口与使用限额">
+      <!-- Context Window Section -->
+      <div class="popover-section">
+        <div class="section-row clickable" id="ctx-detail-toggle">
+          <span class="section-label">上下文窗口</span>
+          <span class="section-value">
+            <span id="ctx-summary-text">0 / 1M (0%)</span>
+            <span class="chevron" id="ctx-chevron">›</span>
+          </span>
+        </div>
+        <div class="multi-progress-track" title="蓝: 缓存读取 | 橙: 新增输入 | 绿: 思考Token | 青: 输出Token">
+          <div id="bar-ctx-cached" class="bar-seg seg-cached" style="width: 0%"></div>
+          <div id="bar-ctx-input" class="bar-seg seg-input" style="width: 0%"></div>
+          <div id="bar-ctx-thinking" class="bar-seg seg-thinking" style="width: 0%"></div>
+          <div id="bar-ctx-output" class="bar-seg seg-output" style="width: 0%"></div>
+        </div>
+
+        <!-- Expandable Context Breakdown -->
+        <div id="ctx-breakdown-box" class="ctx-breakdown" hidden>
+          <div class="legend-grid">
+            <div class="legend-item"><span class="dot seg-cached"></span>缓存读取: <strong id="bd-cached">0</strong></div>
+            <div class="legend-item"><span class="dot seg-input"></span>新增输入: <strong id="bd-input">0</strong></div>
+            <div class="legend-item"><span class="dot seg-thinking"></span>思考输出: <strong id="bd-thinking">0</strong></div>
+            <div class="legend-item"><span class="dot seg-output"></span>正文输出: <strong id="bd-output">0</strong></div>
+          </div>
+          <div class="ctx-limit-switch">
+            <span>窗口上限基准:</span>
+            <button type="button" class="chip-btn" data-ctx-limit="200000">200k</button>
+            <button type="button" class="chip-btn active" data-ctx-limit="1000000">1M</button>
+            <button type="button" class="chip-btn" data-ctx-limit="2000000">2M</button>
+          </div>
+        </div>
+      </div>
+
+      <hr class="popover-divider">
+
+      <!-- Usage Limits Section -->
+      <div class="popover-section">
+        <div class="section-row">
+          <span class="section-label">您的使用限额 · <span id="account-tier-label">Pro</span></span>
+          <span class="arrow-icon" id="pool-switch-toggle" title="点击展开全部模型池 5h 限额">→</span>
+        </div>
+
+        <!-- 5h Session Quota (Active Pool) -->
+        <div class="quota-block">
+          <div class="section-row">
+            <span class="quota-title" id="session-quota-title">会话限额</span>
+            <span class="quota-meta">
+              <span id="session-reset-text">-- 后重置</span>
+              <strong id="session-used-pct">0%</strong>
+            </span>
+          </div>
+          <div class="single-progress-track">
+            <div id="bar-session-quota" class="bar-fill" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <!-- All Model Pools (Gemini / Claude / GPT) 5h Quotas -->
+        <div id="all-pools-container" class="all-pools-box"></div>
+
+        <!-- Weekly All Models Quota -->
+        <div class="quota-block">
+          <div class="section-row">
+            <span class="quota-title">每周·所有模型</span>
+            <span class="quota-meta">
+              <span id="weekly-reset-text">-- 后重置</span>
+              <strong id="weekly-used-pct">0%</strong>
+            </span>
+          </div>
+          <div class="single-progress-track">
+            <div id="bar-weekly-quota" class="bar-fill" style="width: 0%"></div>
+          </div>
+          <div class="weekly-sub-meta muted">
+            <span>本周累计: <strong id="weekly-tokens-text">0</strong> (<strong id="weekly-cost-text">≈$0.00</strong>)</span>
+            <span id="credits-badge"></span>
+          </div>
+        </div>
+
+        <div class="popover-actions">
+          <button id="toggle-details-btn" type="button" class="detail-pill-btn">查看详细明细</button>
+          <button id="toggle-settings-btn" type="button" class="detail-pill-btn secondary-pill">参数设置</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Detailed Breakdown Card (Toggled by 查看详细明细) -->
+    <section id="details-card" class="details-card" hidden>
+      <div class="tabs-header">
+        <button type="button" class="tab-btn active" data-tab="steps">当前会话步骤测速</button>
+        <button type="button" class="tab-btn" data-tab="models">本周按模型汇总</button>
+      </div>
+
+      <div id="tab-steps" class="tab-pane">
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>步</th>
+                <th>模型</th>
+                <th>速度</th>
+                <th>首字</th>
+                <th>上下文/输出</th>
+                <th>缓存</th>
+              </tr>
+            </thead>
+            <tbody id="steps-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="tab-models" class="tab-pane" hidden>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>模型</th>
+                <th>次数</th>
+                <th>均速</th>
+                <th>总 Token</th>
+                <th>折算费用</th>
+              </tr>
+            </thead>
+            <tbody id="models-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings Card (Toggled by 参数设置) -->
+    <section id="settings-card" class="details-card" hidden>
+      <h3 class="settings-title">监控口径与周限额基准设置</h3>
+      <div class="settings-grid">
+        <label class="field-label">
+          <span>tok/s 测速口径</span>
+          <select id="setting-speed-mode">
+            <option value="stream">纯输出流速度 (扣除首字思考时间)</option>
+            <option value="total">整体生成速度 (含首字思考总耗时)</option>
+          </select>
+        </label>
+        <label class="field-label">
+          <span>每周进度条统计维度</span>
+          <select id="setting-weekly-mode">
+            <option value="official">官方云端周限额 (与 Models &amp; Usage 同步)</option>
+            <option value="custom_tokens">按自定义每周 Token 预算计算百分比</option>
+            <option value="custom_cost">按自定义每周美元($)预算计算百分比</option>
+          </select>
+        </label>
+        <label class="field-label">
+          <span>自定义每周 Token 预算基准 (默认 80M)</span>
+          <input type="number" id="setting-weekly-tokens" min="100000" step="1000000" value="80000000">
+        </label>
+        <label class="field-label">
+          <span>自定义每周费用预算基准 (USD $)</span>
+          <input type="number" id="setting-weekly-cost" min="1" step="5" value="35">
+        </label>
+      </div>
+      <div class="settings-actions">
+        <button id="save-settings-btn" type="button" class="detail-pill-btn">保存设置</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
