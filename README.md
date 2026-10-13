@@ -44,27 +44,33 @@ Antigravity 实时测速与官方额度监控侧边栏插件（UI Extension Side
   git clone https://github.com/yuhuan2498281558/antigravity-usage-monitor.git ~/.gemini/config/plugins/usage-monitor
   ```
 
-### 方式三：手动下载 ZIP 解压
+### 方式三：直接下载 Release 安装包 (`usage-monitor.zip`)
 
-1. 点击本仓库右上角的 **Code** -> **Download ZIP**。
-2. 解压到全局插件目录，确保目录结构如下：
-   - **Windows**: `C:\Users\<你的用户名>\.gemini\config\plugins\usage-monitor\`
-   - **macOS / Linux**: `~/.gemini/config/plugins/usage-monitor/`
-   ```text
-   usage-monitor/
-   ├── plugin.json
-   ├── README.md
-   ├── assets/
-   │   └── logo.svg
-   └── sidecars/
-       └── panel/
-           ├── sidecar.json
-           ├── package.json
-           ├── main.mjs
-           ├── index.html
-           ├── app.js
-           └── styles.css
-   ```
+1. 直接点击下载打包好的安装包：**[📦 下载 usage-monitor.zip (Latest Release)](https://github.com/yuhuan2498281558/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip)**（也可在仓库右侧 **[Releases](https://github.com/yuhuan2498281558/antigravity-usage-monitor/releases)** 页面下载）。
+2. 将压缩包解压到全局插件目录 `~/.gemini/config/plugins/` 下（压缩包内已自带 `usage-monitor/` 顶层文件夹）：
+   - **Windows PowerShell 一键下载并解压**：
+     ```powershell
+     $pluginsDir = "$env:USERPROFILE\.gemini\config\plugins"
+     New-Item -ItemType Directory -Path $pluginsDir -Force | Out-Null
+     Invoke-WebRequest -Uri "https://github.com/yuhuan2498281558/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip" -OutFile "$env:TEMP\usage-monitor.zip"
+     Expand-Archive -Path "$env:TEMP\usage-monitor.zip" -DestinationPath $pluginsDir -Force
+     ```
+   - 解压后的目录结构如下：
+     ```text
+     ~/.gemini/config/plugins/usage-monitor/
+     ├── plugin.json
+     ├── README.md
+     ├── assets/
+     │   └── logo.svg
+     └── sidecars/
+         └── panel/
+             ├── sidecar.json
+             ├── package.json
+             ├── main.mjs
+             ├── index.html
+             ├── app.js
+             └── styles.css
+     ```
 
 ---
 

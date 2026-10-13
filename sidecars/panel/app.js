@@ -177,13 +177,18 @@ function applyTelemetryToDom(data) {
   const livePill = $('live-status-pill');
   const speedDot = $('speed-dot');
   if (active.isRunning) {
-    livePill.textContent = '生成中…';
-    livePill.classList.add('running');
     speedDot.classList.add('pulsing');
   } else {
-    livePill.textContent = '实时 2s';
-    livePill.classList.remove('running');
     speedDot.classList.remove('pulsing');
+  }
+  if (!manualRefreshFeedbackTimer) {
+    if (active.isRunning) {
+      livePill.textContent = '生成中…';
+      livePill.classList.add('running');
+    } else {
+      livePill.textContent = '实时 2s';
+      livePill.classList.remove('running');
+    }
   }
 
   // 2. Status strip metrics
@@ -267,17 +272,64 @@ function applyTelemetryToDom(data) {
   renderTables(active, data.modelBreakdown);
 }
 
+let manualRefreshFeedbackTimer = null;
+
 async function refreshTelemetry(force = false) {
+  const btn = $('refresh-btn');
+  const livePill = $('live-status-pill');
+  const startMs = Date.now();
+
+  if (force && btn) {
+    btn.classList.add('refreshing');
+    if (livePill) {
+      livePill.textContent = '同步中…';
+      livePill.classList.remove('running');
+      livePill.classList.add('synced');
+    }
+  }
+
   try {
     const params = new URLSearchParams();
     if (selectedConversationId) params.set('conversationId', selectedConversationId);
     if (force === true) params.set('force', '1');
     const qs = params.toString();
     const data = await callApi(`/api/telemetry${qs ? `?${qs}` : ''}`);
+
+    if (force) {
+      const elapsed = Date.now() - startMs;
+      if (elapsed < 320) {
+        await new Promise((r) => setTimeout(r, 320 - elapsed));
+      }
+    }
+
     applyTelemetryToDom(data);
+
+    if (force && livePill) {
+      if (manualRefreshFeedbackTimer) clearTimeout(manualRefreshFeedbackTimer);
+      livePill.textContent = '✓ 已刷新';
+      livePill.classList.remove('running');
+      livePill.classList.add('synced');
+      manualRefreshFeedbackTimer = setTimeout(() => {
+        manualRefreshFeedbackTimer = null;
+        livePill.classList.remove('synced');
+        if (latestTelemetry?.activeConversation?.isRunning) {
+          livePill.textContent = '生成中…';
+          livePill.classList.add('running');
+        } else {
+          livePill.textContent = '实时 2s';
+        }
+      }, 1200);
+    }
   } catch (err) {
     console.error('Telemetry refresh failed:', err);
-    $('live-status-pill').textContent = '连接重试中';
+    if (livePill) {
+      livePill.classList.remove('synced');
+      livePill.textContent = '连接重试中';
+    }
+  } finally {
+    if (force && btn) {
+      btn.classList.remove('refreshing');
+    }
   }
 }
 

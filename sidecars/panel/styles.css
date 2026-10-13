@@ -108,20 +108,54 @@ body {
   color: var(--speed-accent);
 }
 
+.live-pill.synced {
+  background: color-mix(in srgb, #2563eb 16%, transparent);
+  color: var(--model-blue);
+}
+
 .icon-btn {
-  padding: 2px 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
   font-size: 13px;
-  line-height: 1.2;
+  line-height: 1;
   color: var(--muted-foreground, #5f6368);
   background: transparent;
   border: 1px solid var(--border, #d8dee4);
   border-radius: 5px;
   cursor: pointer;
+  user-select: none;
+  transition: transform 0.12s ease, background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
 .icon-btn:hover {
   background: var(--secondary, #eef1f4);
   color: var(--foreground, #1f2328);
+  border-color: var(--muted-foreground, #8c959f);
+}
+
+.icon-btn:active {
+  transform: scale(0.88);
+}
+
+.icon-btn.refreshing {
+  color: var(--model-blue);
+  border-color: var(--model-blue);
+  background: color-mix(in srgb, var(--model-blue) 10%, transparent);
+  pointer-events: none;
+}
+
+.icon-btn.refreshing .refresh-glyph {
+  display: inline-block;
+  animation: spin-refresh 0.55s linear infinite;
+}
+
+@keyframes spin-refresh {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* 2. Compact Status Strip Card (Left status bar in screenshot) ------------ */
