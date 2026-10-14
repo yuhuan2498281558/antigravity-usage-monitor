@@ -1,6 +1,6 @@
-// Client-observed request throughput, including waiting and thinking.
-// One formula for text and tools; no rate-based clipping or denominator changes.
-export const MEASUREMENT_VERSION = 2;
+// A guarded estimate of the non-thinking response phase (text + tool JSON).
+// Buffered/short samples retain request throughput. Means never mix scopes.
+export const MEASUREMENT_VERSION = 3;
 export const MIN_SPEED_DURATION_SECONDS = 0.5;
 export const MIN_MEAN_OUTPUT_TOKENS = 50;
 
@@ -47,14 +47,16 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     const outputTokens = Number(u.outputTokens || 0);
     const thinkingTokens = Number(p.thinkingTokens ?? u.thinkingOutputTokens ?? chat?.usage?.thinkingOutputTokens ?? 0);
     const responseTokens = Number(p.responseTokens ?? u.responseOutputTokens ?? chat?.usage?.responseOutputTokens ?? Math.max(0, outputTokens - thinkingTokens));
+    const nativeResponseTokens = u.responseOutputTokens ?? chat?.usage?.responseOutputTokens;
+    const nativeThinkingTokens = u.thinkingOutputTokens ?? chat?.usage?.thinkingOutputTokens;
+    const hasVisibleText = String(p.modifiedResponse || p.response || '').trim().length > 0;
     const start = parseIsoMs(m.createdAt);
     const end = parseIsoMs(m.finishedGeneratingAt || m.completedAt);
     const explicitlyIncomplete = Boolean(s.status && s.status !== 'CORTEX_STEP_STATUS_DONE');
     const complete = !explicitlyIncomplete && start > 0 && end >= start;
     const totalDurationSec = complete ? elapsed(start, end) : null;
     const nativeTtftSec = duration(chat?.timeToFirstToken);
-    // These phase timers remain diagnostic only: buffered tools can make them
-    // tiny, so neither is used as a divisor or subtracted from request time.
+    // These are client-observed boundaries, not server token timestamps.
     const nativeStreamSec = duration(chat?.streamingDuration);
     const thinkingDurationSec = duration(p.thinkingDuration);
     let timingReason = null;
@@ -64,13 +66,31 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     const totalTokPerSec = timingReason === null ? outputTokens / totalDurationSec : null;
     const shortOutputSample = totalTokPerSec !== null && outputTokens < MIN_MEAN_OUTPUT_TOKENS;
     const speedReason = timingReason || (isCompactionStep ? 'compaction' : shortOutputSample ? 'short_sample' : null);
+    const phaseOffsetSec = thinkingDurationSec ?? nativeTtftSec;
+    const phaseDurationSec = totalDurationSec !== null && phaseOffsetSec !== null
+      ? totalDurationSec - phaseOffsetSec : null;
+    let phaseReason = timingReason;
+    if (!phaseReason && isCompactionStep) phaseReason = 'compaction';
+    if (!phaseReason && !hasVisibleText) phaseReason = 'no_visible_text';
+    if (!phaseReason && (!validCount(nativeResponseTokens) || !validCount(nativeThinkingTokens) ||
+        Number(nativeResponseTokens) !== responseTokens ||
+        Number(nativeResponseTokens) + Number(nativeThinkingTokens) !== outputTokens)) phaseReason = 'invalid_phase_tokens';
+    if (!phaseReason && (!m.finishedGeneratingAt || phaseOffsetSec === null ||
+        (p.thinkingDuration != null && thinkingDurationSec === null) ||
+        !(phaseDurationSec > 0) ||
+        (nativeTtftSec !== null && phaseOffsetSec + 0.01 < nativeTtftSec) ||
+        (nativeStreamSec !== null && nativeTtftSec !== null &&
+          Math.abs(totalDurationSec - nativeTtftSec - nativeStreamSec) > 0.01))) phaseReason = 'invalid_phase_timing';
+    if (!phaseReason && phaseDurationSec < MIN_SPEED_DURATION_SECONDS) phaseReason = 'short_phase';
+    if (!phaseReason && responseTokens < MIN_MEAN_OUTPUT_TOKENS) phaseReason = 'short_phase_sample';
+    const phaseTokPerSec = phaseReason === null ? responseTokens / phaseDurationSec : null;
     const context = chat?.chatStartMetadata?.contextWindowMetadata;
     result.push({
       stepIndex, isCompactionStep,
       modelKey: u.model || chat?.model || m.generatorModel || 'MODEL_PLACEHOLDER_M418',
       apiProvider: u.apiProvider || chat?.usage?.apiProvider || '',
       createdAt: m.createdAt || null, createdAtMs: Math.floor(start),
-      hasVisibleText: String(p.modifiedResponse || p.response || '').trim().length > 0,
+      hasVisibleText,
       hasToolCalls: Array.isArray(p.toolCalls) && p.toolCalls.length > 0,
       inputTokens, cacheReadTokens, outputTokens, thinkingTokens, responseTokens,
       estimatedContextTokens: Number(context?.estimatedTokensUsed || 0),
@@ -80,7 +100,10 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       viewableDelaySec: elapsed(start, parseIsoMs(m.viewableAt)),
       ttftSec: nativeTtftSec, ttftSource: nativeTtftSec === null ? 'unavailable' : 'native',
       thinkingDurationSec, totalDurationSec, totalTokPerSec,
-      speedBasis: totalTokPerSec === null ? 'unavailable' : 'request_total',
+      phaseDurationSec: phaseTokPerSec === null ? null : phaseDurationSec,
+      phaseTokPerSec, phaseReason,
+      answerStartDelaySec: phaseTokPerSec === null ? null : phaseOffsetSec,
+      speedBasis: phaseTokPerSec !== null ? 'response_phase_estimate' : totalTokPerSec === null ? 'unavailable' : 'request_total',
       speedSampleEligible: totalTokPerSec !== null && !shortOutputSample && !isCompactionStep,
       speedReason,
     });
@@ -97,6 +120,7 @@ export function normalizeCachedStep(step) {
     nativeTtftSec: null, nativeStreamSec: null, viewableDelaySec: null,
     ttftSec: null, ttftSource: 'unavailable', thinkingDurationSec: null,
     totalDurationSec: null, totalTokPerSec: null,
+    phaseDurationSec: null, phaseTokPerSec: null, phaseReason: 'legacy_cache', answerStartDelaySec: null,
     streamDurationSec: null, streamTokens: null, streamTokPerSec: null,
     speedBasis: 'unavailable', speedSampleEligible: false, speedReason: 'legacy_cache',
   };
@@ -109,29 +133,45 @@ export function speedMetric(step) {
       !(step.totalDurationSec >= MIN_SPEED_DURATION_SECONDS)) {
     return missing(step.speedReason || 'incomplete_or_invalid_timing');
   }
+  if (step.speedBasis === 'response_phase_estimate' && Number.isFinite(step.phaseTokPerSec) &&
+      step.phaseDurationSec >= MIN_SPEED_DURATION_SECONDS && step.responseTokens >= MIN_MEAN_OUTPUT_TOKENS) {
+    return { value: step.phaseTokPerSec, tokens: step.responseTokens, seconds: step.phaseDurationSec,
+      eligible: !step.isCompactionStep, reason: null };
+  }
   return { value: step.totalTokPerSec, tokens: step.outputTokens, seconds: step.totalDurationSec,
     eligible: step.speedSampleEligible === true && !step.isCompactionStep, reason: step.speedReason };
 }
 
 export function createSpeedAccumulator() {
-  return { tokens: 0, seconds: 0, sampleCount: 0, excludedCount: 0, excludedReasons: {} };
+  const bucket = () => ({ tokens: 0, seconds: 0, sampleCount: 0, excludedCount: 0, excludedReasons: {} });
+  return { phase: bucket(), overall: bucket() };
 }
 
 export function accumulateSpeed(acc, step) {
   if (step.isCompactionStep) return;
   const metric = speedMetric(step);
-  if (metric.eligible) {
-    acc.tokens += metric.tokens;
-    acc.seconds += metric.seconds;
-    acc.sampleCount++;
-  } else {
-    acc.excludedCount++;
-    acc.excludedReasons[metric.reason] = (acc.excludedReasons[metric.reason] || 0) + 1;
+  function add(bucket, eligible, tokens, seconds, reason) {
+    if (eligible) {
+      bucket.tokens += tokens;
+      bucket.seconds += seconds;
+      bucket.sampleCount++;
+    } else {
+      bucket.excludedCount++;
+      bucket.excludedReasons[reason] = (bucket.excludedReasons[reason] || 0) + 1;
+    }
   }
+  add(acc.phase, metric.eligible && step.speedBasis === 'response_phase_estimate',
+    metric.tokens, metric.seconds, step.phaseReason || metric.reason || 'unavailable');
+  add(acc.overall, metric.value !== null && step.outputTokens >= MIN_MEAN_OUTPUT_TOKENS,
+    step.outputTokens, step.totalDurationSec, metric.reason || 'short_sample');
 }
 
 export function finishSpeed(acc) {
-  return { ...acc, avgTokPerSec: acc.seconds > 0 ? acc.tokens / acc.seconds : null };
+  const usePhase = acc.phase.sampleCount > 0;
+  const chosen = usePhase ? acc.phase : acc.overall;
+  return { ...chosen, basis: usePhase ? 'response_phase_estimate' : 'request_total',
+    avgTokPerSec: chosen.seconds > 0 ? chosen.tokens / chosen.seconds : null,
+    overall: { ...acc.overall, avgTokPerSec: acc.overall.seconds > 0 ? acc.overall.tokens / acc.overall.seconds : null } };
 }
 
 export function summarizeSpeed(steps) {

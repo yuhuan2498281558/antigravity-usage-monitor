@@ -22,6 +22,23 @@ function formatMetric(value, unit = '') {
   return Number.isFinite(value) ? `${value.toFixed(1)}${unit}` : '—';
 }
 
+function formatSpeed(value, basis, unit = '') {
+  return `${Number.isFinite(value) && basis === 'response_phase_estimate' ? '≈' : ''}${formatMetric(value, unit)}`;
+}
+
+function speedDescription(step) {
+  if (step.speedBasis === 'response_phase_estimate') {
+    return `阶段估算：正文及工具 ${step.responseTokens} Token ÷ ${formatMetric(step.phaseDurationSec, 's')}；已扣除等待及思考，非服务端精确解码速度；正文开始延迟约 ${formatMetric(step.answerStartDelaySec, 's')}`;
+  }
+  return `TPS = 总输出 ${step.outputTokens} Token ÷ 请求总耗时 ${formatMetric(step.totalDurationSec, 's')}（含等待与思考）；${speedReasonText(step.phaseReason)}`;
+}
+
+function meanDescription(summary) {
+  return summary?.basis === 'response_phase_estimate'
+    ? `均速仅汇总可估算步骤的非思考 Token 与阶段时长，覆盖 ${sampleSummary(summary)}；其他步骤仍显示含等待的速率，不混入此均速`
+    : `暂无可用阶段估算，均速使用总输出 Token ÷ 请求总耗时（含等待与思考），覆盖 ${sampleSummary(summary)}`;
+}
+
 function speedReasonText(reason) {
   return ({
     compaction: '自动压缩不计测速',
@@ -30,6 +47,11 @@ function speedReasonText(reason) {
     short_timing: '计时过短，暂不测速',
     short_sample: '短样本，不计均速',
     legacy_cache: '旧缓存，等待重新读取',
+    no_visible_text: '缺少正文起点，保留完整请求计时',
+    invalid_phase_tokens: '非思考 Token 计数缺失或不一致',
+    invalid_phase_timing: '阶段计时缺失或不一致',
+    short_phase: '阶段不足 0.5 秒，可能整包返回，保留完整请求计时',
+    short_phase_sample: '非思考输出不足 50 Token，保留完整请求计时',
   })[reason] || '';
 }
 
@@ -184,11 +206,11 @@ function renderTables(activeConv, modelBreakdown) {
           : 'color: var(--foreground); font-weight: 600;';
       const pct5h = (stepCostVal / 0.25).toFixed(2);
       const pctWk = stepCostVal.toFixed(3);
-      tr.title = `单步消费: $${stepCostVal.toFixed(4)} (入 $${Number(st.inCostUsd || 0).toFixed(4)} + 缓 $${Number(st.cacheCostUsd || 0).toFixed(4)} + 出 $${Number(st.outCostUsd || 0).toFixed(4)} | 约合 5h ${pct5h}% / 周限 ${pctWk}%) | ${thinkInfo}正文/工具输出: ${st.responseTokens} tok | TPS = 总输出 ${st.outputTokens} Token ÷ 请求总耗时 ${formatMetric(st.totalDurationSec, 's')}（含等待与思考） | ${reason}`;
+      tr.title = `单步消费: $${stepCostVal.toFixed(4)} (入 $${Number(st.inCostUsd || 0).toFixed(4)} + 缓 $${Number(st.cacheCostUsd || 0).toFixed(4)} + 出 $${Number(st.outCostUsd || 0).toFixed(4)} | 约合 5h ${pct5h}% / 周限 ${pctWk}%) | ${thinkInfo}${speedDescription(st)} | ${reason}`;
       tr.innerHTML = `
         <td>#${Number(st.stepIndex)}${compTag ? '<span class="muted">⚡</span>' : ''}</td>
         <td>${escapeHtml(st.modelShort)}</td>
-        <td><strong style="color: var(--speed-accent)">${formatMetric(st.tokPerSec, ' tok/s')}</strong>${reason ? `<div class="speed-detail muted">${escapeHtml(reason)}</div>` : ''}</td>
+        <td><strong style="color: var(--speed-accent)">${formatSpeed(st.tokPerSec, st.speedBasis, ' tok/s')}</strong>${reason ? `<div class="speed-detail muted">${escapeHtml(reason)}</div>` : ''}</td>
         <td>${formatMetric(st.ttftSec, 's')}</td>
         <td>${formatTokens(st.contextTokens)} / +${Number(st.outputTokens)}</td>
         <td style="color: var(--cache-green)">${Number(st.cacheHitPct)}%</td>
@@ -211,11 +233,12 @@ function renderTables(activeConv, modelBreakdown) {
     modelsTbody.innerHTML = '';
     for (const m of models) {
       const tr = document.createElement('tr');
+      tr.title = meanDescription(m.speedSummary);
       const pricePrefix = m.isEstimatedPrice ? '≈$' : '$';
       tr.innerHTML = `
         <td><strong>${escapeHtml(m.shortName)}</strong> <span class="muted">(${Number(m.calls)})</span></td>
         <td>${Number(m.calls)}</td>
-        <td>${formatMetric(m.avgTokPerSec, ' tok/s')}<div class="speed-detail muted">有效 ${sampleSummary(m.speedSummary)}</div></td>
+        <td>${formatSpeed(m.avgTokPerSec, m.speedSummary?.basis, ' tok/s')}<div class="speed-detail muted">有效 ${sampleSummary(m.speedSummary)}</div></td>
         <td>${formatTokens(m.totalTokens)}</td>
         <td>${pricePrefix}${Number(m.costUsd).toFixed(2)}</td>
       `;
@@ -316,13 +339,14 @@ function applyTelemetryToDom(data) {
   }
 
   // 2. Status strip metrics
-  $('tok-per-sec').textContent = formatMetric(active.latestTokPerSec, ' tok/s');
-  $('speed-status').title = `最新一步：总输出 Token ÷ 请求总耗时（含等待与思考）；${speedReasonText(active.latestSpeedReason) || '计时有效'}`;
+  $('tok-per-sec').textContent = formatSpeed(active.latestTokPerSec, active.latestSpeedBasis, ' tok/s');
+  $('speed-status').title = `最新一步：${speedDescription(active.recentSteps?.[0] || {})}；${speedReasonText(active.latestSpeedReason)}`;
   $('ttft-value').textContent = formatMetric(active.latestTtftSec, 's');
   $('ttft-value').title = `原始首 Token 延迟，可能先返回思考内容；会话平均 ${formatMetric(active.ttftSummary?.avgSec, 's')}（${active.ttftSummary?.sampleCount || 0} 步）`;
-  $('avg-speed-value').textContent = formatMetric(active.avgTokPerSec);
+  $('avg-speed-value').textContent = formatSpeed(active.avgTokPerSec, active.speedSummary?.basis);
+  $('avg-speed-value').title = meanDescription(active.speedSummary);
   $('speed-sample-count').textContent = `有效 ${sampleSummary(active.speedSummary)}`;
-  $('speed-sample-count').title = Object.entries(active.speedSummary?.excludedReasons || {}).map(([reason, count]) => `${speedReasonText(reason)}：${count} 步`).join('；') || '全部有效；自动压缩单独排除';
+  $('speed-sample-count').title = meanDescription(active.speedSummary) + '；' + Object.entries(active.speedSummary?.excludedReasons || {}).map(([reason, count]) => `${speedReasonText(reason)}：${count} 步`).join('；');
   const latestStepCost = Number(active.latestStepCostUsd ?? active.recentSteps?.[0]?.costUsd ?? 0);
   if ($('step-cost-value')) {
     $('step-cost-value').textContent = `$${latestStepCost.toFixed(3)}`;

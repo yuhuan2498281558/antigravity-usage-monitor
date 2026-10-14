@@ -41,3 +41,13 @@ test('a TTFT-only correction refreshes the table even when TPS and step count do
   ctx.renderTables({recentSteps:[{...step,ttftSec:12.974}]},[]);
   assert.match(elements['steps-tbody'].children[0].innerHTML,/<td>13\.0s<\/td>/);
 });
+
+test('one TPS column marks estimates and explains full-time fallbacks in the tooltip',()=>{
+  const {ctx,elements}=page();
+  ctx.renderTables({recentSteps:[{...step,speedBasis:'response_phase_estimate',phaseDurationSec:2,answerStartDelaySec:8,tokPerSec:100}]},[]);
+  assert.match(elements['steps-tbody'].children[0].innerHTML,/≈100\.0 tok\/s/);
+  assert.match(elements['steps-tbody'].children[0].title,/非服务端精确解码速度/);
+  ctx.renderTables({recentSteps:[{...step,speedBasis:'request_total',phaseReason:'short_phase'}]},[]);
+  assert.doesNotMatch(elements['steps-tbody'].children[0].innerHTML,/≈/);
+  assert.match(elements['steps-tbody'].children[0].title,/阶段不足 0.5 秒/);
+});

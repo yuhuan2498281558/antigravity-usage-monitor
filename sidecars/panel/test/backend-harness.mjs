@@ -3,12 +3,12 @@ import path from 'node:path';
 import vm from 'node:vm';
 import * as metrics from '../speed-metrics.mjs';
 
-export function backendHarness({cache={},settings={},trajectories={},summaries={},sourceText=null}={}) {
+export function backendHarness({cache={},settings={},trajectories={},summaries={},sourceText=null,metricsImplementation=metrics}={}) {
   const source=(sourceText ?? fs.readFileSync(new URL('../main.mjs',import.meta.url),'utf8'))
     .replace(/^import .*;\r?\n/gm,'').replaceAll('import.meta.url',JSON.stringify('file:///test/main.mjs'));
   const state={calls:[],errors:[],saves:[],trajectories};
   const ctx={
-    ...metrics, URL, AbortSignal,
+    ...metricsImplementation, URL, AbortSignal,
     process:{env:{ANTIGRAVITY_EXECUTABLE_DATA_DIR:'/test-data',ANTIGRAVITY_LS_ADDRESS:'test.invalid',ANTIGRAVITY_CSRF_TOKEN:'test'}},
     console:{error:m=>state.errors.push(m)},
     existsSync:p=>p.endsWith('settings.json') || p.endsWith('trajectory_usage_cache.json'),
