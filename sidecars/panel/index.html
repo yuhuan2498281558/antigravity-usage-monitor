@@ -29,9 +29,10 @@
         <span class="speed-group" title="最新一步；点击切换「正文估算」与「整体吞吐」" id="speed-mode-toggle">
           <span id="speed-dot" class="speed-dot"></span>
           <strong id="tok-per-sec" class="speed-value">—</strong>
+          <small id="latest-speed-basis" class="muted">待计时</small>
         </span>
         <span class="metric-item">首Token <strong id="ttft-value">—</strong></span>
-        <span class="metric-item">均速 <strong id="avg-speed-value">—</strong> <small id="speed-sample-count" class="muted">有效 0/0 步</small></span>
+        <span class="metric-item"><span id="avg-speed-label">正文均速</span> <strong id="avg-speed-value">—</strong> <small id="speed-sample-count" class="muted">有效 0/0 步</small></span>
         <span class="strip-divider">|</span>
         <span class="metric-item" title="最新一步消费 / 当前会话累计消费">本步 <strong id="step-cost-value" class="cost-value">$0.000</strong> · 累计 <strong id="session-cost-value" class="cost-value">$0.00</strong></span>
         <span class="metric-item">缓存 <strong id="cache-hit-value" class="cache-value">0%</strong></span>
@@ -50,9 +51,9 @@
         <span class="today-summary">
           今日 <strong id="today-tokens">0</strong> · ≈<strong id="today-cost">$0.00</strong>
         </span>
-        <span class="speed-mode-label muted" id="speed-mode-badge">正文估算</span>
+        <span class="speed-mode-label muted" id="speed-mode-badge">均速：正文估算</span>
       </div>
-      <div id="speed-method-note" class="speed-method-note muted">正文阶段估算；计时不明的步骤不计均速。</div>
+      <div id="speed-method-note" class="speed-method-note muted">正文均速只计有效正文样本；其余已完成且计时有效的步骤显示整体 TPS，口径逐步标注。</div>
     </section>
 
     <!-- Quota & Context Popover Card (1:1 replica of the right popover card in screenshot) -->
@@ -247,7 +248,7 @@
         <label class="field-label">
           <span>tok/s 测速口径</span>
           <select id="setting-speed-mode">
-            <option value="stream">正文阶段估算 (仅有效纯文本样本)</option>
+            <option value="stream">正文均速 (工具步骤显示整体 TPS)</option>
             <option value="total">请求整体吞吐 (含等待与思考)</option>
           </select>
         </label>

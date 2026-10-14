@@ -39,6 +39,25 @@ function sampleSummary(summary) {
   return `${summary?.sampleCount || 0}/${(summary?.sampleCount || 0) + (summary?.excludedCount || 0)} 步`;
 }
 
+// Display a measured request rate when the answer phase cannot be separated.
+// This presentation choice never changes the backend's homogeneous means.
+function stepSpeedDisplay(step = {}, mode = 'stream') {
+  const reason = speedReasonText(step.selectedSpeedReason || step.speedReason);
+  const valid = step.measurementVersion === 1 && step.isComplete === true;
+  if (valid && mode !== 'total' && !step.isCompactionStep && Number.isFinite(step.streamTokPerSec)) {
+    return { value: step.streamTokPerSec, estimated: true, label: '正文估算',
+      detail: step.responseShortSample ? '正文估算 · 短样本' : '正文估算',
+      explanation: reason || '正文阶段估算' };
+  }
+  if (valid && Number.isFinite(step.totalTokPerSec) && step.totalDurationSec > 0) {
+    return { value: step.totalTokPerSec, estimated: false, label: '整体吞吐',
+      detail: step.isCompactionStep ? '整体吞吐 · 压缩' : '整体吞吐',
+      explanation: `${mode !== 'total' && reason ? `${reason}；` : ''}总输出 Token（含思考）÷ 请求总耗时${mode !== 'total' ? '；不计正文均速' : ''}${step.isCompactionStep ? '；压缩不计均速' : ''}` };
+  }
+  return { value: null, estimated: false, label: '待计时', detail: reason || '计时不可用',
+    explanation: reason || '计时不可用' };
+}
+
 function formatTokens(num) {
   const n = Number(num || 0);
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -179,6 +198,7 @@ function renderTables(activeConv, modelBreakdown, speedMode = 'stream') {
         : '';
       const compTag = st.isCompactionStep ? ' [压缩汇总步]' : '';
       const reason = speedReasonText(st.selectedSpeedReason);
+      const displaySpeed = stepSpeedDisplay(st, speedMode);
       const timingSource = st.responseTimingSource === 'post_thinking_estimate' ? '总时长减记录的思考阶段（估算）' : st.responseTimingSource === 'native_text_stream' ? '无思考正文的原始流时长（估算）' : '不可用';
       const stepCostVal = Number(st.costUsd || 0);
       const stepCostDisplay = stepCostVal >= 1 ? `$${stepCostVal.toFixed(2)}` : `$${stepCostVal.toFixed(3)}`;
@@ -192,7 +212,7 @@ function renderTables(activeConv, modelBreakdown, speedMode = 'stream') {
       tr.innerHTML = `
         <td>#${Number(st.stepIndex)}${compTag ? '<span class="muted">⚡</span>' : ''}</td>
         <td>${escapeHtml(st.modelShort)}</td>
-        <td><strong style="color: var(--speed-accent)">${formatMetric(st.tokPerSec, ' tok/s', estimated)}</strong><div class="speed-detail muted">${escapeHtml(reason)}</div></td>
+        <td title="${escapeHtml(displaySpeed.explanation)}"><strong style="color: var(--speed-accent)">${formatMetric(displaySpeed.value, ' tok/s', displaySpeed.estimated)}</strong><div class="speed-detail muted">${escapeHtml(displaySpeed.detail)}</div></td>
         <td>${formatMetric(st.ttftSec, 's')}</td>
         <td>${formatTokens(st.contextTokens)} / +${Number(st.outputTokens)}</td>
         <td style="color: var(--cache-green)">${Number(st.cacheHitPct)}%</td>
@@ -321,15 +341,18 @@ function applyTelemetryToDom(data) {
 
   // 2. Status strip metrics
   const estimatedSpeed = settings.speedMode !== 'total';
-  $('tok-per-sec').textContent = formatMetric(active.latestTokPerSec, ' tok/s', estimatedSpeed);
-  $('speed-mode-toggle').title = `最新一步：${speedReasonText(active.latestSpeedReason) || (estimatedSpeed ? '正文阶段估算' : '请求整体吞吐')}；点击切换口径`;
+  const latestSpeed = stepSpeedDisplay(active.recentSteps?.[0], settings.speedMode);
+  $('tok-per-sec').textContent = formatMetric(latestSpeed.value, ' tok/s', latestSpeed.estimated);
+  $('latest-speed-basis').textContent = latestSpeed.label;
+  $('speed-mode-toggle').title = `最新一步：${latestSpeed.explanation}；点击切换均速口径`;
   $('ttft-value').textContent = formatMetric(active.latestTtftSec, 's');
   $('ttft-value').title = `原始首 Token 延迟，可能先返回思考内容；会话平均 ${formatMetric(active.ttftSummary?.avgSec, 's')}（${active.ttftSummary?.sampleCount || 0} 步）`;
   $('avg-speed-value').textContent = formatMetric(active.avgTokPerSec, '', estimatedSpeed);
+  $('avg-speed-label').textContent = estimatedSpeed ? '正文均速' : '整体均速';
   $('speed-sample-count').textContent = `有效 ${sampleSummary(active.speedSummary)}`;
   $('speed-sample-count').title = Object.entries(active.speedSummary?.excludedReasons || {}).map(([reason, count]) => `${speedReasonText(reason)}：${count} 步`).join('；') || '全部有效；自动压缩单独排除';
   $('speed-method-note').textContent = estimatedSpeed
-    ? '正文阶段估算；工具混合输出和起点不明的步骤不计均速，短样本单列。'
+    ? '正文均速只计有效正文样本；其余已完成且计时有效的步骤显示整体 TPS，口径逐步标注。'
     : '含思考的输出 Token ÷ 请求总耗时；不含调用之间的空闲和外部工具执行时间。';
   const latestStepCost = Number(active.latestStepCostUsd ?? active.recentSteps?.[0]?.costUsd ?? 0);
   if ($('step-cost-value')) {
@@ -343,7 +366,7 @@ function applyTelemetryToDom(data) {
   $('active-model-short').title = active.activeModelLabel || '';
   $('today-tokens').textContent = formatTokens(quotas.today?.tokens || 0);
   $('today-cost').textContent = `$${Number(quotas.today?.costUsd || 0).toFixed(2)}`;
-  $('speed-mode-badge').textContent = settings.speedMode === 'total' ? '整体吞吐' : '正文估算';
+  $('speed-mode-badge').textContent = settings.speedMode === 'total' ? '均速：整体吞吐' : '均速：正文估算';
 
   // 3. Context Window Popover Section
   const limitTokens = ctx.limitTokens || 256000;
