@@ -2,54 +2,42 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
-import {summarizeSpeed} from '../speed-metrics.mjs';
 
-const context = vm.createContext({window: {}});
-const source = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
-assert.match(source, /\ninit\(\);\s*$/);
-vm.runInContext(source.replace(/\ninit\(\);\s*$/, '\n'), context);
-const show = (step, mode = 'stream') => context.stepSpeedDisplay(step, mode);
-const tool = {measurementVersion: 1, isComplete: true, hasToolCalls: true,
-  outputTokens: 300, totalDurationSec: 10, totalTokPerSec: 30,
-  streamTokPerSec: null, responseSampleEligible: false,
-  speedReason: 'tool_timing_unavailable'};
-const answer = {measurementVersion: 1, isComplete: true, outputTokens: 600,
-  totalDurationSec: 10, totalTokPerSec: 60, streamTokPerSec: 100,
-  streamTokens: 500, streamDurationSec: 5, responseSampleEligible: true,
-  responseTimingSource: 'post_thinking_estimate'};
-
-test('completed tools have a labelled total TPS without contaminating the response mean', () => {
-  const display = show(tool);
-  assert.equal(display.value, 30);
-  assert.equal(display.label, '整体吞吐');
-  assert.equal(display.estimated, false);
-  assert.match(display.explanation, /不计正文均速/);
-  assert.equal(summarizeSpeed([tool, answer], 'stream').avgTokPerSec, 100);
-  assert.equal(summarizeSpeed([tool, answer], 'total').avgTokPerSec, 45);
-  assert.equal(tool.streamTokPerSec, null);
+function page() {
+  function element(){return {children:[],_html:'',textContent:'',title:'',scrollTop:0,
+    get innerHTML(){return this._html;},set innerHTML(s){this._html=s;this.children=[];},
+    appendChild(child){if(child.fragment)this.children.push(...child.children);else this.children.push(child);},
+    closest(){return null;}};}
+  const elements=Object.fromEntries(['tab-steps-btn','steps-tbody','models-tbody'].map(id=>[id,element()]));
+  const document={getElementById:id=>elements[id],createElement:element,createDocumentFragment:()=>({...element(),fragment:true})};
+  const source=readFileSync(new URL('../app.js',import.meta.url),'utf8');
+  assert.match(source,/\ninit\(\);\s*$/);
+  const ctx=vm.createContext({window:{},document});
+  vm.runInContext(source.replace(/\ninit\(\);\s*$/,'\n'),ctx);
+  return {ctx,elements};
+}
+const step={stepIndex:1,modelShort:'test',outputTokens:300,responseTokens:200,thinkingTokens:100,
+  totalDurationSec:10,tokPerSec:30,ttftSec:2,costUsd:.01};
+test('tools and text render one TPS column without per-row speed categories',()=>{
+  const {ctx,elements}=page();
+  ctx.renderTables({recentSteps:[{...step,hasToolCalls:true}]},[]);
+  const row=elements['steps-tbody'].children[0];
+  assert.match(row.innerHTML,/30\.0 tok\/s/);
+  assert.doesNotMatch(row.innerHTML,/正文估算|整体吞吐|≈/);
+  assert.match(row.title,/含等待与思考/);
 });
-test('answer and total modes keep their distinct labels and formulas', () => {
-  assert.equal(show(answer).value, 100);
-  assert.equal(show(answer).label, '正文估算');
-  assert.equal(show(answer).estimated, true);
-  assert.equal(show(answer, 'total').value, 60);
-  assert.equal(show(answer, 'total').label, '整体吞吐');
-  assert.equal(show({...answer, responseShortSample: true}).detail, '正文估算 · 短样本');
+test('unknown and zero are distinct, and insufficient timing explains the missing rate',()=>{
+  const {ctx,elements}=page();
+  ctx.renderTables({recentSteps:[{...step,tokPerSec:null,ttftSec:null,selectedSpeedReason:'short_timing'}]},[]);
+  assert.match(elements['steps-tbody'].children[0].innerHTML,/计时过短/);
+  assert.match(elements['steps-tbody'].children[0].innerHTML,/<td>—<\/td>/);
+  ctx.renderTables({recentSteps:[{...step,tokPerSec:0,ttftSec:0}]},[]);
+  assert.match(elements['steps-tbody'].children[0].innerHTML,/0\.0 tok\/s/);
+  assert.match(elements['steps-tbody'].children[0].innerHTML,/<td>0\.0s<\/td>/);
 });
-test('missing answer start can display measured total TPS, including zero output', () => {
-  assert.equal(show({...tool, hasToolCalls: false, speedReason: 'answer_start_unavailable'}).value, 30);
-  assert.equal(show({...tool, outputTokens: 0, totalTokPerSec: 0}).value, 0);
-});
-test('incomplete and legacy rows never acquire a fabricated total TPS', () => {
-  assert.equal(show({...tool, isComplete: false}).value, null);
-  assert.equal(show({...tool, measurementVersion: null}).value, null);
-  assert.equal(show({...tool, totalTokPerSec: null}).value, null);
-  assert.equal(show({...tool, totalDurationSec: 0}).value, null);
-  assert.equal(show().value, null);
-});
-test('compaction can show its measured rate while remaining excluded from means', () => {
-  const step = {...tool, isCompactionStep: true, speedReason: 'compaction'};
-  assert.equal(show(step).value, 30);
-  assert.match(show(step).detail, /压缩/);
-  assert.equal(summarizeSpeed([step], 'total').sampleCount, 0);
+test('a TTFT-only correction refreshes the table even when TPS and step count do not change',()=>{
+  const {ctx,elements}=page();
+  ctx.renderTables({recentSteps:[step]},[]);
+  ctx.renderTables({recentSteps:[{...step,ttftSec:12.974}]},[]);
+  assert.match(elements['steps-tbody'].children[0].innerHTML,/<td>13\.0s<\/td>/);
 });

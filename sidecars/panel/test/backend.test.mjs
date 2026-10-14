@@ -22,20 +22,21 @@ test('failed migration retains all accounting, makes legacy speed and TTFT unava
 test('successful migration rebuilds measurements and uses the same mean in both tables',async()=>{
   const h=backendHarness({cache:{test:old},trajectories:{test:raw}});
   const p=await h.buildTelemetryPayloadInternal('test');
-  assert.equal(p.activeConversation.latestTokPerSec,100);
+  assert.equal(p.activeConversation.latestTokPerSec,60);
   assert.equal(p.activeConversation.latestTtftSec,3);
-  assert.equal(p.activeConversation.avgTokPerSec,100);
-  assert.equal(p.modelBreakdown[0].avgTokPerSec,100);
+  assert.equal(p.activeConversation.avgTokPerSec,60);
+  assert.equal(p.modelBreakdown[0].avgTokPerSec,60);
   assert.equal(p.modelBreakdown[0].speedSummary.sampleCount,1);
   assert.equal(p.consumption.session.totalTokens,900);
-  assert.match(h.state.saves[0].data.test.signature,/^v6-speed-metrics:/);
+  assert.match(h.state.saves[0].data.test.signature,/^v7-request-throughput:/);
 });
-test('mode switching applies to latest step, session mean and per-model mean',async()=>{
-  const h=backendHarness({cache:{test:old},trajectories:{test:raw},settings:{speedMode:'total'}});
+test('a legacy stream setting cannot re-enable mixed speed formulas',async()=>{
+  const h=backendHarness({cache:{test:old},trajectories:{test:raw},settings:{speedMode:'stream'}});
   const p=await h.buildTelemetryPayloadInternal('test');
   assert.equal(p.activeConversation.latestTokPerSec,60);
   assert.equal(p.activeConversation.avgTokPerSec,60);
   assert.equal(p.modelBreakdown[0].avgTokPerSec,60);
+  assert.equal(p.settings.speedMode,undefined);
 });
 test('a malformed successful RPC cannot erase previously recorded usage',async()=>{
   const h=backendHarness({cache:{test:old},trajectories:{test:{}}});
@@ -50,4 +51,17 @@ test('a partial trajectory cannot replace a complete historical cache',async()=>
   assert.equal(p.consumption.session.totalTokens,900);
   assert.equal(h.state.saves.length,0);
   assert.match(h.state.errors[0],/Incomplete trajectory/);
+});
+
+test('a TTFT-only correction is persisted even when usage, duration and signature match',async()=>{
+  const h=backendHarness({cache:{test:old},trajectories:{test:raw},summaries:{test:{
+    stepCount:1,lastModifiedTime:'2026-01-01T00:00:10Z',status:'CASCADE_RUN_STATUS_RUNNING',
+  }}});
+  await h.buildTelemetryPayloadInternal('test');
+  h.state.trajectories.test=structuredClone(raw);
+  h.state.trajectories.test.trajectory.generatorMetadata[0].chatModel.timeToFirstToken='9s';
+  const next=await h.buildTelemetryPayloadInternal('test');
+  assert.equal(next.activeConversation.latestTtftSec,9);
+  assert.equal(h.state.saves.length,2);
+  assert.equal(h.state.saves[1].data.test.steps[0].ttftSec,9);
 });

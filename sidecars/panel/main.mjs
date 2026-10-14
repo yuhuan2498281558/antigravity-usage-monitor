@@ -20,7 +20,6 @@ const DEFAULT_SETTINGS = {
   weeklyTokenBudget: 150000000, // 150M tokens default custom weekly target
   weeklyCostBudget: 100,       // $100 default custom weekly cost target (matches Ultra weekly pool)
   weeklyLimitMode: 'official', // 'official' | 'custom_tokens' | 'custom_cost'
-  speedMode: 'stream',         // Answer-phase estimate, or request-level throughput; never mixed.
 };
 
 // Official API pricing in USD per 1M tokens (Input, CacheRead, Output incl. Thinking)
@@ -59,7 +58,7 @@ const PLACEHOLDER_MAP = {
 };
 
 // In-memory cache of trajectory step usage: cascadeId -> { signature, steps }
-const CACHE_SCHEMA_VERSION = 'v6-speed-metrics';
+const CACHE_SCHEMA_VERSION = 'v7-request-throughput';
 let trajectoryCache = Object.fromEntries(Object.entries(loadJson(CACHE_FILE, {})).map(([id, entry]) => [
   id, { ...entry, steps: (entry.steps || []).map(normalizeCachedStep) },
 ]));
@@ -85,7 +84,8 @@ function saveJson(filePath, data) {
 }
 
 function loadSettings() {
-  return { ...DEFAULT_SETTINGS, ...loadJson(SETTINGS_FILE, {}) };
+  const { speedMode: _legacySpeedMode, ...settings } = loadJson(SETTINGS_FILE, {});
+  return { ...DEFAULT_SETTINGS, ...settings };
 }
 
 function roundMetric(value) {
@@ -618,15 +618,12 @@ async function buildTelemetryPayloadInternal(
           if (Number(trajRes.numTotalSteps) > rawSteps.length) throw new Error('Incomplete trajectory; retaining cached usage');
           const generatorMeta = trajRes?.trajectory?.generatorMetadata || [];
           const steps = extractModelSteps(rawSteps, generatorMeta);
-          const prevLast = prev?.steps?.[prev.steps.length - 1];
           const nextLast = steps[steps.length - 1];
           const stepsChanged =
             !prev ||
             prev.signature !== sig ||
             Boolean(prev.wasRunning) !== isRunning ||
-            prev.steps?.length !== steps.length ||
-            prevLast?.outputTokens !== nextLast?.outputTokens ||
-            prevLast?.totalDurationSec !== nextLast?.totalDurationSec;
+            JSON.stringify(prev.steps) !== JSON.stringify(steps);
 
           const lastStepMs = nextLast?.createdAtMs || 0;
           const resolvedLastModMs = Math.max(conv.lastModifiedMs || 0, lastStepMs);
@@ -662,9 +659,7 @@ async function buildTelemetryPayloadInternal(
   const activeEntry = activeCascadeId ? trajectoryCache[activeCascadeId] : null;
   const activeSteps = activeEntry?.steps || [];
 
-  const useStreamSpeed = settings.speedMode !== 'total';
-  const speedMode = useStreamSpeed ? 'stream' : 'total';
-  const sessionSpeed = summarizeSpeed(activeSteps, speedMode);
+  const sessionSpeed = summarizeSpeed(activeSteps);
   const sessionTtft = summarizeTtft(activeSteps);
   let sessionCostUsd = 0;
   let sessionInputTokens = 0;
@@ -673,7 +668,7 @@ async function buildTelemetryPayloadInternal(
   const enrichedActiveSteps = activeSteps.map((st) => {
     const mInfo = resolveModelInfo(st.modelKey, dynamicModelMap, st.apiProvider);
     const costUsd = computeStepCost(st, mInfo.pricing);
-    const metric = speedMetric(st, speedMode);
+    const metric = speedMetric(st);
 
     sessionCostUsd += costUsd;
     sessionInputTokens += st.inputTokens;
@@ -822,7 +817,7 @@ async function buildTelemetryPayloadInternal(
           });
         }
         const agg = perModelStats.get(mInfo.label);
-        accumulateSpeed(agg.speedAccumulator, st, speedMode);
+        accumulateSpeed(agg.speedAccumulator, st);
 
         agg.calls += 1;
         agg.inputTokens += st.inputTokens;
@@ -916,7 +911,6 @@ async function buildTelemetryPayloadInternal(
       latestTokPerSec: latestEnriched?.tokPerSec ?? null,
       latestTtftSec: latestEnriched?.ttftSec ?? null,
       latestSpeedReason: latestEnriched?.selectedSpeedReason ?? null,
-      latestTotalTokPerSec: roundMetric(speedMetric(latestEnriched || {}, 'total').value),
       avgTokPerSec: sessionAvgTokPerSec,
       speedSummary: sessionSpeed,
       ttftSummary: sessionTtft,
@@ -1089,7 +1083,6 @@ app.api('/api/settings', (data, req) => {
     weeklyTokenBudget: Number(data.weeklyTokenBudget || current.weeklyTokenBudget),
     weeklyCostBudget: Number(data.weeklyCostBudget || current.weeklyCostBudget),
     weeklyLimitMode: data.weeklyLimitMode || current.weeklyLimitMode,
-    speedMode: data.speedMode || current.speedMode,
   };
   saveJson(SETTINGS_FILE, updated);
   return updated;

@@ -191,7 +191,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  cursor: pointer;
+  cursor: default;
   user-select: none;
 }
 
