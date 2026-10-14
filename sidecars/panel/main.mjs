@@ -58,7 +58,7 @@ const PLACEHOLDER_MAP = {
 };
 
 // In-memory cache of trajectory step usage: cascadeId -> { signature, steps }
-const CACHE_SCHEMA_VERSION = 'v4';
+const CACHE_SCHEMA_VERSION = 'v5';
 let trajectoryCache = loadJson(CACHE_FILE, {});
 const inFlightRequests = new Map();
 let quotaSummaryCache = { ts: 0, data: null, error: null };
@@ -294,8 +294,9 @@ function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     const thinkingDurationSec = parseDurationSec(p.thinkingDuration);
     const respText = String(p.modifiedResponse || p.response || '').trim();
     const hasVisibleText = respText.length > 0;
+    const hasToolCalls = Array.isArray(p.toolCalls) && p.toolCalls.length > 0;
 
-    const ttftSec = nativeTtftSec > 0 ? nativeTtftSec : rawViewableSec;
+    let ttftSec = nativeTtftSec > 0 ? nativeTtftSec : rawViewableSec;
     let streamTokens = outputTokens;
     let streamDurationSec = 0;
     let speedBasis = 'model_stream';
@@ -305,30 +306,47 @@ function extractModelSteps(rawSteps = [], generatorMetadata = []) {
         ? totalDurationSec - thinkingDurationSec
         : afterViewableSec;
 
-    if (hasVisibleText && responseTokens > 0 && postThinkingSec >= 0.2) {
+    if (hasVisibleText && responseTokens > 0 && postThinkingSec >= 0.35) {
       streamTokens = responseTokens;
       streamDurationSec = postThinkingSec;
       speedBasis = 'response_stream';
-    } else if (nativeStreamSec >= 0.2 && outputTokens > 0) {
-      streamTokens = outputTokens;
+    } else if (
+      nativeStreamSec >= 1.0 &&
+      outputTokens > 0 &&
+      (!hasToolCalls || nativeStreamSec >= totalDurationSec * 0.35)
+    ) {
+      // Unbuffered streaming (e.g. write_to_file streaming file content)
+      streamTokens = responseTokens > 0 ? responseTokens : outputTokens;
       streamDurationSec = nativeStreamSec;
       speedBasis = 'native_stream';
-    } else if (afterViewableSec >= 0.25 && outputTokens > 0) {
-      streamTokens = outputTokens;
-      streamDurationSec = afterViewableSec;
-      speedBasis = 'viewable_stream';
     } else {
+      // Buffered tool call (e.g. run_command where server buffers JSON until completion):
+      // use totalDurationSec for decoding rate, and thinkingDurationSec (if < total) for TTFT
       streamTokens = outputTokens;
       streamDurationSec = totalDurationSec;
       speedBasis = 'total_fallback';
+      if (!hasVisibleText && hasToolCalls && thinkingDurationSec > 0 && thinkingDurationSec >= totalDurationSec * 0.9) {
+        // Server merged thinking + buffered tool generation into thinkingDuration;
+        // estimate true TTFT from thinking token ratio
+        const thinkRatio = outputTokens > 0 ? Math.min(0.85, thinkingTokens / outputTokens) : 0.2;
+        ttftSec = Math.max(0.4, totalDurationSec * thinkRatio);
+      }
     }
 
     const totalTokPerSec =
       totalDurationSec >= 0.12 && outputTokens > 0 ? outputTokens / totalDurationSec : 0;
-    const streamTokPerSec =
+    let streamTokPerSec =
       streamDurationSec >= 0.12 && streamTokens > 0
         ? streamTokens / streamDurationSec
         : totalTokPerSec;
+
+    // Guard against mixed text + buffered large tool call spikes
+    if (hasToolCalls && streamTokPerSec > 260 && totalTokPerSec > 0 && totalTokPerSec < 180) {
+      streamTokens = outputTokens;
+      streamDurationSec = totalDurationSec;
+      streamTokPerSec = totalTokPerSec;
+      speedBasis = 'total_fallback';
+    }
 
     const estimatedContextTokens = Number(ctxWinMeta?.estimatedTokensUsed || 0);
     const maxContextBudgetTokens = Number(ctxWinMeta?.maxContextTokens || 256000);
@@ -822,6 +840,10 @@ async function buildTelemetryPayloadInternal(
     const totalPrompt = st.inputTokens + st.cacheReadTokens;
     const cacheHitPct = totalPrompt > 0 ? (st.cacheReadTokens / totalPrompt) * 100 : 0;
 
+    const inCostUsd = (st.inputTokens / 1_000_000) * mInfo.pricing.input;
+    const cacheCostUsd = (st.cacheReadTokens / 1_000_000) * mInfo.pricing.cache;
+    const outCostUsd = (st.outputTokens / 1_000_000) * mInfo.pricing.output;
+
     return {
       ...st,
       modelLabel: st.isCompactionStep ? `${mInfo.label} [自动压缩]` : mInfo.label,
@@ -831,6 +853,9 @@ async function buildTelemetryPayloadInternal(
       ttftSec: +st.ttftSec.toFixed(1),
       cacheHitPct: +cacheHitPct.toFixed(1),
       costUsd: +costUsd.toFixed(4),
+      inCostUsd: +inCostUsd.toFixed(4),
+      cacheCostUsd: +cacheCostUsd.toFixed(4),
+      outCostUsd: +outCostUsd.toFixed(4),
       contextTokens: st.inputTokens + st.cacheReadTokens + st.outputTokens,
     };
   });
@@ -1054,6 +1079,7 @@ async function buildTelemetryPayloadInternal(
       latestTokPerSec: latestEnriched?.tokPerSec ?? 0,
       latestTtftSec: latestEnriched?.ttftSec ?? 0,
       avgTokPerSec: sessionAvgTokPerSec,
+      latestStepCostUsd: latestEnriched?.costUsd ?? 0,
       sessionCostUsd: +sessionCostUsd.toFixed(2),
       latestCacheHitPct,
       sessionCacheHitPct,
@@ -1071,7 +1097,7 @@ async function buildTelemetryPayloadInternal(
         thinkingTokens: ctxThinking,
         responseTokens: ctxResponse,
       },
-      recentSteps: enrichedActiveSteps.slice(-15).reverse(),
+      recentSteps: enrichedActiveSteps.slice().reverse(),
     },
     consumption: {
       selectedRange: {

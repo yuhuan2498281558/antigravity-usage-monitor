@@ -742,7 +742,10 @@ body {
 }
 
 .table-scroll {
+  max-height: 420px;
+  overflow-y: auto;
   overflow-x: auto;
+  border-radius: var(--radius-sm);
 }
 
 .data-table {
@@ -761,8 +764,13 @@ body {
 }
 
 .data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--card, #ffffff);
   color: var(--muted-foreground, #656d76);
-  font-weight: 500;
+  font-weight: 600;
+  box-shadow: 0 1px 0 var(--border, #eaeef2);
 }
 
 .settings-title {

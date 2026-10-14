@@ -132,40 +132,75 @@ function renderAllPools(pools, activeFamily) {
   }
 }
 
+let lastStepsRenderSig = '';
+let lastModelsRenderSig = '';
+
 function renderTables(activeConv, modelBreakdown) {
-  const stepsTbody = $('steps-tbody');
-  stepsTbody.innerHTML = '';
-  for (const st of activeConv.recentSteps || []) {
-    const tr = document.createElement('tr');
-    const thinkInfo = st.thinkingTokens
-      ? `思考: ${st.thinkingTokens} tok${st.thinkingDurationSec ? ` (${st.thinkingDurationSec}s)` : ''} | `
-      : '';
-    const compTag = st.isCompactionStep ? ' [压缩汇总步]' : '';
-    tr.title = `${thinkInfo}正文/工具输出: ${st.responseTokens} tok | 流耗时: ${st.streamDurationSec}s | 总耗时: ${st.totalDurationSec}s | 单步费用: $${Number(st.costUsd || 0).toFixed(4)}`;
-    tr.innerHTML = `
-      <td>#${Number(st.stepIndex)}${compTag ? '<span class="muted">⚡</span>' : ''}</td>
-      <td>${escapeHtml(st.modelShort)}</td>
-      <td><strong style="color: var(--speed-accent)">${Number(st.tokPerSec).toFixed(1)}</strong> tok/s</td>
-      <td>${Number(st.ttftSec).toFixed(1)}s</td>
-      <td>${formatTokens(st.contextTokens)} / +${Number(st.outputTokens)}</td>
-      <td style="color: var(--cache-green)">${Number(st.cacheHitPct)}%</td>
-    `;
-    stepsTbody.appendChild(tr);
+  const steps = activeConv.recentSteps || [];
+  const tabStepsBtn = $('tab-steps-btn');
+  if (tabStepsBtn) {
+    tabStepsBtn.textContent = `当前会话步骤测速与计费 (${steps.length}步)`;
   }
 
-  const modelsTbody = $('models-tbody');
-  modelsTbody.innerHTML = '';
-  for (const m of modelBreakdown || []) {
-    const tr = document.createElement('tr');
-    const pricePrefix = m.isEstimatedPrice ? '≈$' : '$';
-    tr.innerHTML = `
-      <td><strong>${escapeHtml(m.shortName)}</strong> <span class="muted">(${Number(m.calls)})</span></td>
-      <td>${Number(m.calls)}</td>
-      <td>${Number(m.avgTokPerSec).toFixed(1)} tok/s</td>
-      <td>${formatTokens(m.totalTokens)}</td>
-      <td>${pricePrefix}${Number(m.costUsd).toFixed(2)}</td>
-    `;
-    modelsTbody.appendChild(tr);
+  const stepsSig = `${activeConv.cascadeId || ''}:${steps.length}:${steps[0]?.stepIndex ?? -1}:${steps[0]?.tokPerSec ?? 0}:${steps[0]?.costUsd ?? 0}`;
+  if (stepsSig !== lastStepsRenderSig) {
+    lastStepsRenderSig = stepsSig;
+    const stepsTbody = $('steps-tbody');
+    const scrollParent = stepsTbody.closest('.table-scroll');
+    const prevScrollTop = scrollParent ? scrollParent.scrollTop : 0;
+
+    const frag = document.createDocumentFragment();
+    for (const st of steps) {
+      const tr = document.createElement('tr');
+      const thinkInfo = st.thinkingTokens
+        ? `思考: ${st.thinkingTokens} tok${st.thinkingDurationSec ? ` (${st.thinkingDurationSec}s)` : ''} | `
+        : '';
+      const compTag = st.isCompactionStep ? ' [压缩汇总步]' : '';
+      const stepCostVal = Number(st.costUsd || 0);
+      const stepCostDisplay = stepCostVal >= 1 ? `$${stepCostVal.toFixed(2)}` : `$${stepCostVal.toFixed(3)}`;
+      const costStyle =
+        stepCostVal >= 0.15
+          ? 'color: var(--speed-accent); font-weight: 700;'
+          : 'color: var(--foreground); font-weight: 600;';
+      const pct5h = (stepCostVal / 0.25).toFixed(2);
+      const pctWk = stepCostVal.toFixed(3);
+      tr.title = `单步消费: $${stepCostVal.toFixed(4)} (入 $${Number(st.inCostUsd || 0).toFixed(4)} + 缓 $${Number(st.cacheCostUsd || 0).toFixed(4)} + 出 $${Number(st.outCostUsd || 0).toFixed(4)} | 约合 5h ${pct5h}% / 周限 ${pctWk}%) | ${thinkInfo}正文/工具输出: ${st.responseTokens} tok | 流耗时: ${st.streamDurationSec}s | 总耗时: ${st.totalDurationSec}s`;
+      tr.innerHTML = `
+        <td>#${Number(st.stepIndex)}${compTag ? '<span class="muted">⚡</span>' : ''}</td>
+        <td>${escapeHtml(st.modelShort)}</td>
+        <td><strong style="color: var(--speed-accent)">${Number(st.tokPerSec).toFixed(1)}</strong> tok/s</td>
+        <td>${Number(st.ttftSec).toFixed(1)}s</td>
+        <td>${formatTokens(st.contextTokens)} / +${Number(st.outputTokens)}</td>
+        <td style="color: var(--cache-green)">${Number(st.cacheHitPct)}%</td>
+        <td style="${costStyle}">${stepCostDisplay}</td>
+      `;
+      frag.appendChild(tr);
+    }
+    stepsTbody.innerHTML = '';
+    stepsTbody.appendChild(frag);
+    if (scrollParent && prevScrollTop > 0) {
+      scrollParent.scrollTop = prevScrollTop;
+    }
+  }
+
+  const models = modelBreakdown || [];
+  const modelsSig = models.map((m) => `${m.modelId}:${m.calls}:${m.totalTokens}:${m.avgTokPerSec}`).join('|');
+  if (modelsSig !== lastModelsRenderSig) {
+    lastModelsRenderSig = modelsSig;
+    const modelsTbody = $('models-tbody');
+    modelsTbody.innerHTML = '';
+    for (const m of models) {
+      const tr = document.createElement('tr');
+      const pricePrefix = m.isEstimatedPrice ? '≈$' : '$';
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(m.shortName)}</strong> <span class="muted">(${Number(m.calls)})</span></td>
+        <td>${Number(m.calls)}</td>
+        <td>${Number(m.avgTokPerSec).toFixed(1)} tok/s</td>
+        <td>${formatTokens(m.totalTokens)}</td>
+        <td>${pricePrefix}${Number(m.costUsd).toFixed(2)}</td>
+      `;
+      modelsTbody.appendChild(tr);
+    }
   }
 }
 
@@ -264,6 +299,10 @@ function applyTelemetryToDom(data) {
   $('tok-per-sec').textContent = `${Number(active.latestTokPerSec || 0).toFixed(1)} tok/s`;
   $('ttft-value').textContent = `${Number(active.latestTtftSec || 0).toFixed(1)}s`;
   $('avg-speed-value').textContent = `${Number(active.avgTokPerSec || 0).toFixed(1)}`;
+  const latestStepCost = Number(active.latestStepCostUsd ?? active.recentSteps?.[0]?.costUsd ?? 0);
+  if ($('step-cost-value')) {
+    $('step-cost-value').textContent = `$${latestStepCost.toFixed(3)}`;
+  }
   $('session-cost-value').textContent = `$${Number(active.sessionCostUsd || 0).toFixed(2)}`;
   $('cache-hit-value').textContent = `${active.latestCacheHitPct ?? 0}%`;
   renderParallelograms(ctx.usedPct || 0);

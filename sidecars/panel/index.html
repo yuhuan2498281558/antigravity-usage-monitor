@@ -33,7 +33,7 @@
         <span class="metric-item">首字 <strong id="ttft-value">0.0s</strong></span>
         <span class="metric-item">均速 <strong id="avg-speed-value">0.0</strong></span>
         <span class="strip-divider">|</span>
-        <strong id="session-cost-value" class="cost-value">$0.00</strong>
+        <span class="metric-item" title="最新一步消费 / 当前会话累计消费">本步 <strong id="step-cost-value" class="cost-value">$0.000</strong> · 累计 <strong id="session-cost-value" class="cost-value">$0.00</strong></span>
         <span class="metric-item">缓存 <strong id="cache-hit-value" class="cache-value">0%</strong></span>
         <span class="strip-divider">|</span>
         <span class="metric-item ctx-inline-trigger" id="ctx-inline-trigger" title="点击展开上下文细分">
@@ -198,7 +198,7 @@
     <!-- Detailed Breakdown Card (Toggled by 查看详细明细) -->
     <section id="details-card" class="details-card" hidden>
       <div class="tabs-header">
-        <button type="button" class="tab-btn active" data-tab="steps">当前会话步骤测速</button>
+        <button type="button" class="tab-btn active" data-tab="steps" id="tab-steps-btn">当前会话步骤测速与计费</button>
         <button type="button" class="tab-btn" data-tab="models" id="tab-models-btn">按模型汇总 (全部时间)</button>
       </div>
 
@@ -213,6 +213,7 @@
                 <th>首字</th>
                 <th>上下文/输出</th>
                 <th>缓存</th>
+                <th>消费</th>
               </tr>
             </thead>
             <tbody id="steps-tbody"></tbody>
