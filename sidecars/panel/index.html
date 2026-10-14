@@ -61,7 +61,7 @@
         <div class="section-row clickable" id="ctx-detail-toggle">
           <span class="section-label">上下文窗口</span>
           <span class="section-value">
-            <span id="ctx-summary-text">0 / 1M (0%)</span>
+            <span id="ctx-summary-text">0 / 256k (0%)</span>
             <span class="chevron" id="ctx-chevron">›</span>
           </span>
         </div>
@@ -82,8 +82,9 @@
           </div>
           <div class="ctx-limit-switch">
             <span>窗口上限基准:</span>
+            <button type="button" class="chip-btn active" data-ctx-limit="256000" title="官方 256k 自动压缩阈值">256k(压缩)</button>
             <button type="button" class="chip-btn" data-ctx-limit="200000">200k</button>
-            <button type="button" class="chip-btn active" data-ctx-limit="1000000">1M</button>
+            <button type="button" class="chip-btn" data-ctx-limit="1000000">1M</button>
             <button type="button" class="chip-btn" data-ctx-limit="2000000">2M</button>
           </div>
         </div>
@@ -121,21 +122,21 @@
             </div>
             <div class="cons-card-main">
               <strong class="cons-tokens" id="cons-session-tokens">0</strong>
-              <span class="cons-cost" id="cons-session-cost">≈$0.00</span>
+              <span class="cons-cost" id="cons-session-cost">$0.00</span>
             </div>
             <div class="cons-card-sub" id="cons-session-breakdown">入 0 · 缓 0 · 出 0</div>
-            <div class="cons-card-foot muted" id="cons-session-pool">占同期账号 0%</div>
+            <div class="cons-card-foot muted" id="cons-session-pool">占同期本机 0%</div>
           </div>
 
           <!-- Account Total Consumption -->
           <div class="consumption-card account-card">
             <div class="cons-card-header">
-              <span class="cons-card-title">👤 本账号总消耗</span>
+              <span class="cons-card-title" title="统计本机所有历史会话步骤的真实账面消耗">👤 本机累计消耗</span>
               <span class="cons-card-badge" id="cons-account-meta">0 会话 · 0 步</span>
             </div>
             <div class="cons-card-main">
               <strong class="cons-tokens" id="cons-account-tokens">0</strong>
-              <span class="cons-cost" id="cons-account-cost">≈$0.00</span>
+              <span class="cons-cost" id="cons-account-cost">$0.00</span>
             </div>
             <div class="cons-card-sub" id="cons-account-breakdown">入 0 · 缓 0 · 出 0</div>
             <div class="cons-card-foot muted" id="cons-account-pool">Gemini $0.00 · Claude/GPT $0.00</div>
@@ -149,16 +150,16 @@
       <div class="popover-section">
         <div class="section-row">
           <span class="section-label">您的使用限额 · <span id="account-tier-label">Pro</span></span>
-          <span class="arrow-icon" id="pool-switch-toggle" title="点击展开全部模型池 5h 限额">→</span>
+          <span class="arrow-icon" id="pool-switch-toggle" title="点击展开全部模型池 5h / 周限额">→</span>
         </div>
 
         <!-- 5h Session Quota (Active Pool) -->
         <div class="quota-block">
           <div class="section-row">
-            <span class="quota-title" id="session-quota-title">会话限额</span>
+            <span class="quota-title" id="session-quota-title">5h 限额</span>
             <span class="quota-meta">
               <span id="session-reset-text">-- 后重置</span>
-              <strong id="session-used-pct">0%</strong>
+              <strong id="session-used-pct">--</strong>
             </span>
           </div>
           <div class="single-progress-track">
@@ -169,20 +170,20 @@
         <!-- All Model Pools (Gemini / Claude / GPT) 5h Quotas -->
         <div id="all-pools-container" class="all-pools-box"></div>
 
-        <!-- Weekly All Models Quota -->
+        <!-- Weekly Pool Quota -->
         <div class="quota-block">
           <div class="section-row">
-            <span class="quota-title">每周·所有模型</span>
+            <span class="quota-title" id="weekly-quota-title">每周限额 (Gemini)</span>
             <span class="quota-meta">
               <span id="weekly-reset-text">-- 后重置</span>
-              <strong id="weekly-used-pct">0%</strong>
+              <strong id="weekly-used-pct">--</strong>
             </span>
           </div>
           <div class="single-progress-track">
             <div id="bar-weekly-quota" class="bar-fill" style="width: 0%"></div>
           </div>
           <div class="weekly-sub-meta muted">
-            <span>本周累计: <strong id="weekly-tokens-text">0</strong> (<strong id="weekly-cost-text">≈$0.00</strong>)</span>
+            <span>本周本机: <strong id="weekly-tokens-text">0</strong> (<strong id="weekly-cost-text">$0.00</strong>)</span>
             <span id="credits-badge"></span>
           </div>
         </div>
@@ -257,12 +258,12 @@
           </select>
         </label>
         <label class="field-label">
-          <span>自定义每周 Token 预算基准 (默认 80M)</span>
-          <input type="number" id="setting-weekly-tokens" min="100000" step="1000000" value="80000000">
+          <span>自定义每周 Token 预算基准 (默认 150M)</span>
+          <input type="number" id="setting-weekly-tokens" min="100000" step="1000000" value="150000000">
         </label>
         <label class="field-label">
-          <span>自定义每周费用预算基准 (USD $)</span>
-          <input type="number" id="setting-weekly-cost" min="1" step="5" value="35">
+          <span>自定义每周费用预算基准 (USD $, Ultra 默认 $100)</span>
+          <input type="number" id="setting-weekly-cost" min="1" step="5" value="100">
         </label>
       </div>
       <div class="settings-actions">

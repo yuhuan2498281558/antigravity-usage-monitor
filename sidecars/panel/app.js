@@ -117,15 +117,16 @@ function renderAllPools(pools, activeFamily) {
     const row = document.createElement('div');
     row.className = 'pool-mini-row';
     const isCurrent = p.family === activeFamily;
-    const used5h = Number(p.usedPct ?? 0).toFixed(1);
-    const rem5h = Number(p.remainingPct ?? 100).toFixed(1);
+    const has5h = p.usedPct != null && p.remainingPct != null;
+    const used5h = has5h ? `${Number(p.usedPct).toFixed(1)}%` : '--';
+    const rem5h = has5h ? `${Number(p.remainingPct).toFixed(1)}%` : '--';
     const wkPart =
-      p.weeklyUsedPct != null
-        ? ` · 周已用 <strong>${Number(p.weeklyUsedPct).toFixed(1)}%</strong> (余 ${Number(p.weeklyRemainingPct ?? 100).toFixed(1)}%)`
+      p.weeklyUsedPct != null && p.weeklyRemainingPct != null
+        ? ` · 周已用 <strong>${Number(p.weeklyUsedPct).toFixed(1)}%</strong> (余 ${Number(p.weeklyRemainingPct).toFixed(1)}%)`
         : '';
     row.innerHTML = `
       <span class="pool-mini-name">${isCurrent ? '● ' : ''}${escapeHtml(p.poolName)}</span>
-      <span class="pool-mini-meta">5h已用 <strong>${used5h}%</strong> (余 ${rem5h}%)${wkPart}</span>
+      <span class="pool-mini-meta">5h已用 <strong>${used5h}</strong> (余 ${rem5h})${wkPart}</span>
     `;
     box.appendChild(row);
   }
@@ -139,9 +140,10 @@ function renderTables(activeConv, modelBreakdown) {
     const thinkInfo = st.thinkingTokens
       ? `思考: ${st.thinkingTokens} tok${st.thinkingDurationSec ? ` (${st.thinkingDurationSec}s)` : ''} | `
       : '';
-    tr.title = `${thinkInfo}正文/工具输出: ${st.responseTokens} tok | 流耗时: ${st.streamDurationSec}s | 总耗时: ${st.totalDurationSec}s`;
+    const compTag = st.isCompactionStep ? ' [压缩汇总步]' : '';
+    tr.title = `${thinkInfo}正文/工具输出: ${st.responseTokens} tok | 流耗时: ${st.streamDurationSec}s | 总耗时: ${st.totalDurationSec}s | 单步费用: $${Number(st.costUsd || 0).toFixed(4)}`;
     tr.innerHTML = `
-      <td>#${Number(st.stepIndex)}</td>
+      <td>#${Number(st.stepIndex)}${compTag ? '<span class="muted">⚡</span>' : ''}</td>
       <td>${escapeHtml(st.modelShort)}</td>
       <td><strong style="color: var(--speed-accent)">${Number(st.tokPerSec).toFixed(1)}</strong> tok/s</td>
       <td>${Number(st.ttftSec).toFixed(1)}s</td>
@@ -155,12 +157,13 @@ function renderTables(activeConv, modelBreakdown) {
   modelsTbody.innerHTML = '';
   for (const m of modelBreakdown || []) {
     const tr = document.createElement('tr');
+    const pricePrefix = m.isEstimatedPrice ? '≈$' : '$';
     tr.innerHTML = `
       <td><strong>${escapeHtml(m.shortName)}</strong> <span class="muted">(${Number(m.calls)})</span></td>
       <td>${Number(m.calls)}</td>
       <td>${Number(m.avgTokPerSec).toFixed(1)} tok/s</td>
       <td>${formatTokens(m.totalTokens)}</td>
-      <td>≈$${Number(m.costUsd).toFixed(2)}</td>
+      <td>${pricePrefix}${Number(m.costUsd).toFixed(2)}</td>
     `;
     modelsTbody.appendChild(tr);
   }
@@ -188,10 +191,13 @@ function renderConsumptionCards(data) {
     btn.classList.toggle('active', btn.dataset.timeRange === selectedTimeRange);
   });
 
+  const sessPrefix = sess.hasEstimatedPricing ? '≈$' : '$';
+  const acctPrefix = acct.hasEstimatedPricing ? '≈$' : '$';
+
   // 1. Current conversation consumption card
   $('cons-session-steps').textContent = `${sess.calls || 0} 步`;
   $('cons-session-tokens').textContent = formatTokens(sess.totalTokens || 0);
-  $('cons-session-cost').textContent = `≈$${Number(sess.costUsd || 0).toFixed(2)}`;
+  $('cons-session-cost').textContent = `${sessPrefix}${Number(sess.costUsd || 0).toFixed(2)}`;
   $('cons-session-breakdown').textContent = `入 ${formatTokens(sess.inputTokens)} · 缓 ${formatTokens(sess.cacheReadTokens)} · 出 ${formatTokens(sess.outputTokens)}`;
   $('cons-session-breakdown').title = `新增输入: ${sess.inputTokens || 0} | 缓存读取: ${sess.cacheReadTokens || 0} (${sess.cacheHitPct || 0}%) | 思考输出: ${sess.thinkingTokens || 0} | 正文输出: ${sess.responseTokens || 0}`;
 
@@ -202,15 +208,15 @@ function renderConsumptionCards(data) {
   if (selectedTimeRange !== 'all' && (sessAll.totalTokens || 0) > (sess.totalTokens || 0)) {
     $('cons-session-pool').textContent = `占同期 ${sharePct}% · 全对话 ${formatTokens(sessAll.totalTokens)} ($${Number(sessAll.costUsd || 0).toFixed(2)})`;
   } else {
-    $('cons-session-pool').textContent = `占同期账号 ${sharePct}% · 缓存命中 ${sess.cacheHitPct ?? 0}%`;
+    $('cons-session-pool').textContent = `占同期本机 ${sharePct}% · 缓存命中 ${sess.cacheHitPct ?? 0}%`;
   }
 
-  // 2. Account total consumption card
+  // 2. Account total consumption card (local machine)
   $('cons-account-meta').textContent = `${acct.conversationsCount || 0} 会话 · ${acct.calls || 0} 步`;
   $('cons-account-tokens').textContent = formatTokens(acct.totalTokens || 0);
-  $('cons-account-cost').textContent = `≈$${Number(acct.costUsd || 0).toFixed(2)}`;
+  $('cons-account-cost').textContent = `${acctPrefix}${Number(acct.costUsd || 0).toFixed(2)}`;
   $('cons-account-breakdown').textContent = `入 ${formatTokens(acct.inputTokens)} · 缓 ${formatTokens(acct.cacheReadTokens)} · 出 ${formatTokens(acct.outputTokens)}`;
-  $('cons-account-breakdown').title = `筛选范围: ${rangeLabel} | 新增输入: ${acct.inputTokens || 0} | 缓存读取: ${acct.cacheReadTokens || 0} (${acct.cacheHitPct || 0}%) | 思考输出: ${acct.thinkingTokens || 0} | 正文输出: ${acct.responseTokens || 0}`;
+  $('cons-account-breakdown').title = `筛选范围: ${rangeLabel} (本机全会话) | 新增输入: ${acct.inputTokens || 0} | 缓存读取: ${acct.cacheReadTokens || 0} (${acct.cacheHitPct || 0}%) | 思考输出: ${acct.thinkingTokens || 0} | 正文输出: ${acct.responseTokens || 0}`;
   $('cons-account-pool').textContent = `Gemini $${Number(acct.geminiCostUsd || 0).toFixed(2)} · Claude/GPT $${Number(acct.claudeGptCostUsd || 0).toFixed(2)}`;
   $('cons-account-pool').title = `Gemini: ${formatTokens(acct.geminiTokens)} (${acct.geminiCalls || 0}步) | Claude & GPT: ${formatTokens(acct.claudeGptTokens)} (${acct.claudeGptCalls || 0}步)`;
 
@@ -225,6 +231,7 @@ function applyTelemetryToDom(data) {
   const active = data.activeConversation || {};
   const ctx = active.context || {};
   const quotas = data.quotas || {};
+  const quotaMeta = quotas.meta || {};
   const settings = data.settings || {};
 
   // 1. Top session bar
@@ -242,9 +249,14 @@ function applyTelemetryToDom(data) {
     if (active.isRunning) {
       livePill.textContent = '生成中…';
       livePill.classList.add('running');
+    } else if (quotaMeta.refreshFailed || quotaMeta.isStale) {
+      livePill.textContent = quotaMeta.hasOfficialData ? '⚠ 额度缓存' : '⚠ 额度离线';
+      livePill.classList.remove('running');
+      livePill.title = quotaMeta.errorMessage || '配额接口响应滞后，当前显示最近一次缓存数据';
     } else {
       livePill.textContent = '实时 2s';
       livePill.classList.remove('running');
+      livePill.title = '';
     }
   }
 
@@ -263,10 +275,12 @@ function applyTelemetryToDom(data) {
   $('speed-mode-badge').textContent = settings.speedMode === 'total' ? '整体测速(含思考)' : '输出流测速';
 
   // 3. Context Window Popover Section
-  const limitLabel = formatTokens(ctx.limitTokens || 1000000);
+  const limitTokens = ctx.limitTokens || 256000;
+  const limitLabel = formatTokens(limitTokens);
   $('ctx-summary-text').textContent = `${formatTokens(ctx.totalTokens || 0)} / ${limitLabel} (${ctx.usedPct || 0}%)`;
+  $('ctx-summary-text').title = `距离 256k 自动压缩阈值: ${formatTokens(ctx.totalTokens || 0)} / 256.0k (${ctx.compactionUsedPct ?? 0}%)`;
 
-  const limit = Math.max(1, ctx.limitTokens || 1000000);
+  const limit = Math.max(1, limitTokens);
   $('bar-ctx-cached').style.width = `${Math.min(100, (ctx.cachedTokens / limit) * 100)}%`;
   $('bar-ctx-input').style.width = `${Math.min(100, (ctx.freshInputTokens / limit) * 100)}%`;
   $('bar-ctx-thinking').style.width = `${Math.min(100, (ctx.thinkingTokens / limit) * 100)}%`;
@@ -278,7 +292,7 @@ function applyTelemetryToDom(data) {
   $('bd-output').textContent = formatTokens(ctx.responseTokens);
 
   document.querySelectorAll('[data-ctx-limit]').forEach((btn) => {
-    btn.classList.toggle('active', Number(btn.dataset.ctxLimit) === Number(ctx.limitTokens));
+    btn.classList.toggle('active', Number(btn.dataset.ctxLimit) === Number(limitTokens));
   });
 
   // 3.5 Session & Account Consumption Cards
@@ -287,29 +301,37 @@ function applyTelemetryToDom(data) {
   // 4. Quotas Section
   $('account-tier-label').textContent = `${data.account?.tierName || 'Google AI'} · ${data.account?.planName || 'Pro'}`;
   const activePool = quotas.activePool || {};
-  const used5hStr = Number(activePool.usedPct ?? 0).toFixed(1);
-  const rem5hStr = Number(activePool.remainingPct ?? 100).toFixed(1);
+  const has5h = activePool.usedPct != null && activePool.remainingPct != null;
+  const used5hVal = has5h ? Number(activePool.usedPct) : 0;
   $('session-quota-title').textContent = `5h 限额 (${activePool.family || '当前'})`;
   $('session-reset-text').textContent = formatCountdown(activePool.resetTime);
-  $('session-used-pct').textContent = `已用 ${used5hStr}% (余 ${rem5hStr}%)`;
+  $('session-used-pct').textContent = has5h
+    ? `已用 ${used5hVal.toFixed(1)}% (余 ${Number(activePool.remainingPct).toFixed(1)}%)`
+    : '获取失败 (--%)';
 
   const sessionBar = $('bar-session-quota');
-  sessionBar.style.width = `${Math.min(100, activePool.usedPct || 0)}%`;
-  sessionBar.className = `bar-fill ${activePool.usedPct >= 85 ? 'danger' : activePool.usedPct >= 60 ? 'warn' : ''}`;
+  sessionBar.style.width = `${Math.min(100, used5hVal)}%`;
+  sessionBar.className = `bar-fill ${used5hVal >= 85 ? 'danger' : used5hVal >= 60 ? 'warn' : ''}`;
 
   renderAllPools(quotas.pools || [], activePool.family);
 
   const weekly = quotas.weekly || {};
-  const usedWkStr = Number(weekly.usedPct ?? 0).toFixed(1);
-  const remWkStr = Number(weekly.remainingPct ?? 100).toFixed(1);
+  const wkTitleEl = $('weekly-quota-title');
+  if (wkTitleEl) {
+    wkTitleEl.textContent = weekly.title || `每周限额 (${activePool.family || '当前'})`;
+  }
+  const hasWk = weekly.usedPct != null && weekly.remainingPct != null;
+  const usedWkVal = hasWk ? Number(weekly.usedPct) : 0;
   $('weekly-reset-text').textContent = formatCountdown(weekly.resetTime);
-  $('weekly-used-pct').textContent = `已用 ${usedWkStr}% (余 ${remWkStr}%)`;
+  $('weekly-used-pct').textContent = hasWk
+    ? `已用 ${usedWkVal.toFixed(1)}% (余 ${Number(weekly.remainingPct).toFixed(1)}%)`
+    : '获取失败 (--%)';
   const weeklyBar = $('bar-weekly-quota');
-  weeklyBar.style.width = `${Math.min(100, weekly.usedPct || 0)}%`;
-  weeklyBar.className = `bar-fill ${weekly.usedPct >= 85 ? 'danger' : weekly.usedPct >= 60 ? 'warn' : ''}`;
+  weeklyBar.style.width = `${Math.min(100, usedWkVal)}%`;
+  weeklyBar.className = `bar-fill ${usedWkVal >= 85 ? 'danger' : usedWkVal >= 60 ? 'warn' : ''}`;
 
   $('weekly-tokens-text').textContent = formatTokens(weekly.tokens || 0);
-  $('weekly-cost-text').textContent = `≈$${Number(weekly.costUsd || 0).toFixed(2)}`;
+  $('weekly-cost-text').textContent = `$${Number(weekly.costUsd || 0).toFixed(2)}`;
 
   if (data.account?.aiCredits != null && data.account.aiCredits > 0) {
     $('credits-badge').textContent = `AI 积分: ${data.account.aiCredits}`;
@@ -326,8 +348,8 @@ function applyTelemetryToDom(data) {
       : 'official';
   $('setting-speed-mode').value = settings.speedMode || 'stream';
   $('setting-weekly-mode').value = wkMode;
-  $('setting-weekly-tokens').value = settings.weeklyTokenBudget || 80000000;
-  $('setting-weekly-cost').value = settings.weeklyCostBudget || 35;
+  $('setting-weekly-tokens').value = settings.weeklyTokenBudget || 150000000;
+  $('setting-weekly-cost').value = settings.weeklyCostBudget || 100;
 
   renderTables(active, data.modelBreakdown);
 }
