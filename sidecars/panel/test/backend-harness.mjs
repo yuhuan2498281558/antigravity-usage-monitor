@@ -18,6 +18,7 @@ export function backendHarness({cache={},settings={},trajectories={},summaries={
     homedir:()=>'/test-home',dirname:path.dirname,join:path.join,fileURLToPath:()=>'/test/main.mjs',
     Response:class {constructor(body,options){this.body=body;this.options=options;}},
     SidecarApp:class {page(){} api(){} run(){}},
+    StreamDiagnostics:class {status(){return {enabled:false};} start(){}},
     fetch:async(url,options)=>{
       const method=url.split('/').pop(); const body=JSON.parse(options.body);state.calls.push({method,body});
       if(method==='GetCascadeTrajectory') {

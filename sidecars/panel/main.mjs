@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Response, SidecarApp } from 'sidecar_sdk';
 import { extractModelSteps, parseIsoMs, normalizeCachedStep, speedMetric, summarizeSpeed, summarizeTtft, createSpeedAccumulator, accumulateSpeed, finishSpeed } from './speed-metrics.mjs';
+import { StreamDiagnostics } from './stream-diagnostics.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || join(HERE, '.data');
@@ -894,6 +895,7 @@ async function buildTelemetryPayloadInternal(
   return {
     timestamp: new Date().toISOString(),
     settings,
+    diagnostics: diagnostics.status(),
     account: {
       name: userStatus?.name || '',
       tierName: userStatus?.userTier?.name || 'Google AI',
@@ -1017,6 +1019,7 @@ function buildTelemetryPayload(requestedConvId, forceQuotaRefresh = false, filte
 // ---------------------------------------------------------------------------
 
 const app = new SidecarApp();
+const diagnostics = new StreamDiagnostics({ dataDir: DATA_DIR, lsAddress: LS_ADDR, csrfToken: CSRF_TOKEN });
 const readLocal = (name) => readFileSync(join(HERE, name), 'utf8');
 
 function isLocalHostRequest(req) {
@@ -1088,4 +1091,23 @@ app.api('/api/settings', (data, req) => {
   return updated;
 });
 
+app.api('/api/diagnostics', (_data, req) => {
+  if (!isLocalHostRequest(req)) return new Response('Forbidden host or origin', { status: 403 });
+  return new Response(JSON.stringify(diagnostics.status()), {
+    contentType: 'application/json', headers: { 'Cache-Control': 'no-store' },
+  });
+}, 'GET');
+
+app.api('/api/diagnostics', (data, req) => {
+  if (!isLocalHostRequest(req)) return new Response('Forbidden host or origin', { status: 403 });
+  try {
+    return diagnostics.configure({ enabled: data?.enabled, conversationId: data?.conversationId || '' });
+  } catch (error) {
+    return new Response(JSON.stringify({ error: error.message === 'invalid_diagnostic_config' ? 'Invalid diagnostic settings' : 'Could not save diagnostic settings' }), {
+      status: error.message === 'invalid_diagnostic_config' ? 400 : 500, contentType: 'application/json',
+    });
+  }
+});
+
 app.run();
+diagnostics.start();

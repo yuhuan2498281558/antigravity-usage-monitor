@@ -412,6 +412,11 @@ function applyTelemetryToDom(data) {
   $('setting-weekly-tokens').value = settings.weeklyTokenBudget || 150000000;
   $('setting-weekly-cost').value = settings.weeklyCostBudget || 100;
 
+  const diagnostic = data.diagnostics || {};
+  const phase = ({ disabled: '未开启', waiting: '等待会话', connecting: '连接中', collecting: '采集中', error: '连接异常，稍后重试' })[diagnostic.phase] || '未开启';
+  $('diagnostics-status').textContent = `诊断${phase} · 已观察 ${diagnostic.contentEvents || 0} 次内容更新${diagnostic.conversationId ? ` · 会话 ${diagnostic.conversationId.slice(0, 8)}` : ''}`;
+  $('toggle-diagnostics-btn').textContent = diagnostic.enabled ? '停止诊断采集' : '开启诊断采集';
+
   renderTables(active, data.modelBreakdown);
 }
 
@@ -492,6 +497,19 @@ async function updateSettings(patch) {
 
 function bindEvents() {
   $('refresh-btn').addEventListener('click', () => refreshTelemetry(true));
+
+  $('toggle-diagnostics-btn').addEventListener('click', async () => {
+    const button = $('toggle-diagnostics-btn');
+    button.disabled = true;
+    try {
+      await callApi('/api/diagnostics', { method: 'POST', body: { enabled: !latestTelemetry?.diagnostics?.enabled } });
+      await refreshTelemetry();
+    } catch {
+      $('diagnostics-status').textContent = '诊断设置未保存，请稍后重试';
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   $('conv-select').addEventListener('change', (e) => {
     selectedConversationId = e.target.value;
