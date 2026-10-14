@@ -14,11 +14,11 @@ function sample({total=12,ttft='2s',stream='10s',output=1100,thinking=100,respon
 }
 function parse(options) {const {s,gm}=sample(options);return extractModelSteps([s],[gm])[0];}
 
-test('text and mixed output estimate the combined response phase; pure tools retain total time',()=>{
+test('text, tools and mixed output all use total output / full request duration',()=>{
   for(const tools of [false,true])for(const text of [false,true]){
     const step=parse({tools,text});
-    assert.equal(speedMetric(step).value,text ? 1000/8 : 1100/12);
-    assert.equal(step.speedBasis,text ? 'response_phase_estimate' : 'request_total');
+    assert.equal(speedMetric(step).value,1100/12);
+    assert.equal(step.speedBasis,'request_total');
     assert.equal(step.speedSampleEligible,true);
   }
 });
@@ -48,7 +48,7 @@ test('short output keeps the same formula but does not bias the mean',()=>{
   const short=parse({output:13,response:13,thinking:0,total:5.015,stream:'0.118s'});
   assert.equal(short.totalTokPerSec,13/5.015);
   assert.equal(short.speedReason,'short_sample');
-  assert.equal(summarizeSpeed([short,parse()]).avgTokPerSec,1000/8);
+  assert.equal(summarizeSpeed([short,parse()]).avgTokPerSec,1100/12);
   assert.equal(summarizeSpeed([short]).avgTokPerSec,null);
   assert.equal(parse({output:50}).speedSampleEligible,true);
 });
@@ -57,7 +57,7 @@ test('sub-half-second whole requests are withheld, never divided by a tiny inter
   assert.equal(tiny.totalTokPerSec,null);assert.equal(tiny.speedReason,'short_timing');
   assert.equal(speedMetric(tiny).value,null);
   assert.equal(summarizeSpeed([tiny]).sampleCount,0);
-  assert.equal(parse({total:.5,output:100}).totalTokPerSec,200);
+  assert.equal(parse({total:.5,output:100,ttft:'0.1s'}).totalTokPerSec,200);
 });
 test('weighted mean matches token/time totals and does not average step rates',()=>{
   const a=parse({output:1000,total:10}),b=parse({output:1000,total:20,tools:true});
@@ -86,15 +86,12 @@ test('missing phase/token breakdown cannot change a valid full-request rate',()=
   assert.equal(extractModelSteps([s],[gm])[0].totalTokPerSec,1100/12);
 });
 test('no rate-dependent cap or formula switch at the former 260 TPS boundary',()=>{
-  const opts={total:10,thinking:0,thinkingDuration:'0s',ttft:'0s',stream:'10s',tools:true};
-  const a=parse({...opts,output:2590,response:2590}),b=parse({...opts,output:2610,response:2610});
+  const a=parse({total:10,output:2590,tools:true}),b=parse({total:10,output:2610,tools:true});
   assert.equal(a.totalTokPerSec,259);assert.equal(b.totalTokPerSec,261);
-  assert.equal(speedMetric(a).value,259);assert.equal(speedMetric(b).value,261);
-  assert.equal(a.speedBasis,'response_phase_estimate');
   assert.equal(a.speedBasis,b.speedBasis);
 });
 test('legacy cache retains billing but cannot masquerade as current measurements',()=>{
-  for(const measurementVersion of [undefined,1,2]){
+  for(const measurementVersion of [undefined,1,2,3]){
     const old={measurementVersion,inputTokens:500,cacheReadTokens:2000,outputTokens:1100,ttftSec:0.4,totalTokPerSec:55};
     const migrated=normalizeCachedStep(old);
     assert.equal(migrated.outputTokens,1100);assert.equal(migrated.inputTokens,500);
@@ -103,49 +100,53 @@ test('legacy cache retains billing but cannot masquerade as current measurements
   }
 });
 
-test('afternoon visible-text counterexample #284 uses full time instead of a 6751 TPS tail',()=>{
+test('half-second cutoff uses the original nanoseconds, not rounded epoch milliseconds',()=>{
+  const {s,gm}=sample({output:100,ttft:'0.1s'});
+  s.metadata.createdAt='2026-01-01T00:00:00.000000001Z';
+  s.metadata.finishedGeneratingAt='2026-01-01T00:00:00.500000000Z';
+  const below=extractModelSteps([s],[gm])[0];
+  assert.equal(below.totalDurationSec,.499999999);assert.equal(below.totalTokPerSec,null);
+  s.metadata.finishedGeneratingAt='2026-01-01T00:00:00.500000001Z';
+  assert.equal(extractModelSteps([s],[gm])[0].totalTokPerSec,200);
+  s.metadata.createdAt='2026-01-01T08:00:00.000000001+08:00';
+  assert.equal(extractModelSteps([s],[gm])[0].totalTokPerSec,200);
+});
+test('non-chat generator metadata cannot overwrite matching model timing',()=>{
+  const {s,gm}=sample();s.metadata.sourceTrajectoryStepInfo={stepIndex:42};gm.stepIndices=[42];
+  const other={stepIndices:[42],tool:{}};
+  assert.equal(extractModelSteps([s],[gm,other])[0].nativeTtftSec,2);
+  s.metadata.generatorMetadata=[other,{chatModel:{timeToFirstToken:'3s'}}];
+  assert.equal(extractModelSteps([s],[gm])[0].nativeTtftSec,3);
+});
+test('a paginated source step never borrows timing from an unrelated array position',()=>{
+  const {s,gm}=sample();s.metadata.sourceTrajectoryStepInfo={stepIndex:42};
+  const step=extractModelSteps([s],[gm])[0];
+  assert.equal(step.nativeTtftSec,null);assert.equal(step.totalTokPerSec,1100/12);
+});
+test('contradictory native TTFT is preserved but cannot validate TPS or bias the TTFT mean',()=>{
+  const bad=parse({total:5,ttft:'9s'});
+  assert.equal(bad.nativeTtftSec,9);assert.equal(bad.totalTokPerSec,null);
+  assert.equal(bad.speedReason,'inconsistent_timing');
+  assert.deepEqual(summarizeTtft([bad,parse()]),{sampleCount:1,avgSec:2});
+});
+test('unfinished steps do not enter the TTFT mean even when partial metadata includes TTFT',()=>{
+  const partial=parse({status:'CORTEX_STEP_STATUS_GENERATING',ttft:'8s'});
+  assert.deepEqual(summarizeTtft([partial,parse()]),{sampleCount:1,avgSec:2});
+});
+test('coercible non-token values cannot silently become zero or one output token',()=>{
+  for(const value of [true,false,' ',[],{}]){
+    const {s,gm}=sample();s.metadata.modelUsage.outputTokens=value;
+    assert.equal(extractModelSteps([s],[gm])[0].speedReason,'invalid_output_tokens');
+  }
+});
+test('visible buffered text and tools use full time without a rate-dependent switch',()=>{
   const {s,gm}=sample({output:64,thinking:33,response:31,ttft:'7.0108593s',stream:'0.0045919s'});
   s.metadata.finishedGeneratingAt='2026-01-01T00:00:07.015451200Z';
   delete s.plannerResponse.thinkingDuration;
   const step=extractModelSteps([s],[gm])[0];
-  assert.equal(step.hasVisibleText,true);assert.equal(step.phaseReason,'short_phase');
-  assert.equal(step.speedBasis,'request_total');assert(speedMetric(step).value<10);
-});
-test('phase and overall means never mix denominators, regardless of step order',()=>{
-  const phase=parse(),tools=parse({tools:true,text:false,total:100,output:10000});
-  for(const rows of [[phase,tools],[tools,phase]]){
-    const mean=summarizeSpeed(rows);
-    assert.equal(mean.avgTokPerSec,125);assert.equal(mean.basis,'response_phase_estimate');
-    assert.equal(mean.sampleCount,1);assert.equal(mean.excludedCount,1);
-    assert.equal(mean.overall.avgTokPerSec,11100/112);
-    assert.equal(speedMetric(tools).value,100);
-  }
-  const fallback=summarizeSpeed([tools]);
-  assert.equal(fallback.avgTokPerSec,100);assert.equal(fallback.basis,'request_total');
-});
-test('short response phases, inconsistent counts and invalid phase clocks retain the request rate',()=>{
-  for(const opts of [
-    {thinkingDuration:'11.99s'}, {thinkingDuration:'12s'}, {thinkingDuration:'13s'},
-    {thinkingDuration:'-1s'}, {thinkingDuration:'1s'}, {stream:'0.01s'},
-    {response:999}, {output:1100,thinking:1080,response:20},
-  ]){
-    const step=parse(opts);
-    assert.equal(step.speedBasis,'request_total');assert.equal(speedMetric(step).value,1100/12);
-  }
-});
-test('missing thinking duration can use native TTFT, but missing native breakdown cannot be guessed',()=>{
-  const {s,gm}=sample();delete s.plannerResponse.thinkingDuration;
-  const step=extractModelSteps([s],[gm])[0];
-  assert.equal(step.phaseTokPerSec,100);assert.equal(step.answerStartDelaySec,2);
-  delete s.metadata.modelUsage.responseOutputTokens;
-  const missing=extractModelSteps([s],[gm])[0];
-  assert.equal(missing.phaseReason,'invalid_phase_tokens');assert.equal(missing.phaseTokPerSec,null);
-  assert.equal(speedMetric(missing).value,1100/12);
-});
-test('completedAt remains a total-time fallback but cannot substitute for generation end in phase estimates',()=>{
-  const {s,gm}=sample();s.metadata.completedAt=s.metadata.finishedGeneratingAt;delete s.metadata.finishedGeneratingAt;
-  const step=extractModelSteps([s],[gm])[0];
-  assert.equal(step.totalTokPerSec,1100/12);assert.equal(step.phaseReason,'invalid_phase_timing');
+  assert.equal(step.totalDurationSec,7.0154512);
+  assert.equal(speedMetric(step).value,64/7.0154512);
+  assert.equal(step.speedBasis,'request_total');
 });
 test('compaction displays a valid rate and retains billing but is excluded from speed/TTFT means',()=>{
   const {s,gm}=sample();s.type='CORTEX_STEP_TYPE_CHECKPOINT';

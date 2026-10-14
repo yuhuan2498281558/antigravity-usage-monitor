@@ -59,7 +59,7 @@ const PLACEHOLDER_MAP = {
 };
 
 // In-memory cache of trajectory step usage: cascadeId -> { signature, steps }
-const CACHE_SCHEMA_VERSION = 'v8-guarded-phase';
+const CACHE_SCHEMA_VERSION = 'v9-unified-throughput';
 let trajectoryCache = Object.fromEntries(Object.entries(loadJson(CACHE_FILE, {})).map(([id, entry]) => [
   id, { ...entry, steps: (entry.steps || []).map(normalizeCachedStep) },
 ]));
@@ -913,8 +913,6 @@ async function buildTelemetryPayloadInternal(
       latestTokPerSec: latestEnriched?.tokPerSec ?? null,
       latestTtftSec: latestEnriched?.ttftSec ?? null,
       latestSpeedReason: latestEnriched?.selectedSpeedReason ?? null,
-      latestSpeedBasis: latestEnriched?.speedBasis ?? 'unavailable',
-      latestPhaseReason: latestEnriched?.phaseReason ?? null,
       avgTokPerSec: sessionAvgTokPerSec,
       speedSummary: sessionSpeed,
       ttftSummary: sessionTtft,

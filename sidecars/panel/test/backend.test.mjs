@@ -22,20 +22,20 @@ test('failed migration retains all accounting, makes legacy speed and TTFT unava
 test('successful migration rebuilds measurements and uses the same mean in both tables',async()=>{
   const h=backendHarness({cache:{test:old},trajectories:{test:raw}});
   const p=await h.buildTelemetryPayloadInternal('test');
-  assert.equal(p.activeConversation.latestTokPerSec,100);
+  assert.equal(p.activeConversation.latestTokPerSec,60);
   assert.equal(p.activeConversation.latestTtftSec,3);
-  assert.equal(p.activeConversation.avgTokPerSec,100);
-  assert.equal(p.modelBreakdown[0].avgTokPerSec,100);
+  assert.equal(p.activeConversation.avgTokPerSec,60);
+  assert.equal(p.modelBreakdown[0].avgTokPerSec,60);
   assert.equal(p.modelBreakdown[0].speedSummary.sampleCount,1);
   assert.equal(p.consumption.session.totalTokens,900);
-  assert.match(h.state.saves[0].data.test.signature,/^v8-guarded-phase:/);
+  assert.match(h.state.saves[0].data.test.signature,/^v9-unified-throughput:/);
 });
 test('a legacy stream setting cannot re-enable mixed speed formulas',async()=>{
   const h=backendHarness({cache:{test:old},trajectories:{test:raw},settings:{speedMode:'stream'}});
   const p=await h.buildTelemetryPayloadInternal('test');
-  assert.equal(p.activeConversation.latestTokPerSec,100);
-  assert.equal(p.activeConversation.avgTokPerSec,100);
-  assert.equal(p.modelBreakdown[0].avgTokPerSec,100);
+  assert.equal(p.activeConversation.latestTokPerSec,60);
+  assert.equal(p.activeConversation.avgTokPerSec,60);
+  assert.equal(p.modelBreakdown[0].avgTokPerSec,60);
   assert.equal(p.settings.speedMode,undefined);
 });
 test('a malformed successful RPC cannot erase previously recorded usage',async()=>{

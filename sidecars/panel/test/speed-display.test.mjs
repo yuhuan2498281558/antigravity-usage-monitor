@@ -42,12 +42,11 @@ test('a TTFT-only correction refreshes the table even when TPS and step count do
   assert.match(elements['steps-tbody'].children[0].innerHTML,/<td>13\.0s<\/td>/);
 });
 
-test('one TPS column marks estimates and explains full-time fallbacks in the tooltip',()=>{
+test('contradictory timing is explained and zero cache remains a per-request usage fact',()=>{
   const {ctx,elements}=page();
-  ctx.renderTables({recentSteps:[{...step,speedBasis:'response_phase_estimate',phaseDurationSec:2,answerStartDelaySec:8,tokPerSec:100}]},[]);
-  assert.match(elements['steps-tbody'].children[0].innerHTML,/≈100\.0 tok\/s/);
-  assert.match(elements['steps-tbody'].children[0].title,/非服务端精确解码速度/);
-  ctx.renderTables({recentSteps:[{...step,speedBasis:'request_total',phaseReason:'short_phase'}]},[]);
-  assert.doesNotMatch(elements['steps-tbody'].children[0].innerHTML,/≈/);
-  assert.match(elements['steps-tbody'].children[0].title,/阶段不足 0.5 秒/);
+  ctx.renderTables({recentSteps:[{...step,tokPerSec:null,cacheHitPct:0,selectedSpeedReason:'inconsistent_timing'}]},[]);
+  const row=elements['steps-tbody'].children[0];
+  assert.match(row.innerHTML,/原生首响应与总计时不一致/);
+  assert.match(row.innerHTML,/不是缓存容量/);assert.match(row.innerHTML,/>0%<\/td>/);
+  assert.doesNotMatch(row.innerHTML,/≈/);
 });

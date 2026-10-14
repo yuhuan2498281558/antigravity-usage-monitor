@@ -26,7 +26,7 @@
     <!-- Compact Speed & Token Status Strip (1:1 replica of the left status bar above input) -->
     <section class="status-strip-card" aria-label="实时测速与消耗状态栏">
       <div class="strip-row strip-row-main">
-        <span class="speed-group" title="优先使用阶段估算；计时不足时保留含等待的速率" id="speed-status">
+        <span class="speed-group" title="总输出 Token ÷ 请求总耗时（含等待与思考）" id="speed-status">
           <span id="speed-dot" class="speed-dot"></span>
           <strong id="tok-per-sec" class="speed-value">—</strong>
         </span>
@@ -51,7 +51,7 @@
           今日 <strong id="today-tokens">0</strong> · ≈<strong id="today-cost">$0.00</strong>
         </span>
       </div>
-      <div id="speed-method-note" class="speed-method-note muted" title="阶段估算要求有正文、原生 Token 计数一致、阶段至少 0.5 秒且非思考输出至少 50 Token。均速优先只汇总这些步骤；没有可估算步骤时使用含等待的全请求均速。悬停可查看口径与排除原因。">≈ 为扣除等待及思考后的估算；其余 TPS 含等待。均速按同一口径汇总。</div>
+      <div id="speed-method-note" class="speed-method-note muted" title="总耗时不包含请求之间的空闲与外部工具执行时间。低于 0.5 秒的请求不测速；少于 50 个输出 Token 的步骤显示 TPS，但不计均速。">TPS = 总输出 Token ÷ 请求总耗时（含等待与思考）</div>
     </section>
 
     <!-- Quota & Context Popover Card (1:1 replica of the right popover card in screenshot) -->
