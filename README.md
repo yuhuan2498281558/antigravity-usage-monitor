@@ -1,6 +1,16 @@
 # Antigravity Usage & Speed Monitor (`usage-monitor`)
 
-Antigravity 实时测速与官方额度监控侧边栏插件（UI Extension Sidecar）。无需安装任何第三方 `npm` 依赖，开箱即用，实时展示当前会话的 `tok/s` 生成速度、首字耗时（TTFT）、上下文窗口四色分段占用，以及与官方 `Models & Usage` 100% 同步的 **5 小时限额** 与 **每周限额**。
+Antigravity 实时测速与额度监控侧边栏插件（UI Extension Sidecar）。无需安装第三方 `npm` 依赖，展示当前会话的请求整体吞吐（`tok/s`）、原生首 Token 延迟（TTFT）、上下文窗口占用，以及来自官方接口的 **5 小时限额** 与 **每周限额**。
+
+当前版本：**[v1.1.0](https://github.com/yuhuan2498281558/antigravity-usage-monitor/releases/tag/v1.1.0)** · [下载安装包](https://github.com/yuhuan2498281558/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip)
+
+### v1.1.0 更新
+
+- TPS 统一为「总输出 Token ÷ 完整请求耗时」，含等待与思考；移除阶段估算、约等号和测速模式切换。
+- 首 Token 改为原生 TTFT，修正元数据错配，保留零值，缺失时显示未知。
+- 修正短计时、未完成请求和不一致计时的处理；均速按有效 Token 与时长加权，避免缓冲时间造成假峰值。
+- 升级旧测速缓存，保留用量与费用；明确缓存 0% 表示本次请求的原始命中率。
+- 加入默认关闭的实时诊断采集，用于检查更新批次与缓冲；不影响 TPS 计算。
 
 ---
 
@@ -11,12 +21,12 @@ Antigravity 实时测速与官方额度监控侧边栏插件（UI Extension Side
   - 会话及模型均速均为有效样本的总输出 Token 合计 / 请求时长合计，显示有效步数；不平均单步 TPS，不混合不同时间口径。
 - **⏱️ 首字耗时 (TTFT) & 缓存命中率**
   - 显示原始 `timeToFirstToken`（可能先返回思考内容，非必然为答案首字）；缺失显示 `—`，不再按思考 Token 比例推算。悬停可见会话平均 TTFT。同时显示 Prompt 缓存读取命中率（`cacheReadTokens` 占比）。
-- **📊 上下文窗口四色分段监控（默认对齐 `256k` 自动压缩阈值）**
-  - 5 格平行四边形紧凑指示器（`▰▱▱▱▱`）+ 可展开的四色分段进度条：**缓存读取（蓝）** / **新增输入（橙）** / **思考输出（绿）** / **正文输出（青）**，默认以官方 `256k` 自动压缩水位线为基准，支持一键切换 `256k(压缩)` / `200k` / `1M` / `2M`。
-- **🔋 官方 5h 限额 & 每周限额零延迟同步（`{"forceRefresh": true}`）**
-  - 直连官方 `RetrieveUserQuotaSummary`（携带 `{"forceRefresh": true}` 绕过本地 Language Server 内部 3 分钟缓存）与 `GetUserStatus` 接口，实时展示 **`Gemini 模型池`** 与 **`Claude & GPT 模型池`** 各自独立的 5 小时限额与每周限额（精确到 `0.1%`，同时显示 `已用 X.X%` 与 `余 Y.Y%` 及重置倒计时）。
+- **📊 上下文窗口四色分段监控（默认显示基准 `256k`）**
+  - 5 格平行四边形紧凑指示器（`▰▱▱▱▱`）+ 可展开的四色分段进度条：**缓存读取（蓝）** / **新增输入（橙）** / **思考输出（绿）** / **正文输出（青）**，支持一键切换 `256k(压缩)` / `200k` / `1M` / `2M` 显示基准。
+- **🔋 官方 5h 限额 & 每周限额同步（`{"forceRefresh": true}`）**
+  - 通过本地 Language Server 的 `RetrieveUserQuotaSummary` 与 `GetUserStatus` 接口，展示 **`Gemini 模型池`** 与 **`Claude & GPT 模型池`** 各自的 5 小时限额、每周限额及重置倒计时。常规轮询使用 10 秒本地配额缓存，点击刷新会请求强制更新；显示结果仍取决于接口返回。
 - **💰 本对话消耗 & 本机累计消耗（含后台自动压缩步 `CHECKPOINT` 账单）**
-  - 自动扫描本地全量历史会话并聚合统计 **💬 本对话消耗** 与 **👤 本机累计消耗**（总 Token、精确官方 API 美元费用、输入/缓存/输出明细、Gemini 与 Claude/GPT 模型池分账），同时完整捕获 `CORTEX_STEP_TYPE_CHECKPOINT` 后台自动压缩步骤写入 `metadata.retryInfos[0].usage` 的隐藏 Token 消耗。
+  - 扫描本地历史会话并聚合统计 **💬 本对话消耗** 与 **👤 本机累计消耗**（总 Token、按内置 API 价表估算的美元费用、输入/缓存/输出明细、Gemini 与 Claude/GPT 模型池分账），同时统计 `CORTEX_STEP_TYPE_CHECKPOINT` 后台自动压缩步骤写入 `metadata.retryInfos[0].usage` 的 Token 消耗。
   - 支持 **`全部` / `近5h` / `今日` / `本周` / `30天` / `自定义起止时间`** 一键切换筛选，底部「按模型汇总」表也会同步按所选时间段过滤。
 - **📋 全量步骤测速与计费明细表 & 按模型汇总表**
   - 提供当前会话**全量历史步骤**（无 15 步截断限制，支持吸顶表头平滑滚动）的单步测速与**按 API 价表估算的单步美元费用 (`$0.XXX`)** 明细（悬停可查看输入/缓存/输出费用拆解及请求耗时），以及所选时间段内按模型分类的调用次数、均速、总 Token 与 API 费用统计。
@@ -70,6 +80,8 @@ Antigravity 实时测速与官方额度监控侧边栏插件（UI Extension Side
              ├── sidecar.json
              ├── package.json
              ├── main.mjs
+             ├── speed-metrics.mjs
+             ├── stream-diagnostics.mjs
              ├── index.html
              ├── app.js
              └── styles.css
@@ -101,51 +113,40 @@ Antigravity 实时测速与官方额度监控侧边栏插件（UI Extension Side
 | :--- | :--- |
 | **顶部会话下拉框** | 默认选中 `⚡ 自动跟随`，自动监控当前最新活跃的对话；也可手动切换到任意历史会话（自动扫描 `~/.gemini/antigravity/conversations/` 全量历史记录）查看当时的测速与消耗。 |
 | **顶部 `↻` 按钮** | 点击带旋转动画与 `同步中…` $\rightarrow$ `✓ 已刷新` 状态反馈，向 Language Server 发送 `{"forceRefresh": true}` 绕过内部配额缓存，实时拉取云端最新配额与轨迹数据。 |
-| **点击 `0.0 tok/s` 速度数字** | 一键在 **「正文估算」**（仅有效纯文本样本）与 **「整体吞吐」**（含等待与思考的请求吞吐）之间切换。 |
+| **顶部 TPS 与会话均速** | 统一显示含等待与思考的请求整体吞吐；有效步数标明均速覆盖范围，悬停可查看说明。 |
+| **首 Token 与缓存百分比** | 悬停首 Token 可看原生 TTFT 说明及会话均值；缓存百分比反映本次请求的缓存读取占比。 |
 | **点击 `上下文` 或 `上下文窗口 ›`** | 展开/收起四色 Token 构成细分（缓存读取、新增输入、思考输出、正文输出），并可切换 `256k(压缩)` / `200k` / `1M` / `2M` 窗口上限基准。 |
 | **消耗额度统计 & 时间筛选栏** | 实时对比 **💬 本对话消耗** 与 **👤 本机累计消耗（本机全会话）**；点击右侧 `全部` / `近5h` / `今日` / `本周` / `30天` 可 **0 延迟瞬时切换**统计时间段，点击 `自定义` 可按任意精确到分钟的起止时间段过滤。 |
-| **点击 `查看详细明细`** | 展开底部数据表，可切换查看 **「当前会话步骤测速」**（悬停某步可看思考、输出耗时与单步精确美元费用）和 **「按模型汇总 (跟随当前所选时间范围)」**。 |
-| **点击 `参数设置`** | 自定义测速口径，或将周进度条在「官方云端周限额」、「自定义每周 Token 预算」、「自定义每周美元预算」之间切换。 |
+| **点击 `查看详细明细`** | 展开底部数据表，可切换查看 **「当前会话步骤测速」**（悬停可看请求耗时与费用估算拆解）和 **「按模型汇总 (跟随当前所选时间范围)」**。 |
+| **点击 `参数设置`** | 设置官方周限额或自定义 Token / 美元预算，开启或停止测速诊断。 |
 
 ---
 
-## 📊 数据精度与官方额度精确对账说明
+## 📊 数据来源与统计口径
 
-1. **官方 `5h 限额` 与 `每周限额` 进度条（100% 官方云端实时原值）**
-   - 直接调用 Language Server 的 `RetrieveUserQuotaSummary` 接口并传入 `{"forceRefresh": true}`，与官方 `Models & Usage` 面板完全同源且无本地缓存滞后，精确到小数点后一位（`0.1%`）。
-   - `Gemini 模型池` 与 `Claude & GPT 模型池` 在云端拥有各自独立的 5h 限额与每周限额，切换对话模型时面板会自动展示对应模型池的 5h 与周限额。
-2. **本对话消耗 & 本机累计消耗 Token 统计（精确到 1 Token）**
-   - 直接汇总本机所有会话步骤底层写入的 `metadata.modelUsage` 账单字段（`inputTokens`、`cacheReadTokens`、`thinkingOutputTokens`、`responseOutputTokens`）以及后台自动压缩步骤（`CORTEX_STEP_TYPE_CHECKPOINT`）写入 `metadata.retryInfos[0].usage` 的账单字段。
-   - 仅统计**当前这台电脑（本机）**产生的真实调用，不会混入共享账号其他成员在其他设备上的消耗。
-3. **官方 API 定价与额度池容量（小数点后 6 位零误差验证）**
-   - **`Gemini 4 Argon` 官方 API 定价**（现行标准，截至 2026-11-30）：
-     - **非缓存输入 (`inputTokens`)**：**`$2.00 / 1M Tokens`**
-     - **缓存输入 (`cacheReadTokens`)**：**`$0.10 / 1M Tokens`**（仅为非缓存输入的 **1/20**）
-     - **输出，含思考 Token (`outputTokens`)**：**`$10.00 / 1M Tokens`**
-   - **官方额度池精确容量（Google AI Ultra 实测对账至小数点后 6 位）**：
-     - **单次 `5h 限额池 (100%)` = 精确 `$25.00 USD`**（每消耗 `$0.25` 扣减 `1.0%` 的 5h 限额）
-     - **单次 `每周限额池 (100%)` = 精确 `$100.00 USD`**（每消耗 `$1.00` 扣减 `1.0%` 的每周限额）
-     - **周限额池严格等于 $4 \times$ 单次 5h 限额池**：
-       $$\Delta\text{Weekly Fraction} = \frac{\text{Cost}_{\text{USD}}}{\$100.00}, \qquad \Delta\text{5h Fraction} = \frac{\text{Cost}_{\text{USD}}}{\$25.00} = 4 \times \Delta\text{Weekly Fraction}$$
-   - **重要机制提示**：
-     - **5 分钟 Prompt 缓存过期机制**：当对话停顿超过 **5 分钟**时，云端 KV Cache 会过期，下一步的整段历史上下文（如 `150k~250k`）会从 `$0.10/1M` 的缓存读取退化为 `$2.00/1M` 的非缓存重新写入（单步成本相差 **20 倍**，约 `$0.35~$0.50` / 步，单步即可扣掉 `1.5%~2.0%` 的 5h 限额）。
-     - **`256k` 自动压缩机制**：上下文超过 `256,000` Token 时会在后台异步触发 `CORTEX_STEP_TYPE_CHECKPOINT` 生成浓缩摘要；若连续快问快答或后台工具密集调用，上下文可能会短暂冲高至 `260k~280k`，待后台压缩步完成后回落。
+1. **官方额度**：5h 与每周进度条使用 Language Server 返回的配额比例，并显示到 `0.1%`。插件的美元估算不用于反推官方剩余额度。
+2. **本机 Token**：汇总本机可读取的步骤 `metadata.modelUsage` 与压缩步骤的 `metadata.retryInfos[0].usage`。这是本机记录的统计，不代表整个账号在其他设备上的用量。
+3. **费用估算**：美元数值由 Token 用量乘以内置 `MODEL_PRICING` 价表得到，方便比较请求成本，不等同于订阅实际扣费。当前 Argon 配置为非缓存输入 `$2.00/1M`、缓存读取 `$0.10/1M`、输出（含思考）`$10.00/1M`；价表不会从云端自动更新。自定义每周美元预算默认 `$100`，可在设置中修改。
+4. **缓存命中率**：`cacheReadTokens / (inputTokens + cacheReadTokens)`。某一步显示 0% 表示该步记录的缓存读取量为零；不能据此确定是缓存失效、上游计量变化或其他原因，也不能据此断言固定的缓存过期时间。
+5. **上下文窗口**：`256k` 是面板默认显示基准，可手动切换。实际可用窗口和压缩行为取决于模型与宿主；后台压缩用量仍计入消耗。
 
 ---
 
 ## 🔄 如何获取后续更新
 
-若通过 `git clone` 安装，后续只需在插件目录下执行 `git pull`，然后在 **Customizations -> Installed** 页面将插件关闭再重新打开即可生效：
+`main` 为默认版本。若通过 `git clone` 安装并使用 `main`，执行以下命令更新，然后在 **Customizations -> Installed** 页面将插件关闭再重新打开，或重启 Antigravity：
 
 ```powershell
 # Windows PowerShell
-git -C "$env:USERPROFILE\.gemini\config\plugins\usage-monitor" pull
+git -C "$env:USERPROFILE\.gemini\config\plugins\usage-monitor" pull --ff-only
 ```
 
 ```bash
 # macOS / Linux
-git -C ~/.gemini/config/plugins/usage-monitor pull
+git -C ~/.gemini/config/plugins/usage-monitor pull --ff-only
 ```
+
+若通过 ZIP 安装，下载最新 `usage-monitor.zip` 并覆盖解压到同一插件目录，再关闭并重新开启插件。统计缓存与设置通常位于独立的 sidecar 数据目录，安装包不包含这些用户数据。
 
 ---
 
@@ -156,9 +157,9 @@ git -C ~/.gemini/config/plugins/usage-monitor pull
 - **纯本地运行**：所有统计缓存仅保存在本机 `~/.gemini/antigravity/sidecar_data/usage-monitor/` 目录下，不向任何第三方服务器发送数据。
 
 
-## 测速试用分支说明
+## 测速算法与有效样本
 
-本地试用分支：`codex/tps-metrics-trial`。
+以下为 `v1.1.0` / `main` 默认算法。
 
 - **TPS**：统一使用总输出 Token（含思考、正文及工具参数）/ 已完成请求的总时长。使用 `createdAt` 到 `finishedGeneratingAt`，缺失生成结束字段时以 `completedAt` 作为步骤完成边界；不另加相邻工具步骤的执行耗时或请求间空闲。不扣首 Token 或 thinkingDuration，不再估算阶段 TPS。
 - **计时保护**：完整请求至少 0.5 秒，起止时间有效且步骤已完成；原生 TTFT 不应超过完整请求时长（允许 10 ms 打点误差）。输出计数必须是有效非负整数。纳秒时间戳先相减再转换，避免临界值舍入；无效样本显示原因，不修改分母或设置 TPS 上限。
@@ -166,7 +167,8 @@ git -C ~/.gemini/config/plugins/usage-monitor pull
 - **首 Token**：保留原生 TTFT，包括真实零值；缺失显示未知，不按 Token 比例推算。元数据按源步骤索引匹配，忽略非模型元数据，避免分页时错配。平均 TTFT 只包含已完成且计时一致的普通模型步骤。
 - **缓存**：`v9-unified-throughput` / measurementVersion 4。旧缓存重新读取原始轨迹；失败时保留 Token 和费用，不沿用旧派生速率。表中缓存百分比是本次请求的缓存命中率，原始记录为零时保留 0%，不沿用上一请求的高命中率。
 - **验证**：在 `sidecars/panel` 执行 `npm test`。测试使用本地合成数据，不触发模型生成。
-- **退回原版**：保存本地改动后执行 `git switch main`，关闭再开启插件；主分支没有诊断采集器。
+
+发布前验证：40 项自动化测试通过；另以本地 5 个会话的 372 条历史记录回放复算，Token、费用与原生 TTFT 保持一致，369 条普通模型步骤均可展示 TPS。页面经过历史回放与窄屏检查。样本验证不代表能消除真实请求中的等待或上游缓冲。
 
 ### 实时诊断采集（试用）
 
