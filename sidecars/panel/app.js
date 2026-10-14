@@ -3,6 +3,9 @@ const sidecar = window.sidecar;
 const $ = (id) => document.getElementById(id);
 
 let selectedConversationId = sidecar?.conversationId || '';
+let selectedTimeRange = 'all';
+let customStartMs = 0;
+let customEndMs = 0;
 let latestTelemetry = null;
 let showAllPools = true;
 let lastConvSelectSig = '';
@@ -163,6 +166,60 @@ function renderTables(activeConv, modelBreakdown) {
   }
 }
 
+function toLocalDateTimeInputValue(ms) {
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function renderConsumptionCards(data) {
+  const cons = data?.consumption || {};
+  const preset =
+    selectedTimeRange !== 'custom' && cons.presets?.[selectedTimeRange]
+      ? cons.presets[selectedTimeRange]
+      : null;
+
+  const sess = preset?.session || cons.session || {};
+  const acct = preset?.account || cons.account || {};
+  const sessAll = cons.sessionAllTime || sess;
+  const rangeLabel = preset?.label || cons.selectedRange?.label || '全部时间';
+
+  document.querySelectorAll('[data-time-range]').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.timeRange === selectedTimeRange);
+  });
+
+  // 1. Current conversation consumption card
+  $('cons-session-steps').textContent = `${sess.calls || 0} 步`;
+  $('cons-session-tokens').textContent = formatTokens(sess.totalTokens || 0);
+  $('cons-session-cost').textContent = `≈$${Number(sess.costUsd || 0).toFixed(2)}`;
+  $('cons-session-breakdown').textContent = `入 ${formatTokens(sess.inputTokens)} · 缓 ${formatTokens(sess.cacheReadTokens)} · 出 ${formatTokens(sess.outputTokens)}`;
+  $('cons-session-breakdown').title = `新增输入: ${sess.inputTokens || 0} | 缓存读取: ${sess.cacheReadTokens || 0} (${sess.cacheHitPct || 0}%) | 思考输出: ${sess.thinkingTokens || 0} | 正文输出: ${sess.responseTokens || 0}`;
+
+  const sharePct =
+    acct.totalTokens > 0
+      ? Math.min(100, +((sess.totalTokens / acct.totalTokens) * 100).toFixed(1))
+      : 0;
+  if (selectedTimeRange !== 'all' && (sessAll.totalTokens || 0) > (sess.totalTokens || 0)) {
+    $('cons-session-pool').textContent = `占同期 ${sharePct}% · 全对话 ${formatTokens(sessAll.totalTokens)} ($${Number(sessAll.costUsd || 0).toFixed(2)})`;
+  } else {
+    $('cons-session-pool').textContent = `占同期账号 ${sharePct}% · 缓存命中 ${sess.cacheHitPct ?? 0}%`;
+  }
+
+  // 2. Account total consumption card
+  $('cons-account-meta').textContent = `${acct.conversationsCount || 0} 会话 · ${acct.calls || 0} 步`;
+  $('cons-account-tokens').textContent = formatTokens(acct.totalTokens || 0);
+  $('cons-account-cost').textContent = `≈$${Number(acct.costUsd || 0).toFixed(2)}`;
+  $('cons-account-breakdown').textContent = `入 ${formatTokens(acct.inputTokens)} · 缓 ${formatTokens(acct.cacheReadTokens)} · 出 ${formatTokens(acct.outputTokens)}`;
+  $('cons-account-breakdown').title = `筛选范围: ${rangeLabel} | 新增输入: ${acct.inputTokens || 0} | 缓存读取: ${acct.cacheReadTokens || 0} (${acct.cacheHitPct || 0}%) | 思考输出: ${acct.thinkingTokens || 0} | 正文输出: ${acct.responseTokens || 0}`;
+  $('cons-account-pool').textContent = `Gemini $${Number(acct.geminiCostUsd || 0).toFixed(2)} · Claude/GPT $${Number(acct.claudeGptCostUsd || 0).toFixed(2)}`;
+  $('cons-account-pool').title = `Gemini: ${formatTokens(acct.geminiTokens)} (${acct.geminiCalls || 0}步) | Claude & GPT: ${formatTokens(acct.claudeGptTokens)} (${acct.claudeGptCalls || 0}步)`;
+
+  const tabModelsBtn = $('tab-models-btn');
+  if (tabModelsBtn) {
+    tabModelsBtn.textContent = `按模型汇总 (${rangeLabel})`;
+  }
+}
+
 function applyTelemetryToDom(data) {
   latestTelemetry = data;
   const active = data.activeConversation || {};
@@ -223,6 +280,9 @@ function applyTelemetryToDom(data) {
   document.querySelectorAll('[data-ctx-limit]').forEach((btn) => {
     btn.classList.toggle('active', Number(btn.dataset.ctxLimit) === Number(ctx.limitTokens));
   });
+
+  // 3.5 Session & Account Consumption Cards
+  renderConsumptionCards(data);
 
   // 4. Quotas Section
   $('account-tier-label').textContent = `${data.account?.tierName || 'Google AI'} · ${data.account?.planName || 'Pro'}`;
@@ -291,6 +351,11 @@ async function refreshTelemetry(force = false) {
   try {
     const params = new URLSearchParams();
     if (selectedConversationId) params.set('conversationId', selectedConversationId);
+    if (selectedTimeRange) params.set('range', selectedTimeRange);
+    if (selectedTimeRange === 'custom') {
+      if (customStartMs > 0) params.set('startMs', String(customStartMs));
+      if (customEndMs > 0) params.set('endMs', String(customEndMs));
+    }
     if (force === true) params.set('force', '1');
     const qs = params.toString();
     const data = await callApi(`/api/telemetry${qs ? `?${qs}` : ''}`);
@@ -349,6 +414,47 @@ function bindEvents() {
     selectedConversationId = e.target.value;
     refreshTelemetry();
   });
+
+  // Time filter buttons
+  document.querySelectorAll('[data-time-range]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const nextRange = btn.dataset.timeRange || 'all';
+      selectedTimeRange = nextRange;
+      const customBox = $('custom-time-box');
+      if (customBox) {
+        customBox.hidden = nextRange !== 'custom';
+      }
+      if (nextRange === 'custom') {
+        const now = Date.now();
+        if (!customStartMs) customStartMs = now - 24 * 3600 * 1000;
+        if (!customEndMs) customEndMs = now;
+        if (!$('custom-start-input').value) {
+          $('custom-start-input').value = toLocalDateTimeInputValue(customStartMs);
+        }
+        if (!$('custom-end-input').value) {
+          $('custom-end-input').value = toLocalDateTimeInputValue(customEndMs);
+        }
+      }
+      if (latestTelemetry && nextRange !== 'custom') {
+        renderConsumptionCards(latestTelemetry);
+      }
+      refreshTelemetry();
+    });
+  });
+
+  const applyCustomBtn = $('apply-custom-time-btn');
+  if (applyCustomBtn) {
+    applyCustomBtn.addEventListener('click', () => {
+      const sVal = $('custom-start-input').value;
+      const eVal = $('custom-end-input').value;
+      const sMs = sVal ? Date.parse(sVal) : 0;
+      const eMs = eVal ? Date.parse(eVal) : Date.now();
+      if (sMs > 0) customStartMs = sMs;
+      if (eMs > 0) customEndMs = eMs;
+      selectedTimeRange = 'custom';
+      refreshTelemetry(true);
+    });
+  }
 
   // Toggle context breakdown
   const toggleCtx = () => {

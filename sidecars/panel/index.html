@@ -91,6 +91,60 @@
 
       <hr class="popover-divider">
 
+      <!-- Session & Account Consumption Summary with Time Filter -->
+      <div class="popover-section">
+        <div class="section-row consumption-header-row">
+          <span class="section-label">消耗额度统计</span>
+          <div class="time-filter-bar" id="time-filter-bar" role="group" aria-label="时间筛选">
+            <button type="button" class="time-chip active" data-time-range="all">全部</button>
+            <button type="button" class="time-chip" data-time-range="5h">近5h</button>
+            <button type="button" class="time-chip" data-time-range="today">今日</button>
+            <button type="button" class="time-chip" data-time-range="week">本周</button>
+            <button type="button" class="time-chip" data-time-range="30d">30天</button>
+            <button type="button" class="time-chip" data-time-range="custom">自定义</button>
+          </div>
+        </div>
+
+        <div id="custom-time-box" class="custom-time-box" hidden>
+          <input type="datetime-local" id="custom-start-input" class="time-input" title="起始时间">
+          <span class="muted">至</span>
+          <input type="datetime-local" id="custom-end-input" class="time-input" title="结束时间">
+          <button type="button" id="apply-custom-time-btn" class="chip-btn active">筛选</button>
+        </div>
+
+        <div class="consumption-cards-grid">
+          <!-- Current Conversation Consumption -->
+          <div class="consumption-card">
+            <div class="cons-card-header">
+              <span class="cons-card-title">💬 本对话消耗</span>
+              <span class="cons-card-badge" id="cons-session-steps">0 步</span>
+            </div>
+            <div class="cons-card-main">
+              <strong class="cons-tokens" id="cons-session-tokens">0</strong>
+              <span class="cons-cost" id="cons-session-cost">≈$0.00</span>
+            </div>
+            <div class="cons-card-sub" id="cons-session-breakdown">入 0 · 缓 0 · 出 0</div>
+            <div class="cons-card-foot muted" id="cons-session-pool">占同期账号 0%</div>
+          </div>
+
+          <!-- Account Total Consumption -->
+          <div class="consumption-card account-card">
+            <div class="cons-card-header">
+              <span class="cons-card-title">👤 本账号总消耗</span>
+              <span class="cons-card-badge" id="cons-account-meta">0 会话 · 0 步</span>
+            </div>
+            <div class="cons-card-main">
+              <strong class="cons-tokens" id="cons-account-tokens">0</strong>
+              <span class="cons-cost" id="cons-account-cost">≈$0.00</span>
+            </div>
+            <div class="cons-card-sub" id="cons-account-breakdown">入 0 · 缓 0 · 出 0</div>
+            <div class="cons-card-foot muted" id="cons-account-pool">Gemini $0.00 · Claude/GPT $0.00</div>
+          </div>
+        </div>
+      </div>
+
+      <hr class="popover-divider">
+
       <!-- Usage Limits Section -->
       <div class="popover-section">
         <div class="section-row">
@@ -144,7 +198,7 @@
     <section id="details-card" class="details-card" hidden>
       <div class="tabs-header">
         <button type="button" class="tab-btn active" data-tab="steps">当前会话步骤测速</button>
-        <button type="button" class="tab-btn" data-tab="models">本周按模型汇总</button>
+        <button type="button" class="tab-btn" data-tab="models" id="tab-models-btn">按模型汇总 (全部时间)</button>
       </div>
 
       <div id="tab-steps" class="tab-pane">

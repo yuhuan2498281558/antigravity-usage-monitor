@@ -1,5 +1,6 @@
 // Backend for Antigravity Usage & Speed Monitor Sidecar Extension.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Response, SidecarApp } from 'sidecar_sdk';
@@ -8,6 +9,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || join(HERE, '.data');
 const SETTINGS_FILE = join(DATA_DIR, 'settings.json');
 const CACHE_FILE = join(DATA_DIR, 'trajectory_usage_cache.json');
+const CONVERSATIONS_DIR = join(homedir(), '.gemini', 'antigravity', 'conversations');
 
 const LS_ADDR = process.env.ANTIGRAVITY_LS_ADDRESS;
 const CSRF_TOKEN = process.env.ANTIGRAVITY_CSRF_TOKEN;
@@ -290,7 +292,133 @@ function getStartOfCurrentWeekMs(now = new Date()) {
   return d.getTime();
 }
 
-async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh = false) {
+function resolveTimeWindow(rangeKey = 'all', customStartMs = 0, customEndMs = 0, nowMs = Date.now()) {
+  const now = new Date(nowMs);
+  switch (rangeKey) {
+    case '5h':
+      return { key: '5h', label: '近 5 小时', startMs: nowMs - 5 * 3600 * 1000, endMs: nowMs };
+    case 'today':
+      return { key: 'today', label: '今日', startMs: getStartOfLocalDayMs(now), endMs: nowMs };
+    case '24h':
+      return { key: '24h', label: '近 24 小时', startMs: nowMs - 24 * 3600 * 1000, endMs: nowMs };
+    case 'week':
+      return { key: 'week', label: '本周', startMs: getStartOfCurrentWeekMs(now), endMs: nowMs };
+    case '7d':
+      return { key: '7d', label: '近 7 天', startMs: nowMs - 7 * 24 * 3600 * 1000, endMs: nowMs };
+    case '30d':
+      return { key: '30d', label: '近 30 天', startMs: nowMs - 30 * 24 * 3600 * 1000, endMs: nowMs };
+    case 'custom': {
+      const s = Number(customStartMs) > 0 ? Number(customStartMs) : 0;
+      const e = Number(customEndMs) > 0 ? Number(customEndMs) : nowMs;
+      return {
+        key: 'custom',
+        label: '自定义时段',
+        startMs: Math.min(s, e),
+        endMs: Math.max(s, e),
+      };
+    }
+    case 'all':
+    default:
+      return { key: 'all', label: '全部时间', startMs: 0, endMs: Infinity };
+  }
+}
+
+function createUsageBucket() {
+  return {
+    calls: 0,
+    conversationsSet: new Set(),
+    inputTokens: 0,
+    cacheReadTokens: 0,
+    outputTokens: 0,
+    thinkingTokens: 0,
+    responseTokens: 0,
+    totalTokens: 0,
+    costUsd: 0,
+    geminiTokens: 0,
+    geminiCostUsd: 0,
+    geminiCalls: 0,
+    claudeGptTokens: 0,
+    claudeGptCostUsd: 0,
+    claudeGptCalls: 0,
+  };
+}
+
+function accumulateStepIntoBucket(bucket, st, mInfo, stepCost, cascadeId) {
+  const stepTotalTokens = st.inputTokens + st.cacheReadTokens + st.outputTokens;
+  bucket.calls += 1;
+  if (cascadeId) bucket.conversationsSet.add(cascadeId);
+  bucket.inputTokens += st.inputTokens;
+  bucket.cacheReadTokens += st.cacheReadTokens;
+  bucket.outputTokens += st.outputTokens;
+  bucket.thinkingTokens += st.thinkingTokens || 0;
+  bucket.responseTokens += st.responseTokens || 0;
+  bucket.totalTokens += stepTotalTokens;
+  bucket.costUsd += stepCost;
+
+  if (mInfo.family === 'Gemini') {
+    bucket.geminiTokens += stepTotalTokens;
+    bucket.geminiCostUsd += stepCost;
+    bucket.geminiCalls += 1;
+  } else {
+    bucket.claudeGptTokens += stepTotalTokens;
+    bucket.claudeGptCostUsd += stepCost;
+    bucket.claudeGptCalls += 1;
+  }
+}
+
+function finalizeUsageBucket(bucket) {
+  const promptTokens = bucket.inputTokens + bucket.cacheReadTokens;
+  const cacheHitPct =
+    promptTokens > 0 ? Math.round((bucket.cacheReadTokens / promptTokens) * 100) : 0;
+  return {
+    calls: bucket.calls,
+    conversationsCount: bucket.conversationsSet.size,
+    inputTokens: bucket.inputTokens,
+    cacheReadTokens: bucket.cacheReadTokens,
+    outputTokens: bucket.outputTokens,
+    thinkingTokens: bucket.thinkingTokens,
+    responseTokens: bucket.responseTokens,
+    totalTokens: bucket.totalTokens,
+    costUsd: +bucket.costUsd.toFixed(2),
+    cacheHitPct,
+    geminiTokens: bucket.geminiTokens,
+    geminiCostUsd: +bucket.geminiCostUsd.toFixed(2),
+    geminiCalls: bucket.geminiCalls,
+    claudeGptTokens: bucket.claudeGptTokens,
+    claudeGptCostUsd: +bucket.claudeGptCostUsd.toFixed(2),
+    claudeGptCalls: bucket.claudeGptCalls,
+  };
+}
+
+function discoverLocalConversationFiles() {
+  const map = new Map();
+  if (!existsSync(CONVERSATIONS_DIR)) return map;
+  try {
+    for (const name of readdirSync(CONVERSATIONS_DIR)) {
+      const m = name.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(db|pb)$/i);
+      if (!m) continue;
+      const cascadeId = m[1].toLowerCase();
+      try {
+        const st = statSync(join(CONVERSATIONS_DIR, name));
+        const prevMtime = map.get(cascadeId) || 0;
+        if (st.mtimeMs > prevMtime) {
+          map.set(cascadeId, st.mtimeMs);
+        }
+      } catch {
+        if (!map.has(cascadeId)) map.set(cascadeId, 0);
+      }
+    }
+  } catch {
+    // Ignore directory read errors
+  }
+  return map;
+}
+
+async function buildTelemetryPayloadInternal(
+  requestedConvId,
+  forceQuotaRefresh = false,
+  filterOpts = {}
+) {
   const settings = loadSettings();
   const [userStatusRes, allTrajRes, officialQuota] = await Promise.all([
     callLsRpc('GetUserStatus', {}).catch(() => ({})),
@@ -384,18 +512,59 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
     }
   }
 
-  // Enumerate all conversations
+  // Enumerate all conversations from LS + local disk + existing cache
   const summariesObj = allTrajRes?.trajectorySummaries || {};
-  const conversations = Object.entries(summariesObj)
-    .map(([cascadeId, item]) => ({
-      cascadeId,
-      title: item?.annotations?.title || item?.summary || cascadeId.slice(0, 8),
-      stepCount: Number(item?.stepCount || 0),
-      status: item?.status || '',
-      lastModifiedTime: item?.lastModifiedTime || item?.createdTime || '',
-      lastModifiedMs: parseIsoMs(item?.lastModifiedTime || item?.createdTime || ''),
-    }))
-    .sort((a, b) => b.lastModifiedMs - a.lastModifiedMs);
+  const diskConvMap = discoverLocalConversationFiles();
+  const allCascadeIds = new Set([
+    ...Object.keys(summariesObj),
+    ...diskConvMap.keys(),
+    ...Object.keys(trajectoryCache),
+  ]);
+
+  const conversations = [];
+  for (const cascadeId of allCascadeIds) {
+    const item = summariesObj[cascadeId];
+    const cached = trajectoryCache[cascadeId];
+    const diskMtimeMs = diskConvMap.get(cascadeId) || 0;
+
+    if (item) {
+      const lastModifiedTime = item?.lastModifiedTime || item?.createdTime || '';
+      const lastModifiedMs = parseIsoMs(lastModifiedTime) || diskMtimeMs || cached?.lastModifiedMs || 0;
+      conversations.push({
+        cascadeId,
+        title: item?.annotations?.title || item?.summary || cached?.title || cascadeId.slice(0, 8),
+        stepCount: Number(item?.stepCount || cached?.steps?.length || 0),
+        status: item?.status || '',
+        lastModifiedTime,
+        lastModifiedMs,
+        inSummaries: true,
+      });
+    } else if (cached) {
+      const lastStepMs = cached.steps?.[cached.steps.length - 1]?.createdAtMs || 0;
+      conversations.push({
+        cascadeId,
+        title: cached.title || cascadeId.slice(0, 8),
+        stepCount: Number(cached.steps?.length || 0),
+        status: 'IDLE',
+        lastModifiedTime: '',
+        lastModifiedMs: Math.max(cached.lastModifiedMs || 0, lastStepMs, diskMtimeMs),
+        inSummaries: false,
+      });
+    } else {
+      conversations.push({
+        cascadeId,
+        title: cascadeId.slice(0, 8),
+        stepCount: 0,
+        status: 'IDLE',
+        lastModifiedTime: '',
+        lastModifiedMs: diskMtimeMs,
+        inSummaries: false,
+        needsInitialLoad: true,
+      });
+    }
+  }
+
+  conversations.sort((a, b) => b.lastModifiedMs - a.lastModifiedMs);
 
   // Pick active conversation: requestedConvId if valid, else most recently modified conversation
   const activeConvSummary =
@@ -404,18 +573,16 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
     null;
   const activeCascadeId = activeConvSummary?.cascadeId || requestedConvId || null;
 
-  // Refresh trajectory cache for recent conversations (modified within last 8 days)
-  const eightDaysAgoMs = Date.now() - 8 * 24 * 3600 * 1000;
+  // Refresh trajectory cache for any uncached or updated conversation across the entire account
   let cacheDirty = false;
 
   const toFetch = conversations.filter((conv) => {
-    if (conv.lastModifiedMs < eightDaysAgoMs && conv.cascadeId !== activeCascadeId) {
-      return false;
-    }
-    const sig = `${CACHE_SCHEMA_VERSION}:${conv.stepCount}:${conv.lastModifiedTime}`;
     const cached = trajectoryCache[conv.cascadeId];
+    if (!cached || conv.needsInitialLoad) return true;
+    if (!conv.inSummaries) return false;
+    const sig = `${CACHE_SCHEMA_VERSION}:${conv.stepCount}:${conv.lastModifiedTime}`;
     const isRunning = conv.status === 'CASCADE_RUN_STATUS_RUNNING';
-    return !cached || cached.signature !== sig || isRunning || Boolean(cached.wasRunning);
+    return cached.signature !== sig || isRunning || Boolean(cached.wasRunning);
   });
 
   // Fetch trajectories with bounded concurrency (up to 4 at a time)
@@ -424,12 +591,15 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
     const batch = toFetch.slice(i, i + CONCURRENCY);
     await Promise.all(
       batch.map(async (conv) => {
-        const sig = `${CACHE_SCHEMA_VERSION}:${conv.stepCount}:${conv.lastModifiedTime}`;
+        const sig = conv.inSummaries
+          ? `${CACHE_SCHEMA_VERSION}:${conv.stepCount}:${conv.lastModifiedTime}`
+          : trajectoryCache[conv.cascadeId]?.signature || `${CACHE_SCHEMA_VERSION}:disk:${conv.lastModifiedMs}`;
         const isRunning = conv.status === 'CASCADE_RUN_STATUS_RUNNING';
         const prev = trajectoryCache[conv.cascadeId];
         try {
           const trajRes = await callLsRpc('GetCascadeTrajectory', { cascadeId: conv.cascadeId });
-          const steps = extractModelSteps(trajRes?.trajectory?.steps || []);
+          const rawSteps = trajRes?.trajectory?.steps || [];
+          const steps = extractModelSteps(rawSteps);
           const prevLast = prev?.steps?.[prev.steps.length - 1];
           const nextLast = steps[steps.length - 1];
           const stepsChanged =
@@ -440,10 +610,17 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
             prevLast?.outputTokens !== nextLast?.outputTokens ||
             prevLast?.totalDurationSec !== nextLast?.totalDurationSec;
 
+          const lastStepMs = nextLast?.createdAtMs || 0;
+          const resolvedLastModMs = Math.max(conv.lastModifiedMs || 0, lastStepMs);
+          conv.lastModifiedMs = resolvedLastModMs;
+          if (!conv.inSummaries) {
+            conv.stepCount = rawSteps.length || steps.length;
+          }
+
           trajectoryCache[conv.cascadeId] = {
             signature: sig,
             title: conv.title,
-            lastModifiedMs: conv.lastModifiedMs,
+            lastModifiedMs: resolvedLastModMs,
             wasRunning: isRunning,
             steps,
           };
@@ -464,7 +641,6 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
   // Compute Active Conversation Metrics
   const activeEntry = activeCascadeId ? trajectoryCache[activeCascadeId] : null;
   const activeSteps = activeEntry?.steps || [];
-  const latestStep = activeSteps.length > 0 ? activeSteps[activeSteps.length - 1] : null;
 
   const useStreamSpeed = settings.speedMode !== 'total';
   let sessionSpeedNumeratorTokens = 0;
@@ -533,33 +709,56 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
   const sessionCacheHitPct =
     sessionPromptTokens > 0 ? Math.round((sessionCacheReadTokens / sessionPromptTokens) * 100) : 0;
 
-  // Aggregate Today & Weekly across all cached trajectories
-  const startOfTodayMs = getStartOfLocalDayMs();
-  const startOfWeekMs = getStartOfCurrentWeekMs();
+  // Aggregate across time windows (presets + selected range)
+  const nowMs = Date.now();
+  const selectedWindow = resolveTimeWindow(
+    filterOpts.range || 'all',
+    filterOpts.startMs,
+    filterOpts.endMs,
+    nowMs
+  );
 
-  let todayTokens = 0;
-  let todayCostUsd = 0;
-  let todayCalls = 0;
-  let weekTokens = 0;
-  let weekCostUsd = 0;
-  let weekCalls = 0;
+  const presetKeys = ['all', '5h', 'today', '24h', 'week', '7d', '30d'];
+  const presetWindows = {};
+  const accountBuckets = {};
+  const sessionBuckets = {};
+
+  for (const k of presetKeys) {
+    presetWindows[k] = resolveTimeWindow(k, 0, 0, nowMs);
+    accountBuckets[k] = createUsageBucket();
+    sessionBuckets[k] = createUsageBucket();
+  }
+  const selectedAccountBucket = createUsageBucket();
+  const selectedSessionBucket = createUsageBucket();
   const perModelStats = new Map();
 
-  for (const [, entry] of Object.entries(trajectoryCache)) {
+  for (const [cascadeId, entry] of Object.entries(trajectoryCache)) {
+    const isCurrentConv = cascadeId === activeCascadeId;
     for (const st of entry?.steps || []) {
       const mInfo = resolveModelInfo(st.modelKey, dynamicModelMap);
       const stepTotalTokens = st.inputTokens + st.cacheReadTokens + st.outputTokens;
       const stepCost = computeStepCost(st, mInfo.pricing);
+      const tMs = st.createdAtMs || 0;
 
-      if (st.createdAtMs >= startOfTodayMs) {
-        todayTokens += stepTotalTokens;
-        todayCostUsd += stepCost;
-        todayCalls += 1;
+      for (const k of presetKeys) {
+        const w = presetWindows[k];
+        if (k === 'all' || (tMs >= w.startMs && tMs <= w.endMs)) {
+          accumulateStepIntoBucket(accountBuckets[k], st, mInfo, stepCost, cascadeId);
+          if (isCurrentConv) {
+            accumulateStepIntoBucket(sessionBuckets[k], st, mInfo, stepCost, cascadeId);
+          }
+        }
       }
-      if (st.createdAtMs >= startOfWeekMs) {
-        weekTokens += stepTotalTokens;
-        weekCostUsd += stepCost;
-        weekCalls += 1;
+
+      const inSelectedWindow =
+        selectedWindow.key === 'all' ||
+        (tMs >= selectedWindow.startMs && tMs <= selectedWindow.endMs);
+
+      if (inSelectedWindow) {
+        accumulateStepIntoBucket(selectedAccountBucket, st, mInfo, stepCost, cascadeId);
+        if (isCurrentConv) {
+          accumulateStepIntoBucket(selectedSessionBucket, st, mInfo, stepCost, cascadeId);
+        }
 
         if (!perModelStats.has(mInfo.label)) {
           perModelStats.set(mInfo.label, {
@@ -592,6 +791,18 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
     }
   }
 
+  const finalizedPresets = {};
+  for (const k of presetKeys) {
+    finalizedPresets[k] = {
+      label: presetWindows[k].label,
+      session: finalizeUsageBucket(sessionBuckets[k]),
+      account: finalizeUsageBucket(accountBuckets[k]),
+    };
+  }
+
+  const todayBucket = finalizedPresets.today.account;
+  const weekBucket = finalizedPresets.week.account;
+
   const rawActiveFamily = latestEnriched?.family || 'Gemini';
   const activePoolKey = rawActiveFamily === 'Gemini' ? 'Gemini' : 'Claude & GPT';
   const activeLive5h = officialBuckets.get(activePoolKey === 'Gemini' ? 'gemini-5h' : '3p-5h');
@@ -616,10 +827,10 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
 
   const fallbackWeeklyPct =
     settings.weeklyLimitMode === 'custom_cost' || settings.weeklyLimitMode === 'cost'
-      ? Math.min(100, +((weekCostUsd / Math.max(1, settings.weeklyCostBudget)) * 100).toFixed(1))
+      ? Math.min(100, +((weekBucket.costUsd / Math.max(1, settings.weeklyCostBudget)) * 100).toFixed(1))
       : Math.min(
           100,
-          +((weekTokens / Math.max(1000, settings.weeklyTokenBudget)) * 100).toFixed(1)
+          +((weekBucket.totalTokens / Math.max(1000, settings.weeklyTokenBudget)) * 100).toFixed(1)
         );
 
   const useOfficialWeekly =
@@ -649,8 +860,9 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
       tierName: userStatus?.userTier?.name || 'Google AI',
       planName: userStatus?.planStatus?.planInfo?.planName || 'Pro',
       aiCredits: realAiCredits > 0 ? realAiCredits : null,
+      totalConversations: conversations.length,
     },
-    conversations: conversations.slice(0, 20),
+    conversations: conversations.slice(0, 30),
     activeConversation: {
       cascadeId: activeCascadeId,
       title: activeConvSummary?.title || '当前会话',
@@ -676,6 +888,19 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
       },
       recentSteps: enrichedActiveSteps.slice(-15).reverse(),
     },
+    consumption: {
+      selectedRange: {
+        key: selectedWindow.key,
+        label: selectedWindow.label,
+        startMs: selectedWindow.startMs,
+        endMs: Number.isFinite(selectedWindow.endMs) ? selectedWindow.endMs : nowMs,
+      },
+      session: finalizeUsageBucket(selectedSessionBucket),
+      sessionAllTime: finalizedPresets.all.session,
+      account: finalizeUsageBucket(selectedAccountBucket),
+      accountAllTime: finalizedPresets.all.account,
+      presets: finalizedPresets,
+    },
     quotas: {
       activePool: activePoolQuota,
       pools: Array.from(quotaPoolsMap.values()).sort((a, b) => {
@@ -685,9 +910,9 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
       models: modelQuotas.sort((a, b) => String(a.label).localeCompare(String(b.label))),
       weekly: {
         isOfficial: useOfficialWeekly,
-        calls: weekCalls,
-        tokens: weekTokens,
-        costUsd: +weekCostUsd.toFixed(2),
+        calls: weekBucket.calls,
+        tokens: weekBucket.totalTokens,
+        costUsd: weekBucket.costUsd,
         usedPct: weeklyUsedPct,
         remainingPct: weeklyRemainingPct,
         remainingIntPct: weeklyRemainingIntPct,
@@ -696,9 +921,9 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
           : getNextMondayResetIso(),
       },
       today: {
-        calls: todayCalls,
-        tokens: todayTokens,
-        costUsd: +todayCostUsd.toFixed(2),
+        calls: todayBucket.calls,
+        tokens: todayBucket.totalTokens,
+        costUsd: todayBucket.costUsd,
       },
     },
     modelBreakdown: Array.from(perModelStats.values())
@@ -714,14 +939,17 @@ async function buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh 
   };
 }
 
-function buildTelemetryPayload(requestedConvId, forceQuotaRefresh = false) {
-  const key = `${requestedConvId || '__auto__'}::${forceQuotaRefresh ? 'force' : 'normal'}`;
+function buildTelemetryPayload(requestedConvId, forceQuotaRefresh = false, filterOpts = {}) {
+  const rangeSig = `${filterOpts.range || 'all'}:${filterOpts.startMs || 0}:${filterOpts.endMs || 0}`;
+  const key = `${requestedConvId || '__auto__'}::${forceQuotaRefresh ? 'force' : 'normal'}::${rangeSig}`;
   if (inFlightRequests.has(key)) {
     return inFlightRequests.get(key);
   }
-  const p = buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh).finally(() => {
-    inFlightRequests.delete(key);
-  });
+  const p = buildTelemetryPayloadInternal(requestedConvId, forceQuotaRefresh, filterOpts).finally(
+    () => {
+      inFlightRequests.delete(key);
+    }
+  );
   inFlightRequests.set(key, p);
   return p;
 }
@@ -746,7 +974,12 @@ app.api(
   async (data) => {
     const convId = data?.conversationId || process.env.ANTIGRAVITY_CONVERSATION_ID || '';
     const force = data?.force === '1' || data?.force === true;
-    return buildTelemetryPayload(convId, force);
+    const filterOpts = {
+      range: data?.range || 'all',
+      startMs: data?.startMs ? Number(data.startMs) : 0,
+      endMs: data?.endMs ? Number(data.endMs) : 0,
+    };
+    return buildTelemetryPayload(convId, force, filterOpts);
   },
   'GET'
 );
