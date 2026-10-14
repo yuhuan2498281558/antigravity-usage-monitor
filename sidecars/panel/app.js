@@ -18,6 +18,27 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+function formatMetric(value, unit = '', estimated = false) {
+  return Number.isFinite(value) ? `${estimated ? '≈' : ''}${value.toFixed(1)}${unit}` : '—';
+}
+
+function speedReasonText(reason) {
+  return ({
+    compaction: '自动压缩不计测速',
+    incomplete_or_invalid_timing: '未完成或计时缺失',
+    tool_timing_unavailable: '工具输出无法独立计时',
+    no_answer_text: '无正文',
+    token_breakdown_unavailable: '输出 Token 构成不明',
+    answer_start_unavailable: '缺少正文起点',
+    short_sample: '短样本，不计均速',
+    legacy_cache: '旧缓存，等待重新读取',
+  })[reason] || '';
+}
+
+function sampleSummary(summary) {
+  return `${summary?.sampleCount || 0}/${(summary?.sampleCount || 0) + (summary?.excludedCount || 0)} 步`;
+}
+
 function formatTokens(num) {
   const n = Number(num || 0);
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -135,14 +156,15 @@ function renderAllPools(pools, activeFamily) {
 let lastStepsRenderSig = '';
 let lastModelsRenderSig = '';
 
-function renderTables(activeConv, modelBreakdown) {
+function renderTables(activeConv, modelBreakdown, speedMode = 'stream') {
+  const estimated = speedMode !== 'total';
   const steps = activeConv.recentSteps || [];
   const tabStepsBtn = $('tab-steps-btn');
   if (tabStepsBtn) {
     tabStepsBtn.textContent = `当前会话步骤测速与计费 (${steps.length}步)`;
   }
 
-  const stepsSig = `${activeConv.cascadeId || ''}:${steps.length}:${steps[0]?.stepIndex ?? -1}:${steps[0]?.tokPerSec ?? 0}:${steps[0]?.costUsd ?? 0}`;
+  const stepsSig = `${activeConv.cascadeId || ''}:${speedMode}:${JSON.stringify(steps)}`;
   if (stepsSig !== lastStepsRenderSig) {
     lastStepsRenderSig = stepsSig;
     const stepsTbody = $('steps-tbody');
@@ -156,6 +178,8 @@ function renderTables(activeConv, modelBreakdown) {
         ? `思考: ${st.thinkingTokens} tok${st.thinkingDurationSec ? ` (${st.thinkingDurationSec}s)` : ''} | `
         : '';
       const compTag = st.isCompactionStep ? ' [压缩汇总步]' : '';
+      const reason = speedReasonText(st.selectedSpeedReason);
+      const timingSource = st.responseTimingSource === 'post_thinking_estimate' ? '总时长减记录的思考阶段（估算）' : st.responseTimingSource === 'native_text_stream' ? '无思考正文的原始流时长（估算）' : '不可用';
       const stepCostVal = Number(st.costUsd || 0);
       const stepCostDisplay = stepCostVal >= 1 ? `$${stepCostVal.toFixed(2)}` : `$${stepCostVal.toFixed(3)}`;
       const costStyle =
@@ -164,12 +188,12 @@ function renderTables(activeConv, modelBreakdown) {
           : 'color: var(--foreground); font-weight: 600;';
       const pct5h = (stepCostVal / 0.25).toFixed(2);
       const pctWk = stepCostVal.toFixed(3);
-      tr.title = `单步消费: $${stepCostVal.toFixed(4)} (入 $${Number(st.inCostUsd || 0).toFixed(4)} + 缓 $${Number(st.cacheCostUsd || 0).toFixed(4)} + 出 $${Number(st.outCostUsd || 0).toFixed(4)} | 约合 5h ${pct5h}% / 周限 ${pctWk}%) | ${thinkInfo}正文/工具输出: ${st.responseTokens} tok | 流耗时: ${st.streamDurationSec}s | 总耗时: ${st.totalDurationSec}s`;
+      tr.title = `单步消费: $${stepCostVal.toFixed(4)} (入 $${Number(st.inCostUsd || 0).toFixed(4)} + 缓 $${Number(st.cacheCostUsd || 0).toFixed(4)} + 出 $${Number(st.outCostUsd || 0).toFixed(4)} | 约合 5h ${pct5h}% / 周限 ${pctWk}%) | ${thinkInfo}正文/工具输出: ${st.responseTokens} tok | 正文阶段: ${formatMetric(st.streamDurationSec, 's')} (${timingSource}) | 请求总耗时: ${formatMetric(st.totalDurationSec, 's')} | 整体吞吐: ${formatMetric(st.totalTokPerSec, ' tok/s')} | ${reason}`;
       tr.innerHTML = `
         <td>#${Number(st.stepIndex)}${compTag ? '<span class="muted">⚡</span>' : ''}</td>
         <td>${escapeHtml(st.modelShort)}</td>
-        <td><strong style="color: var(--speed-accent)">${Number(st.tokPerSec).toFixed(1)}</strong> tok/s</td>
-        <td>${Number(st.ttftSec).toFixed(1)}s</td>
+        <td><strong style="color: var(--speed-accent)">${formatMetric(st.tokPerSec, ' tok/s', estimated)}</strong><div class="speed-detail muted">${escapeHtml(reason)}</div></td>
+        <td>${formatMetric(st.ttftSec, 's')}</td>
         <td>${formatTokens(st.contextTokens)} / +${Number(st.outputTokens)}</td>
         <td style="color: var(--cache-green)">${Number(st.cacheHitPct)}%</td>
         <td style="${costStyle}">${stepCostDisplay}</td>
@@ -184,7 +208,7 @@ function renderTables(activeConv, modelBreakdown) {
   }
 
   const models = modelBreakdown || [];
-  const modelsSig = models.map((m) => `${m.modelId}:${m.calls}:${m.totalTokens}:${m.avgTokPerSec}`).join('|');
+  const modelsSig = `${speedMode}:${JSON.stringify(models)}`;
   if (modelsSig !== lastModelsRenderSig) {
     lastModelsRenderSig = modelsSig;
     const modelsTbody = $('models-tbody');
@@ -195,7 +219,7 @@ function renderTables(activeConv, modelBreakdown) {
       tr.innerHTML = `
         <td><strong>${escapeHtml(m.shortName)}</strong> <span class="muted">(${Number(m.calls)})</span></td>
         <td>${Number(m.calls)}</td>
-        <td>${Number(m.avgTokPerSec).toFixed(1)} tok/s</td>
+        <td>${formatMetric(m.avgTokPerSec, ' tok/s', estimated)}<div class="speed-detail muted">有效 ${sampleSummary(m.speedSummary)}</div></td>
         <td>${formatTokens(m.totalTokens)}</td>
         <td>${pricePrefix}${Number(m.costUsd).toFixed(2)}</td>
       `;
@@ -296,9 +320,17 @@ function applyTelemetryToDom(data) {
   }
 
   // 2. Status strip metrics
-  $('tok-per-sec').textContent = `${Number(active.latestTokPerSec || 0).toFixed(1)} tok/s`;
-  $('ttft-value').textContent = `${Number(active.latestTtftSec || 0).toFixed(1)}s`;
-  $('avg-speed-value').textContent = `${Number(active.avgTokPerSec || 0).toFixed(1)}`;
+  const estimatedSpeed = settings.speedMode !== 'total';
+  $('tok-per-sec').textContent = formatMetric(active.latestTokPerSec, ' tok/s', estimatedSpeed);
+  $('speed-mode-toggle').title = `最新一步：${speedReasonText(active.latestSpeedReason) || (estimatedSpeed ? '正文阶段估算' : '请求整体吞吐')}；点击切换口径`;
+  $('ttft-value').textContent = formatMetric(active.latestTtftSec, 's');
+  $('ttft-value').title = `原始首 Token 延迟，可能先返回思考内容；会话平均 ${formatMetric(active.ttftSummary?.avgSec, 's')}（${active.ttftSummary?.sampleCount || 0} 步）`;
+  $('avg-speed-value').textContent = formatMetric(active.avgTokPerSec, '', estimatedSpeed);
+  $('speed-sample-count').textContent = `有效 ${sampleSummary(active.speedSummary)}`;
+  $('speed-sample-count').title = Object.entries(active.speedSummary?.excludedReasons || {}).map(([reason, count]) => `${speedReasonText(reason)}：${count} 步`).join('；') || '全部有效；自动压缩单独排除';
+  $('speed-method-note').textContent = estimatedSpeed
+    ? '正文阶段估算；工具混合输出和起点不明的步骤不计均速，短样本单列。'
+    : '含思考的输出 Token ÷ 请求总耗时；不含调用之间的空闲和外部工具执行时间。';
   const latestStepCost = Number(active.latestStepCostUsd ?? active.recentSteps?.[0]?.costUsd ?? 0);
   if ($('step-cost-value')) {
     $('step-cost-value').textContent = `$${latestStepCost.toFixed(3)}`;
@@ -311,7 +343,7 @@ function applyTelemetryToDom(data) {
   $('active-model-short').title = active.activeModelLabel || '';
   $('today-tokens').textContent = formatTokens(quotas.today?.tokens || 0);
   $('today-cost').textContent = `$${Number(quotas.today?.costUsd || 0).toFixed(2)}`;
-  $('speed-mode-badge').textContent = settings.speedMode === 'total' ? '整体测速(含思考)' : '输出流测速';
+  $('speed-mode-badge').textContent = settings.speedMode === 'total' ? '整体吞吐' : '正文估算';
 
   // 3. Context Window Popover Section
   const limitTokens = ctx.limitTokens || 256000;
@@ -390,7 +422,7 @@ function applyTelemetryToDom(data) {
   $('setting-weekly-tokens').value = settings.weeklyTokenBudget || 150000000;
   $('setting-weekly-cost').value = settings.weeklyCostBudget || 100;
 
-  renderTables(active, data.modelBreakdown);
+  renderTables(active, data.modelBreakdown, settings.speedMode);
 }
 
 let manualRefreshFeedbackTimer = null;

@@ -811,3 +811,7 @@ body {
 .muted {
   color: var(--muted-foreground, #656d76);
 }
+
+.speed-method-note { font-size: 11px; margin-top: 6px; }
+.speed-detail { font-size: 10px; white-space: normal; max-width: 150px; }
+#steps-tbody td:nth-child(3) { min-width: 120px; }

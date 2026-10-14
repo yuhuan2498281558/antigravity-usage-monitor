@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Response, SidecarApp } from 'sidecar_sdk';
+import { extractModelSteps, parseIsoMs, normalizeCachedStep, speedMetric, summarizeSpeed, summarizeTtft, createSpeedAccumulator, accumulateSpeed, finishSpeed } from './speed-metrics.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || join(HERE, '.data');
@@ -19,7 +20,7 @@ const DEFAULT_SETTINGS = {
   weeklyTokenBudget: 150000000, // 150M tokens default custom weekly target
   weeklyCostBudget: 100,       // $100 default custom weekly cost target (matches Ultra weekly pool)
   weeklyLimitMode: 'official', // 'official' | 'custom_tokens' | 'custom_cost'
-  speedMode: 'stream',         // 'stream' (streamTokens / streamTime) | 'total' (outputTokens / totalTime)
+  speedMode: 'stream',         // Answer-phase estimate, or request-level throughput; never mixed.
 };
 
 // Official API pricing in USD per 1M tokens (Input, CacheRead, Output incl. Thinking)
@@ -58,8 +59,10 @@ const PLACEHOLDER_MAP = {
 };
 
 // In-memory cache of trajectory step usage: cascadeId -> { signature, steps }
-const CACHE_SCHEMA_VERSION = 'v5';
-let trajectoryCache = loadJson(CACHE_FILE, {});
+const CACHE_SCHEMA_VERSION = 'v6-speed-metrics';
+let trajectoryCache = Object.fromEntries(Object.entries(loadJson(CACHE_FILE, {})).map(([id, entry]) => [
+  id, { ...entry, steps: (entry.steps || []).map(normalizeCachedStep) },
+]));
 const inFlightRequests = new Map();
 let quotaSummaryCache = { ts: 0, data: null, error: null };
 
@@ -85,21 +88,8 @@ function loadSettings() {
   return { ...DEFAULT_SETTINGS, ...loadJson(SETTINGS_FILE, {}) };
 }
 
-function parseIsoMs(isoStr) {
-  if (!isoStr || typeof isoStr !== 'string') return 0;
-  const baseMs = Date.parse(isoStr);
-  if (!baseMs || Number.isNaN(baseMs)) return 0;
-  const match = isoStr.match(/\.(\d+)Z$/);
-  if (!match) return baseMs;
-  const fracSec = Number(`0.${match[1]}`);
-  const wholeSecMs = Math.floor(baseMs / 1000) * 1000;
-  return wholeSecMs + fracSec * 1000;
-}
-
-function parseDurationSec(durStr) {
-  if (!durStr || typeof durStr !== 'string') return 0;
-  const n = Number.parseFloat(durStr);
-  return Number.isFinite(n) && n > 0 ? n : 0;
+function roundMetric(value) {
+  return Number.isFinite(value) ? +value.toFixed(1) : null;
 }
 
 async function callLsRpc(method, body = {}, timeoutMs = 5000) {
@@ -238,145 +228,6 @@ function computeStepCost(step, pricing) {
   const cacheCost = (step.cacheReadTokens / 1_000_000) * pricing.cache;
   const outCost = (step.outputTokens / 1_000_000) * pricing.output;
   return inCost + cacheCost + outCost;
-}
-
-function extractModelSteps(rawSteps = [], generatorMetadata = []) {
-  const genMetaByStep = new Map();
-  for (const gm of generatorMetadata || []) {
-    const indices = gm?.stepIndices || [];
-    for (const idx of indices) {
-      genMetaByStep.set(Number(idx), gm);
-    }
-  }
-
-  const parsed = [];
-  rawSteps.forEach((s, idx) => {
-    const m = s?.metadata;
-    const isCompactionStep = s?.type === 'CORTEX_STEP_TYPE_CHECKPOINT';
-    const u = m?.modelUsage || (m?.retryInfos?.[0]?.usage ?? null);
-    if (!u) return;
-
-    const stepIndex = s?.metadata?.sourceTrajectoryStepInfo?.stepIndex ?? idx;
-    const gm = m?.generatorMetadata?.[0] || genMetaByStep.get(Number(stepIndex)) || genMetaByStep.get(idx) || null;
-    const chatModel = gm?.chatModel || null;
-    const ctxWinMeta = chatModel?.chatStartMetadata?.contextWindowMetadata || null;
-
-    const p = s?.plannerResponse || {};
-    const inputTokens = Number(u.inputTokens || 0);
-    const cacheReadTokens = Number(u.cacheReadTokens || 0);
-    const outputTokens = Number(u.outputTokens || 0);
-    const thinkingTokens = Number(p.thinkingTokens || u.thinkingOutputTokens || chatModel?.usage?.thinkingOutputTokens || 0);
-    const responseTokens = Number(
-      p.responseTokens || u.responseOutputTokens || chatModel?.usage?.responseOutputTokens || Math.max(0, outputTokens - thinkingTokens)
-    );
-
-    const createdAtMs = parseIsoMs(m.createdAt);
-    const viewableAtMs = parseIsoMs(m.viewableAt || m.createdAt) || createdAtMs;
-    const finishedAtMs =
-      parseIsoMs(m.finishedGeneratingAt || m.completedAt || m.viewableAt || m.createdAt) ||
-      viewableAtMs;
-
-    const rawViewableSec =
-      createdAtMs > 0 && viewableAtMs >= createdAtMs
-        ? Math.max(0.05, (viewableAtMs - createdAtMs) / 1000)
-        : 0;
-    const afterViewableSec =
-      viewableAtMs > 0 && finishedAtMs > viewableAtMs
-        ? (finishedAtMs - viewableAtMs) / 1000
-        : 0;
-    const totalDurationSec =
-      createdAtMs > 0 && finishedAtMs > createdAtMs
-        ? (finishedAtMs - createdAtMs) / 1000
-        : 0;
-
-    const nativeTtftSec = parseDurationSec(chatModel?.timeToFirstToken);
-    const nativeStreamSec = parseDurationSec(chatModel?.streamingDuration);
-    const thinkingDurationSec = parseDurationSec(p.thinkingDuration);
-    const respText = String(p.modifiedResponse || p.response || '').trim();
-    const hasVisibleText = respText.length > 0;
-    const hasToolCalls = Array.isArray(p.toolCalls) && p.toolCalls.length > 0;
-
-    let ttftSec = nativeTtftSec > 0 ? nativeTtftSec : rawViewableSec;
-    let streamTokens = outputTokens;
-    let streamDurationSec = 0;
-    let speedBasis = 'model_stream';
-
-    const postThinkingSec =
-      thinkingDurationSec > 0 && totalDurationSec > thinkingDurationSec
-        ? totalDurationSec - thinkingDurationSec
-        : afterViewableSec;
-
-    if (hasVisibleText && responseTokens > 0 && postThinkingSec >= 0.35) {
-      streamTokens = responseTokens;
-      streamDurationSec = postThinkingSec;
-      speedBasis = 'response_stream';
-    } else if (
-      nativeStreamSec >= 1.0 &&
-      outputTokens > 0 &&
-      (!hasToolCalls || nativeStreamSec >= totalDurationSec * 0.35)
-    ) {
-      // Unbuffered streaming (e.g. write_to_file streaming file content)
-      streamTokens = responseTokens > 0 ? responseTokens : outputTokens;
-      streamDurationSec = nativeStreamSec;
-      speedBasis = 'native_stream';
-    } else {
-      // Buffered tool call (e.g. run_command where server buffers JSON until completion):
-      // use totalDurationSec for decoding rate, and thinkingDurationSec (if < total) for TTFT
-      streamTokens = outputTokens;
-      streamDurationSec = totalDurationSec;
-      speedBasis = 'total_fallback';
-      if (!hasVisibleText && hasToolCalls && thinkingDurationSec > 0 && thinkingDurationSec >= totalDurationSec * 0.9) {
-        // Server merged thinking + buffered tool generation into thinkingDuration;
-        // estimate true TTFT from thinking token ratio
-        const thinkRatio = outputTokens > 0 ? Math.min(0.85, thinkingTokens / outputTokens) : 0.2;
-        ttftSec = Math.max(0.4, totalDurationSec * thinkRatio);
-      }
-    }
-
-    const totalTokPerSec =
-      totalDurationSec >= 0.12 && outputTokens > 0 ? outputTokens / totalDurationSec : 0;
-    let streamTokPerSec =
-      streamDurationSec >= 0.12 && streamTokens > 0
-        ? streamTokens / streamDurationSec
-        : totalTokPerSec;
-
-    // Guard against mixed text + buffered large tool call spikes
-    if (hasToolCalls && streamTokPerSec > 260 && totalTokPerSec > 0 && totalTokPerSec < 180) {
-      streamTokens = outputTokens;
-      streamDurationSec = totalDurationSec;
-      streamTokPerSec = totalTokPerSec;
-      speedBasis = 'total_fallback';
-    }
-
-    const estimatedContextTokens = Number(ctxWinMeta?.estimatedTokensUsed || 0);
-    const maxContextBudgetTokens = Number(ctxWinMeta?.maxContextTokens || 256000);
-
-    parsed.push({
-      stepIndex,
-      isCompactionStep,
-      modelKey: u.model || chatModel?.model || m.generatorModel || 'MODEL_PLACEHOLDER_M418',
-      apiProvider: u.apiProvider || chatModel?.usage?.apiProvider || '',
-      createdAt: m.createdAt || null,
-      createdAtMs: Math.floor(createdAtMs),
-      hasVisibleText,
-      inputTokens,
-      cacheReadTokens,
-      outputTokens,
-      thinkingTokens,
-      responseTokens,
-      streamTokens,
-      speedBasis,
-      estimatedContextTokens,
-      maxContextBudgetTokens,
-      thinkingDurationSec: +thinkingDurationSec.toFixed(3),
-      ttftSec: +ttftSec.toFixed(3),
-      streamDurationSec: +streamDurationSec.toFixed(3),
-      totalDurationSec: +totalDurationSec.toFixed(3),
-      streamTokPerSec,
-      totalTokPerSec,
-    });
-  });
-  return parsed;
 }
 
 function getStartOfLocalDayMs(now = new Date()) {
@@ -762,7 +613,9 @@ async function buildTelemetryPayloadInternal(
         const prev = trajectoryCache[conv.cascadeId];
         try {
           const trajRes = await callLsRpc('GetCascadeTrajectory', { cascadeId: conv.cascadeId });
-          const rawSteps = trajRes?.trajectory?.steps || [];
+          if (!Array.isArray(trajRes?.trajectory?.steps)) throw new Error('Trajectory steps unavailable');
+          const rawSteps = trajRes.trajectory.steps;
+          if (Number(trajRes.numTotalSteps) > rawSteps.length) throw new Error('Incomplete trajectory; retaining cached usage');
           const generatorMeta = trajRes?.trajectory?.generatorMetadata || [];
           const steps = extractModelSteps(rawSteps, generatorMeta);
           const prevLast = prev?.steps?.[prev.steps.length - 1];
@@ -810,8 +663,9 @@ async function buildTelemetryPayloadInternal(
   const activeSteps = activeEntry?.steps || [];
 
   const useStreamSpeed = settings.speedMode !== 'total';
-  let sessionSpeedNumeratorTokens = 0;
-  let sessionSpeedDenominatorSec = 0;
+  const speedMode = useStreamSpeed ? 'stream' : 'total';
+  const sessionSpeed = summarizeSpeed(activeSteps, speedMode);
+  const sessionTtft = summarizeTtft(activeSteps);
   let sessionCostUsd = 0;
   let sessionInputTokens = 0;
   let sessionCacheReadTokens = 0;
@@ -819,24 +673,13 @@ async function buildTelemetryPayloadInternal(
   const enrichedActiveSteps = activeSteps.map((st) => {
     const mInfo = resolveModelInfo(st.modelKey, dynamicModelMap, st.apiProvider);
     const costUsd = computeStepCost(st, mInfo.pricing);
-    const stepStreamTokens = st.streamTokens ?? st.outputTokens;
-    const stepStreamSec = st.streamDurationSec > 0 ? st.streamDurationSec : st.totalDurationSec;
-
-    if (!st.isCompactionStep) {
-      if (useStreamSpeed) {
-        sessionSpeedNumeratorTokens += stepStreamTokens;
-        sessionSpeedDenominatorSec += stepStreamSec;
-      } else {
-        sessionSpeedNumeratorTokens += st.outputTokens;
-        sessionSpeedDenominatorSec += st.totalDurationSec;
-      }
-    }
+    const metric = speedMetric(st, speedMode);
 
     sessionCostUsd += costUsd;
     sessionInputTokens += st.inputTokens;
     sessionCacheReadTokens += st.cacheReadTokens;
 
-    const tokPerSec = useStreamSpeed ? st.streamTokPerSec : st.totalTokPerSec;
+    const tokPerSec = metric.value;
     const totalPrompt = st.inputTokens + st.cacheReadTokens;
     const cacheHitPct = totalPrompt > 0 ? (st.cacheReadTokens / totalPrompt) * 100 : 0;
 
@@ -849,8 +692,9 @@ async function buildTelemetryPayloadInternal(
       modelLabel: st.isCompactionStep ? `${mInfo.label} [自动压缩]` : mInfo.label,
       modelShort: st.isCompactionStep ? `${mInfo.shortName}·压缩` : mInfo.shortName,
       family: mInfo.family,
-      tokPerSec: +tokPerSec.toFixed(1),
-      ttftSec: +st.ttftSec.toFixed(1),
+      tokPerSec: roundMetric(tokPerSec),
+      selectedSpeedReason: metric.reason,
+      ttftSec: st.nativeTtftSec,
       cacheHitPct: +cacheHitPct.toFixed(1),
       costUsd: +costUsd.toFixed(4),
       inCostUsd: +inCostUsd.toFixed(4),
@@ -863,10 +707,7 @@ async function buildTelemetryPayloadInternal(
   const latestEnriched =
     enrichedActiveSteps.length > 0 ? enrichedActiveSteps[enrichedActiveSteps.length - 1] : null;
 
-  const sessionAvgTokPerSec =
-    sessionSpeedDenominatorSec > 0.1
-      ? +(sessionSpeedNumeratorTokens / sessionSpeedDenominatorSec).toFixed(1)
-      : latestEnriched?.tokPerSec || 0;
+  const sessionAvgTokPerSec = roundMetric(sessionSpeed.avgTokPerSec);
 
   // Context breakdown from the latest step
   const ctxCached = latestEnriched?.cacheReadTokens || 0;
@@ -975,24 +816,20 @@ async function buildTelemetryPayloadInternal(
             inputTokens: 0,
             cacheReadTokens: 0,
             outputTokens: 0,
-            speedTokens: 0,
             totalTokens: 0,
             costUsd: 0,
-            totalDurationSec: 0,
+            speedAccumulator: createSpeedAccumulator(),
           });
         }
         const agg = perModelStats.get(mInfo.label);
-        const stepStreamTokens = st.streamTokens ?? st.outputTokens;
-        const stepStreamSec = st.streamDurationSec > 0 ? st.streamDurationSec : st.totalDurationSec;
+        accumulateSpeed(agg.speedAccumulator, st, speedMode);
 
         agg.calls += 1;
         agg.inputTokens += st.inputTokens;
         agg.cacheReadTokens += st.cacheReadTokens;
         agg.outputTokens += st.outputTokens;
-        agg.speedTokens += useStreamSpeed ? stepStreamTokens : st.outputTokens;
         agg.totalTokens += stepTotalTokens;
         agg.costUsd += stepCost;
-        agg.totalDurationSec += useStreamSpeed ? stepStreamSec : st.totalDurationSec;
       }
     }
   }
@@ -1076,9 +913,13 @@ async function buildTelemetryPayloadInternal(
       isRunning: activeConvSummary?.status === 'CASCADE_RUN_STATUS_RUNNING',
       status: activeConvSummary?.status || 'IDLE',
       stepCount: enrichedActiveSteps.length,
-      latestTokPerSec: latestEnriched?.tokPerSec ?? 0,
-      latestTtftSec: latestEnriched?.ttftSec ?? 0,
+      latestTokPerSec: latestEnriched?.tokPerSec ?? null,
+      latestTtftSec: latestEnriched?.ttftSec ?? null,
+      latestSpeedReason: latestEnriched?.selectedSpeedReason ?? null,
+      latestTotalTokPerSec: roundMetric(speedMetric(latestEnriched || {}, 'total').value),
       avgTokPerSec: sessionAvgTokPerSec,
+      speedSummary: sessionSpeed,
+      ttftSummary: sessionTtft,
       latestStepCostUsd: latestEnriched?.costUsd ?? 0,
       sessionCostUsd: +sessionCostUsd.toFixed(2),
       latestCacheHitPct,
@@ -1153,13 +994,11 @@ async function buildTelemetryPayloadInternal(
     },
     modelBreakdown: Array.from(perModelStats.values())
       .sort((a, b) => b.calls - a.calls || String(a.label).localeCompare(String(b.label)))
-      .map((m) => ({
+      .map(({ speedAccumulator, ...m }) => ({
         ...m,
         costUsd: +m.costUsd.toFixed(3),
-        avgTokPerSec:
-          m.totalDurationSec > 0.1
-            ? +((m.speedTokens ?? m.outputTokens) / m.totalDurationSec).toFixed(1)
-            : 0,
+        avgTokPerSec: roundMetric(finishSpeed(speedAccumulator).avgTokPerSec),
+        speedSummary: finishSpeed(speedAccumulator),
       })),
   };
 }

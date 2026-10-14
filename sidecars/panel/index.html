@@ -26,12 +26,12 @@
     <!-- Compact Speed & Token Status Strip (1:1 replica of the left status bar above input) -->
     <section class="status-strip-card" aria-label="实时测速与消耗状态栏">
       <div class="strip-row strip-row-main">
-        <span class="speed-group" title="点击切换「纯输出流速度」与「含思考整体速度」" id="speed-mode-toggle">
+        <span class="speed-group" title="最新一步；点击切换「正文估算」与「整体吞吐」" id="speed-mode-toggle">
           <span id="speed-dot" class="speed-dot"></span>
-          <strong id="tok-per-sec" class="speed-value">0.0 tok/s</strong>
+          <strong id="tok-per-sec" class="speed-value">—</strong>
         </span>
-        <span class="metric-item">首字 <strong id="ttft-value">0.0s</strong></span>
-        <span class="metric-item">均速 <strong id="avg-speed-value">0.0</strong></span>
+        <span class="metric-item">首Token <strong id="ttft-value">—</strong></span>
+        <span class="metric-item">均速 <strong id="avg-speed-value">—</strong> <small id="speed-sample-count" class="muted">有效 0/0 步</small></span>
         <span class="strip-divider">|</span>
         <span class="metric-item" title="最新一步消费 / 当前会话累计消费">本步 <strong id="step-cost-value" class="cost-value">$0.000</strong> · 累计 <strong id="session-cost-value" class="cost-value">$0.00</strong></span>
         <span class="metric-item">缓存 <strong id="cache-hit-value" class="cache-value">0%</strong></span>
@@ -50,8 +50,9 @@
         <span class="today-summary">
           今日 <strong id="today-tokens">0</strong> · ≈<strong id="today-cost">$0.00</strong>
         </span>
-        <span class="speed-mode-label muted" id="speed-mode-badge">输出流测速</span>
+        <span class="speed-mode-label muted" id="speed-mode-badge">正文估算</span>
       </div>
+      <div id="speed-method-note" class="speed-method-note muted">正文阶段估算；计时不明的步骤不计均速。</div>
     </section>
 
     <!-- Quota & Context Popover Card (1:1 replica of the right popover card in screenshot) -->
@@ -210,7 +211,7 @@
                 <th>步</th>
                 <th>模型</th>
                 <th>速度</th>
-                <th>首字</th>
+                <th>首Token</th>
                 <th>上下文/输出</th>
                 <th>缓存</th>
                 <th>消费</th>
@@ -246,8 +247,8 @@
         <label class="field-label">
           <span>tok/s 测速口径</span>
           <select id="setting-speed-mode">
-            <option value="stream">纯输出流速度 (扣除首字思考时间)</option>
-            <option value="total">整体生成速度 (含首字思考总耗时)</option>
+            <option value="stream">正文阶段估算 (仅有效纯文本样本)</option>
+            <option value="total">请求整体吞吐 (含等待与思考)</option>
           </select>
         </label>
         <label class="field-label">

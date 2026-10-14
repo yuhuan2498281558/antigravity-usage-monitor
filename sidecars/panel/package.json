@@ -3,5 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Sidecar backend and web UI for Antigravity Usage & Speed Monitor."
+  "description": "Sidecar backend and web UI for Antigravity Usage & Speed Monitor.",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
 }
