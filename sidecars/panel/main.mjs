@@ -1,5 +1,5 @@
 // Backend for Antigravity Usage & Speed Monitor Sidecar Extension.
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, promises as fsPromises, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,11 @@ const DATA_DIR = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR || join(HERE, '.dat
 const SETTINGS_FILE = join(DATA_DIR, 'settings.json');
 const CACHE_FILE = join(DATA_DIR, 'trajectory_usage_cache.json');
 const CONVERSATIONS_DIR = join(homedir(), '.gemini', 'antigravity', 'conversations');
+const DEEP_STATS_CACHE_CANDIDATES = [
+  join(homedir(), '.gemini', 'antigravity-ide', 'brain', '.deep_stats_cache.json'),
+  join(homedir(), '.gemini', 'antigravity', 'brain', '.deep_stats_cache.json'),
+  join(homedir(), '.gemini', 'antigravity-idea', 'brain', '.deep_stats_cache.json'),
+];
 
 const LS_ADDR = process.env.ANTIGRAVITY_LS_ADDRESS;
 const CSRF_TOKEN = process.env.ANTIGRAVITY_CSRF_TOKEN;
@@ -28,17 +33,69 @@ const DEFAULT_SETTINGS = {
 // Gemini 4 Argon official price (until 2026-11-30): Input $2.00 / Cache $0.10 / Output $10.00
 // Ultra 5h Pool (100%) = $25.00 USD | Ultra Weekly Pool (100%) = $100.00 USD
 const MODEL_PRICING = {
+  // Gemini 4 & 3.x & 2.5 Official Catalog Pricing (USD / 1M tokens)
   'gemini-4-argon-high': { input: 2.00, cache: 0.10, output: 10.0, short: 'argon-4-high', family: 'Gemini' },
   'gemini-4-argon-medium': { input: 2.00, cache: 0.10, output: 10.0, short: 'argon-4', family: 'Gemini' },
   'gemini-4-argon-low': { input: 2.00, cache: 0.10, output: 10.0, short: 'argon-4-low', family: 'Gemini' },
-  'gemini-3.8-flash-high': { input: 0.30, cache: 0.03, output: 2.5, short: 'flash-3.8-high', family: 'Gemini' },
-  'gemini-3.8-flash-medium': { input: 0.30, cache: 0.03, output: 2.5, short: 'flash-3.8', family: 'Gemini' },
-  'gemini-3.8-flash-low': { input: 0.15, cache: 0.015, output: 1.0, short: 'flash-3.8-low', family: 'Gemini' },
-  'gemini-2.5-flash-lite': { input: 0.10, cache: 0.01, output: 0.40, short: 'flash-2.5-lite', family: 'Gemini' },
-  'gemini-2.5-flash': { input: 0.30, cache: 0.03, output: 2.5, short: 'flash-2.5', family: 'Gemini' },
+  'gemini-4-argon': { input: 2.00, cache: 0.10, output: 10.0, short: 'argon-4', family: 'Gemini' },
+  'gemini-3.8-flash-high': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.8-high', family: 'Gemini' },
+  'gemini-3.8-flash-medium': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.8', family: 'Gemini' },
+  'gemini-3.8-flash-low': { input: 0.30, cache: 0.03, output: 2.50, short: 'flash-3.8-low', family: 'Gemini' },
+  'gemini-3.8-flash': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.8', family: 'Gemini' },
+  'gemini-3.7-flash': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.7', family: 'Gemini' },
+  'gemini-3.6-flash': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.6', family: 'Gemini' },
+  'gemini-3.5-flash': { input: 1.50, cache: 0.15, output: 9.00, short: 'flash-3.5', family: 'Gemini' },
+  'gemini-3.5-flash-lite': { input: 0.30, cache: 0.03, output: 2.50, short: 'flash-3.5-lite', family: 'Gemini' },
+  'gemini-3.1-pro': { input: 2.00, cache: 0.20, output: 12.0, short: 'pro-3.1', family: 'Gemini' },
+  'gemini-3.1-flash-lite': { input: 0.25, cache: 0.025, output: 1.50, short: 'flash-3.1-lite', family: 'Gemini' },
+  'gemini-3-flash': { input: 0.50, cache: 0.05, output: 3.00, short: 'flash-3', family: 'Gemini' },
   'gemini-2.5-pro': { input: 1.25, cache: 0.125, output: 10.0, short: 'pro-2.5', family: 'Gemini' },
-  'claude-opus-4-6-thinking': { input: 5.0, cache: 0.50, output: 25.0, short: 'opus', family: 'Claude' },
-  'claude-sonnet-4-6': { input: 3.0, cache: 0.30, output: 15.0, short: 'sonnet', family: 'Claude' },
+  'gemini-2.5-flash': { input: 0.30, cache: 0.03, output: 2.50, short: 'flash-2.5', family: 'Gemini' },
+  'gemini-2.5-flash-lite': { input: 0.10, cache: 0.01, output: 0.40, short: 'flash-2.5-lite', family: 'Gemini' },
+
+  // Claude 4.5 / 4.6 / 4.7 / 4.8 / 5.x Official Catalog Pricing
+  'claude-fable-5-1': { input: 10.0, cache: 0.25, output: 50.0, short: 'fable-5.1', family: 'Claude' },
+  'claude-fable-5': { input: 10.0, cache: 1.00, output: 50.0, short: 'fable-5', family: 'Claude' },
+  'claude-opus-5-5': { input: 4.00, cache: 0.20, output: 20.0, short: 'opus-5.5', family: 'Claude' },
+  'claude-opus-5': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus-5', family: 'Claude' },
+  'claude-opus-4-8': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus-4.8', family: 'Claude' },
+  'claude-opus-4-7': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus-4.7', family: 'Claude' },
+  'claude-opus-4-6-thinking': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus', family: 'Claude' },
+  'claude-opus-4-6': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus-4.6', family: 'Claude' },
+  'claude-opus-4-5': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus-4.5', family: 'Claude' },
+  'claude-sonnet-5-5': { input: 2.00, cache: 0.10, output: 10.0, short: 'sonnet-5.5', family: 'Claude' },
+  'claude-sonnet-5': { input: 2.00, cache: 0.20, output: 10.0, short: 'sonnet-5', family: 'Claude' },
+  'claude-sonnet-4-6': { input: 3.00, cache: 0.30, output: 15.0, short: 'sonnet', family: 'Claude' },
+  'claude-sonnet-4-5': { input: 3.00, cache: 0.30, output: 15.0, short: 'sonnet-4.5', family: 'Claude' },
+  'claude-haiku-5-5': { input: 0.10, cache: 0.01, output: 0.50, short: 'haiku-5.5', family: 'Claude' },
+  'claude-haiku-4-5': { input: 1.00, cache: 0.10, output: 5.00, short: 'haiku-4.5', family: 'Claude' },
+
+  // OpenAI / GPT Official Catalog Pricing
+  'gpt-6-astra': { input: 10.0, cache: 1.00, output: 50.0, short: 'gpt-6-astra', family: 'GPT' },
+  'gpt-6.1-sol': { input: 2.00, cache: 0.10, output: 10.0, short: 'gpt-6.1-sol', family: 'GPT' },
+  'gpt-6-sol': { input: 2.00, cache: 0.20, output: 10.0, short: 'gpt-6-sol', family: 'GPT' },
+  'gpt-6-luna': { input: 0.10, cache: 0.01, output: 0.50, short: 'gpt-6-luna', family: 'GPT' },
+  'gpt-5.6': { input: 4.00, cache: 0.40, output: 20.0, short: 'gpt-5.6', family: 'GPT' },
+  'gpt-5.6-sol': { input: 4.00, cache: 0.40, output: 20.0, short: 'gpt-5.6-sol', family: 'GPT' },
+  'gpt-5.6-terra': { input: 2.00, cache: 0.20, output: 12.0, short: 'gpt-5.6-terra', family: 'GPT' },
+  'gpt-5.6-luna': { input: 0.20, cache: 0.02, output: 1.20, short: 'gpt-5.6-luna', family: 'GPT' },
+  'gpt-5.5': { input: 5.00, cache: 0.50, output: 30.0, short: 'gpt-5.5', family: 'GPT' },
+  'gpt-5.4': { input: 2.50, cache: 0.25, output: 15.0, short: 'gpt-5.4', family: 'GPT' },
+  'gpt-5.4-mini': { input: 0.75, cache: 0.075, output: 4.50, short: 'gpt-5.4-mini', family: 'GPT' },
+  'gpt-5.4-nano': { input: 0.20, cache: 0.02, output: 1.25, short: 'gpt-5.4-nano', family: 'GPT' },
+  'gpt-5.3-codex': { input: 1.75, cache: 0.175, output: 14.0, short: 'gpt-5.3-codex', family: 'GPT' },
+  'gpt-5.2': { input: 1.75, cache: 0.175, output: 14.0, short: 'gpt-5.2', family: 'GPT' },
+  'gpt-5.1': { input: 1.25, cache: 0.125, output: 10.0, short: 'gpt-5.1', family: 'GPT' },
+  'gpt-5': { input: 1.25, cache: 0.125, output: 10.0, short: 'gpt-5', family: 'GPT' },
+  'gpt-5-mini': { input: 0.25, cache: 0.025, output: 2.00, short: 'gpt-5-mini', family: 'GPT' },
+  'gpt-5-nano': { input: 0.05, cache: 0.005, output: 0.40, short: 'gpt-5-nano', family: 'GPT' },
+  'gpt-4.1': { input: 2.00, cache: 0.50, output: 8.00, short: 'gpt-4.1', family: 'GPT' },
+  'gpt-4.1-mini': { input: 0.40, cache: 0.10, output: 1.60, short: 'gpt-4.1-mini', family: 'GPT' },
+  'gpt-4o': { input: 2.50, cache: 1.25, output: 10.0, short: 'gpt-4o', family: 'GPT' },
+  'gpt-4o-mini': { input: 0.15, cache: 0.075, output: 0.60, short: 'gpt-4o-mini', family: 'GPT' },
+  'o4-mini': { input: 1.10, cache: 0.275, output: 4.40, short: 'o4-mini', family: 'GPT' },
+  'o3': { input: 2.00, cache: 0.50, output: 8.00, short: 'o3', family: 'GPT' },
+  'o3-mini': { input: 1.10, cache: 0.55, output: 4.40, short: 'o3-mini', family: 'GPT' },
   'gpt-oss-120b-medium': { input: 0.80, cache: 0.10, output: 2.40, short: 'gpt-oss', family: 'GPT' },
 };
 
@@ -63,6 +120,7 @@ const CACHE_SCHEMA_VERSION = 'v9-unified-throughput';
 let trajectoryCache = Object.fromEntries(Object.entries(loadJson(CACHE_FILE, {})).map(([id, entry]) => [
   id, { ...entry, steps: (entry.steps || []).map(normalizeCachedStep) },
 ]));
+let externalDeepStatsMemo = { sig: '', convos: new Map() };
 const inFlightRequests = new Map();
 let quotaSummaryCache = { ts: 0, data: null, error: null };
 
@@ -170,17 +228,50 @@ function inferFamilyFromProviderOrKey(rawModelKey = '', modelId = '', apiProvide
   return 'Other';
 }
 
-function resolveModelInfo(rawModelKey, dynamicModelMap, apiProvider = '') {
-  const dyn = dynamicModelMap.get(rawModelKey) || PLACEHOLDER_MAP[rawModelKey] || {
-    modelId: rawModelKey || 'unknown',
-    label: rawModelKey || 'Unknown Model',
-  };
-  const explicitPricing = MODEL_PRICING[dyn.modelId];
+function getBaseModelLabel(label = '') {
+  return String(label || '')
+    .replace(/\s*\((?:High|Medium|Low|Thinking|Extra Low)\)\s*$/i, '')
+    .trim() || String(label || 'Unknown Model');
+}
+
+function formatGenericModelSlug(slug = '') {
+  const s = String(slug || '').trim().replace(/^session-display:/i, '');
+  if (!s || /^MODEL_PLACEHOLDER_/i.test(s)) return '';
+  const m = s.match(/^gemini-(\d+(?:\.\d+)?)-(pro|flash|argon)(?:-(lite))?/i);
+  if (m) {
+    const ver = m[1];
+    const tier = m[2].charAt(0).toUpperCase() + m[2].slice(1).toLowerCase();
+    const lite = m[3] ? ' Lite' : '';
+    return `Gemini ${ver} ${tier}${lite}`;
+  }
+  return '';
+}
+
+function resolveModelInfo(rawModelKey, dynamicModelMap, apiProvider = '', modelDisplayName = '') {
+  const dyn = dynamicModelMap.get(rawModelKey) || PLACEHOLDER_MAP[rawModelKey];
+  const cleanRawFallback =
+    rawModelKey && !/^MODEL_PLACEHOLDER_/i.test(String(rawModelKey)) ? rawModelKey : '';
+  const derivedDisplay =
+    modelDisplayName ||
+    dyn?.label ||
+    formatGenericModelSlug(rawModelKey) ||
+    cleanRawFallback ||
+    'Unknown Model';
+  const baseLabel = getBaseModelLabel(derivedDisplay);
+  const canonicalSlug = baseLabel.toLowerCase().replace(/\s+/g, '-');
+  const dashedSlug = canonicalSlug.replace(/\./g, '-');
+  const modelId = dyn?.modelId || rawModelKey || 'unknown';
+  const explicitPricing =
+    MODEL_PRICING[modelId] ||
+    MODEL_PRICING[rawModelKey] ||
+    MODEL_PRICING[canonicalSlug] ||
+    MODEL_PRICING[dashedSlug];
   if (explicitPricing) {
     return {
       rawModel: rawModelKey,
-      modelId: dyn.modelId,
-      label: dyn.label,
+      modelId,
+      label: derivedDisplay,
+      baseLabel,
       shortName: explicitPricing.short,
       family: explicitPricing.family,
       pricing: explicitPricing,
@@ -188,14 +279,16 @@ function resolveModelInfo(rawModelKey, dynamicModelMap, apiProvider = '') {
     };
   }
 
-  const inferredFamily = inferFamilyFromProviderOrKey(rawModelKey, dyn.modelId, apiProvider);
-  const rawUpper = String(rawModelKey || dyn.modelId || '').toUpperCase();
+  const inferredFamily = inferFamilyFromProviderOrKey(rawModelKey, modelId, apiProvider);
+  const rawUpper = String(`${rawModelKey || ''} ${modelId || ''} ${derivedDisplay}`).toUpperCase();
   let fallbackPricing;
   if (inferredFamily === 'Gemini') {
     if (rawUpper.includes('LITE')) {
       fallbackPricing = { input: 0.10, cache: 0.01, output: 0.40, short: 'gemini-lite', family: 'Gemini' };
     } else if (rawUpper.includes('FLASH')) {
       fallbackPricing = { input: 0.30, cache: 0.03, output: 2.50, short: 'gemini-flash', family: 'Gemini' };
+    } else if (rawUpper.includes('PRO')) {
+      fallbackPricing = { input: 1.25, cache: 0.125, output: 10.0, short: 'gemini-pro', family: 'Gemini' };
     } else {
       fallbackPricing = { input: 2.00, cache: 0.10, output: 10.0, short: 'gemini', family: 'Gemini' };
     }
@@ -208,15 +301,16 @@ function resolveModelInfo(rawModelKey, dynamicModelMap, apiProvider = '') {
       input: 0,
       cache: 0,
       output: 0,
-      short: (dyn.label || 'unknown').split(' ')[0].toLowerCase(),
+      short: (derivedDisplay || 'unknown').split(' ')[0].toLowerCase(),
       family: 'Other',
     };
   }
 
   return {
     rawModel: rawModelKey,
-    modelId: dyn.modelId,
-    label: dyn.label,
+    modelId,
+    label: derivedDisplay,
+    baseLabel: getBaseModelLabel(derivedDisplay),
     shortName: fallbackPricing.short,
     family: fallbackPricing.family,
     pricing: fallbackPricing,
@@ -296,6 +390,8 @@ function resolveTimeWindow(
     }
     case '7d':
       return { key: '7d', label: '近 7 天', startMs: nowMs - 7 * 24 * 3600 * 1000, endMs: nowMs };
+    case '14d':
+      return { key: '14d', label: '近 14 天', startMs: nowMs - 14 * 24 * 3600 * 1000, endMs: nowMs };
     case '30d':
       return { key: '30d', label: '近 30 天', startMs: nowMs - 30 * 24 * 3600 * 1000, endMs: nowMs };
     case 'custom': {
@@ -325,6 +421,7 @@ function createUsageBucket() {
     responseTokens: 0,
     totalTokens: 0,
     costUsd: 0,
+    savedCostUsd: 0,
     geminiTokens: 0,
     geminiCostUsd: 0,
     geminiCalls: 0,
@@ -336,6 +433,8 @@ function createUsageBucket() {
 
 function accumulateStepIntoBucket(bucket, st, mInfo, stepCost, cascadeId) {
   const stepTotalTokens = st.inputTokens + st.cacheReadTokens + st.outputTokens;
+  const savedCost =
+    (st.cacheReadTokens / 1_000_000) * Math.max(0, mInfo.pricing.input - mInfo.pricing.cache);
   bucket.calls += 1;
   if (cascadeId) bucket.conversationsSet.add(cascadeId);
   bucket.inputTokens += st.inputTokens;
@@ -345,6 +444,7 @@ function accumulateStepIntoBucket(bucket, st, mInfo, stepCost, cascadeId) {
   bucket.responseTokens += st.responseTokens || 0;
   bucket.totalTokens += stepTotalTokens;
   bucket.costUsd += stepCost;
+  bucket.savedCostUsd += savedCost;
 
   if (mInfo.family === 'Gemini') {
     bucket.geminiTokens += stepTotalTokens;
@@ -360,7 +460,7 @@ function accumulateStepIntoBucket(bucket, st, mInfo, stepCost, cascadeId) {
 function finalizeUsageBucket(bucket) {
   const promptTokens = bucket.inputTokens + bucket.cacheReadTokens;
   const cacheHitPct =
-    promptTokens > 0 ? Math.round((bucket.cacheReadTokens / promptTokens) * 100) : 0;
+    promptTokens > 0 ? +((bucket.cacheReadTokens / promptTokens) * 100).toFixed(1) : 0;
   return {
     calls: bucket.calls,
     conversationsCount: bucket.conversationsSet.size,
@@ -371,6 +471,7 @@ function finalizeUsageBucket(bucket) {
     responseTokens: bucket.responseTokens,
     totalTokens: bucket.totalTokens,
     costUsd: +bucket.costUsd.toFixed(2),
+    savedCostUsd: +bucket.savedCostUsd.toFixed(2),
     cacheHitPct,
     geminiTokens: bucket.geminiTokens,
     geminiCostUsd: +bucket.geminiCostUsd.toFixed(2),
@@ -405,6 +506,110 @@ function discoverLocalConversationFiles() {
     // Ignore directory read errors
   }
   return map;
+}
+
+function loadExternalDeepStatsCache() {
+  const sigParts = [];
+  const existingFiles = [];
+  for (const candidate of DEEP_STATS_CACHE_CANDIDATES) {
+    if (!existsSync(candidate)) continue;
+    try {
+      const st = statSync(candidate);
+      sigParts.push(`${candidate}:${st.mtimeMs || 0}:${st.size || 0}`);
+      existingFiles.push(candidate);
+    } catch {
+      // Ignore stat errors
+    }
+  }
+  if (existingFiles.length === 0) {
+    return new Map();
+  }
+  const sig = sigParts.join('|');
+  if (externalDeepStatsMemo.sig === sig && externalDeepStatsMemo.convos.size > 0) {
+    return externalDeepStatsMemo.convos;
+  }
+
+  const convos = new Map();
+  const runtimeDisplayMap = new Map();
+
+  for (const filePath of existingFiles) {
+    const raw = loadJson(filePath, null);
+    if (!raw || typeof raw.perConvo !== 'object' || !raw.perConvo) continue;
+
+    for (const item of Object.values(raw.perConvo)) {
+      for (const e of item?.entries || []) {
+        const display =
+          e?.modelDisplayName ||
+          formatGenericModelSlug(e?.modelCanonicalId || e?.model || e?.modelAggregationId);
+        if (!display) continue;
+        const base = getBaseModelLabel(display);
+        if (e?.modelRuntimeId && !runtimeDisplayMap.has(e.modelRuntimeId)) {
+          runtimeDisplayMap.set(e.modelRuntimeId, base);
+        }
+        if (e?.model && !runtimeDisplayMap.has(e.model)) {
+          runtimeDisplayMap.set(e.model, base);
+        }
+      }
+    }
+
+    const titleMap = raw.titleMap || {};
+    for (const [fullKey, item] of Object.entries(raw.perConvo)) {
+      const rawEntries = item?.entries;
+      if (!Array.isArray(rawEntries) || rawEntries.length === 0) continue;
+      const colonIdx = fullKey.indexOf(':');
+      const appSource = item?.appSource || (colonIdx > 0 ? fullKey.slice(0, colonIdx) : 'ide');
+      const cascadeId = (colonIdx > 0 ? fullKey.slice(colonIdx + 1) : fullKey).toLowerCase();
+      const mapKey = `${appSource}:${cascadeId}`;
+      const existing = convos.get(mapKey);
+      if (existing && existing.steps.length >= rawEntries.length) continue;
+
+      const steps = [];
+      let lastModifiedMs = 0;
+      for (let idx = 0; idx < rawEntries.length; idx++) {
+        const e = rawEntries[idx];
+        const inputTokens = Math.max(0, Number(e?.inp) || 0);
+        const cacheReadTokens = Math.max(0, Number(e?.cache) || 0);
+        const responseTokens = Math.max(0, Number(e?.out) || 0);
+        const thinkingTokens = Math.max(0, Number(e?.reasoning) || 0);
+        const outputTokens = responseTokens + thinkingTokens;
+        if (inputTokens === 0 && cacheReadTokens === 0 && outputTokens === 0) continue;
+        const createdAtMs = e?.ts ? Date.parse(e.ts) || 0 : 0;
+        if (createdAtMs > lastModifiedMs) lastModifiedMs = createdAtMs;
+        const resolvedDisplay =
+          e?.modelDisplayName ||
+          runtimeDisplayMap.get(e?.model) ||
+          runtimeDisplayMap.get(e?.modelRuntimeId) ||
+          formatGenericModelSlug(e?.modelCanonicalId || e?.model || e?.modelAggregationId) ||
+          '';
+        steps.push({
+          stepIndex: idx + 1,
+          createdAt: e?.ts || '',
+          createdAtMs,
+          modelKey: e?.modelCanonicalId || e?.model || e?.modelRuntimeId || 'unknown',
+          modelDisplayName: resolvedDisplay,
+          apiProvider: e?.provider || '',
+          appSource,
+          inputTokens,
+          cacheReadTokens,
+          outputTokens,
+          thinkingTokens,
+          responseTokens,
+        });
+      }
+      if (steps.length > 0) {
+        convos.set(mapKey, {
+          cascadeId,
+          appSource,
+          title: titleMap[fullKey] || titleMap[cascadeId] || cascadeId.slice(0, 8),
+          lastModifiedMs,
+          steps,
+        });
+      }
+    }
+  }
+
+  externalDeepStatsMemo = { sig, convos };
+  return convos;
 }
 
 async function buildTelemetryPayloadInternal(
@@ -511,6 +716,30 @@ async function buildTelemetryPayloadInternal(
     }
   }
 
+  for (const [poolKey, b5hKey, bWkKey, poolName] of [
+    ['Gemini', 'gemini-5h', 'gemini-weekly', 'Gemini 模型池'],
+    ['Claude & GPT', '3p-5h', '3p-weekly', 'Claude & GPT 模型池'],
+  ]) {
+    if (!quotaPoolsMap.has(poolKey)) {
+      const b5h = officialBuckets.get(b5hKey);
+      const bWk = officialBuckets.get(bWkKey);
+      quotaPoolsMap.set(poolKey, {
+        poolName,
+        family: poolKey,
+        isAvailable: Boolean(b5h),
+        remainingPct: b5h?.remainingPct ?? null,
+        remainingIntPct: b5h?.remainingIntPct ?? null,
+        usedPct: b5h?.usedPct ?? null,
+        resetTime: b5h?.resetTime || null,
+        weeklyRemainingPct: bWk?.remainingPct ?? null,
+        weeklyRemainingIntPct: bWk?.remainingIntPct ?? null,
+        weeklyUsedPct: bWk?.usedPct ?? null,
+        weeklyResetTime: bWk?.resetTime || null,
+        models: [],
+      });
+    }
+  }
+
   // Enumerate all conversations from LS + local disk + existing cache
   const summariesObj = allTrajRes?.trajectorySummaries || {};
   const diskConvMap = discoverLocalConversationFiles();
@@ -598,7 +827,16 @@ async function buildTelemetryPayloadInternal(
     }
     const sig = `${CACHE_SCHEMA_VERSION}:${conv.stepCount}:${conv.lastModifiedTime}`;
     const isRunning = conv.status === 'CASCADE_RUN_STATUS_RUNNING';
-    return cached.signature !== sig || isRunning || Boolean(cached.wasRunning);
+    const lastCachedStep = cached.steps?.[cached.steps.length - 1];
+    const missingBreakdownField =
+      Boolean(lastCachedStep) &&
+      !Object.prototype.hasOwnProperty.call(lastCachedStep, 'contextBreakdown');
+    return (
+      cached.signature !== sig ||
+      isRunning ||
+      Boolean(cached.wasRunning) ||
+      missingBreakdownField
+    );
   });
 
   // Fetch trajectories with bounded concurrency (up to 4 at a time)
@@ -706,21 +944,42 @@ async function buildTelemetryPayloadInternal(
   const sessionAvgTokPerSec = roundMetric(sessionSpeed.avgTokPerSec);
 
   // Context breakdown from the latest step
+  let latestBreakdown = latestEnriched?.contextBreakdown || null;
+  if (!latestBreakdown) {
+    for (let i = enrichedActiveSteps.length - 1; i >= 0; i--) {
+      if (enrichedActiveSteps[i]?.contextBreakdown) {
+        latestBreakdown = enrichedActiveSteps[i].contextBreakdown;
+        break;
+      }
+    }
+  }
+  const ctxMessages = Number(latestBreakdown?.messagesTokens || 0);
+  const ctxSystemTools = Number(latestBreakdown?.systemToolsTokens || 0);
+  const ctxMcpTools = Number(latestBreakdown?.mcpToolsTokens || 0);
+  const ctxSkills = Number(latestBreakdown?.skillsTokens || 0);
+  const ctxSystemPrompt = Number(latestBreakdown?.systemPromptTokens || 0);
+  const ctxUserRules = Number(latestBreakdown?.userRulesTokens || 0);
+  const ctxBreakdownTotal =
+    ctxMessages + ctxSystemTools + ctxMcpTools + ctxSkills + ctxSystemPrompt + ctxUserRules;
+
   const ctxCached = latestEnriched?.cacheReadTokens || 0;
   const ctxFreshInput = latestEnriched?.inputTokens || 0;
   const ctxThinking = latestEnriched?.thinkingTokens || 0;
   const ctxResponse = latestEnriched?.responseTokens || 0;
-  const ctxTotal = ctxCached + ctxFreshInput + ctxThinking + ctxResponse;
+  const ctxTotal =
+    ctxBreakdownTotal > 0
+      ? ctxBreakdownTotal
+      : ctxCached + ctxFreshInput + ctxThinking + ctxResponse;
   const compactionLimitTokens = Number(latestEnriched?.maxContextBudgetTokens || 256000);
   const compactionUsedTokens = Number(
-    latestEnriched?.estimatedContextTokens || ctxCached + ctxFreshInput
+    latestEnriched?.estimatedContextTokens || ctxBreakdownTotal || ctxCached + ctxFreshInput
   );
   const compactionUsedPct =
     compactionLimitTokens > 0
       ? Math.min(100, +((compactionUsedTokens / compactionLimitTokens) * 100).toFixed(1))
       : 0;
 
-  const ctxLimit = Number(settings.contextWindowLimit || 256000);
+  const ctxLimit = compactionLimitTokens;
   const ctxPct = ctxLimit > 0 ? Math.min(100, +((ctxTotal / ctxLimit) * 100).toFixed(1)) : 0;
 
   // Cache hit rate (latest step & session-wide)
@@ -753,7 +1012,7 @@ async function buildTelemetryPayloadInternal(
     cycleAnchors
   );
 
-  const presetKeys = ['all', '5h', 'today', '24h', 'week', '7d', '30d'];
+  const presetKeys = ['all', '5h', 'today', '24h', 'week', '7d', '14d', '30d'];
   const presetWindows = {};
   const accountBuckets = {};
   const sessionBuckets = {};
@@ -766,6 +1025,30 @@ async function buildTelemetryPayloadInternal(
   const selectedAccountBucket = createUsageBucket();
   const selectedSessionBucket = createUsageBucket();
   const perModelStats = new Map();
+  const selectedWindowSteps = [];
+  let earliestSelectedStepMs = Infinity;
+
+  const currentYear = new Date(nowMs).getFullYear();
+  const monthlySeries = Array.from({ length: 12 }, (_, idx) => ({
+    month: idx + 1,
+    label: `${idx + 1}月`,
+    calls: 0,
+    inputTokens: 0,
+    cacheReadTokens: 0,
+    responseTokens: 0,
+    thinkingTokens: 0,
+    totalTokens: 0,
+    costUsd: 0,
+  }));
+
+  const SOURCE_LABELS = {
+    standalone: 'Antigravity App',
+    ide: 'Antigravity IDE',
+    cli: 'Antigravity CLI',
+  };
+  const perSourceStats = new Map();
+  const externalConvos = loadExternalDeepStatsCache();
+  const allEntriesToAggregate = [];
 
   for (const [cascadeId, entry] of Object.entries(trajectoryCache)) {
     if (
@@ -776,12 +1059,62 @@ async function buildTelemetryPayloadInternal(
     ) {
       continue;
     }
-    const isCurrentConv = cascadeId === activeCascadeId;
-    for (const st of entry?.steps || []) {
-      const mInfo = resolveModelInfo(st.modelKey, dynamicModelMap, st.apiProvider);
+    allEntriesToAggregate.push({
+      cascadeId,
+      appSource: entry?.appSource || 'standalone',
+      steps: entry?.steps || [],
+      isCurrentConv: cascadeId === activeCascadeId,
+    });
+  }
+
+  for (const ext of externalConvos.values()) {
+    const liveEntry = trajectoryCache[ext.cascadeId];
+    if (
+      ext.appSource === 'standalone' &&
+      liveEntry &&
+      (liveEntry.steps?.length || 0) >= ext.steps.length
+    ) {
+      continue;
+    }
+    allEntriesToAggregate.push({
+      cascadeId: `${ext.appSource}:${ext.cascadeId}`,
+      appSource: ext.appSource || 'ide',
+      steps: ext.steps || [],
+      isCurrentConv: ext.cascadeId === activeCascadeId && !liveEntry,
+    });
+  }
+
+  for (const entry of allEntriesToAggregate) {
+    const { cascadeId, isCurrentConv } = entry;
+    const srcKey = entry.appSource || 'standalone';
+    const srcName = SOURCE_LABELS[srcKey] || `Antigravity (${srcKey})`;
+
+    for (const st of entry.steps || []) {
+      const mInfo = resolveModelInfo(
+        st.modelKey,
+        dynamicModelMap,
+        st.apiProvider,
+        st.modelDisplayName
+      );
       const stepTotalTokens = st.inputTokens + st.cacheReadTokens + st.outputTokens;
       const stepCost = computeStepCost(st, mInfo.pricing);
       const tMs = st.createdAtMs || 0;
+
+      if (tMs > 0) {
+        const stepDate = new Date(tMs);
+        if (stepDate.getFullYear() === currentYear) {
+          const mBucket = monthlySeries[stepDate.getMonth()];
+          if (mBucket) {
+            mBucket.calls += 1;
+            mBucket.inputTokens += st.inputTokens || 0;
+            mBucket.cacheReadTokens += st.cacheReadTokens || 0;
+            mBucket.responseTokens += st.responseTokens || 0;
+            mBucket.thinkingTokens += st.thinkingTokens || 0;
+            mBucket.totalTokens += stepTotalTokens;
+            mBucket.costUsd = +(mBucket.costUsd + stepCost).toFixed(4);
+          }
+        }
+      }
 
       for (const k of presetKeys) {
         const w = presetWindows[k];
@@ -802,32 +1135,107 @@ async function buildTelemetryPayloadInternal(
         if (isCurrentConv) {
           accumulateStepIntoBucket(selectedSessionBucket, st, mInfo, stepCost, cascadeId);
         }
+        if (tMs > 0) {
+          if (tMs < earliestSelectedStepMs) earliestSelectedStepMs = tMs;
+          selectedWindowSteps.push({
+            tMs,
+            tokens: stepTotalTokens,
+            costUsd: stepCost,
+          });
+        }
 
-        if (!perModelStats.has(mInfo.label)) {
-          perModelStats.set(mInfo.label, {
-            label: mInfo.label,
+        if (!perSourceStats.has(srcKey)) {
+          perSourceStats.set(srcKey, {
+            name: srcName,
+            calls: 0,
+            inputTokens: 0,
+            cacheReadTokens: 0,
+            responseTokens: 0,
+            thinkingTokens: 0,
+            totalTokens: 0,
+            costUsd: 0,
+          });
+        }
+        const sAgg = perSourceStats.get(srcKey);
+        sAgg.calls += 1;
+        sAgg.inputTokens += st.inputTokens || 0;
+        sAgg.cacheReadTokens += st.cacheReadTokens || 0;
+        sAgg.responseTokens += st.responseTokens || 0;
+        sAgg.thinkingTokens += st.thinkingTokens || 0;
+        sAgg.totalTokens += stepTotalTokens;
+        sAgg.costUsd += stepCost;
+
+        const modelGroupKey = mInfo.baseLabel || mInfo.label;
+        if (!perModelStats.has(modelGroupKey)) {
+          perModelStats.set(modelGroupKey, {
+            label: modelGroupKey,
             shortName: mInfo.shortName,
             family: mInfo.family,
             calls: 0,
             inputTokens: 0,
             cacheReadTokens: 0,
             outputTokens: 0,
+            thinkingTokens: 0,
+            responseTokens: 0,
             totalTokens: 0,
             costUsd: 0,
             speedAccumulator: createSpeedAccumulator(),
           });
         }
-        const agg = perModelStats.get(mInfo.label);
+        const agg = perModelStats.get(modelGroupKey);
         accumulateSpeed(agg.speedAccumulator, st);
 
         agg.calls += 1;
         agg.inputTokens += st.inputTokens;
         agg.cacheReadTokens += st.cacheReadTokens;
         agg.outputTokens += st.outputTokens;
+        agg.thinkingTokens += st.thinkingTokens || 0;
+        agg.responseTokens += st.responseTokens || 0;
         agg.totalTokens += stepTotalTokens;
         agg.costUsd += stepCost;
       }
     }
+  }
+
+  // Build 12-slot trendSeries across selectedWindow
+  const trendSlotsCount = 12;
+  const trendEndMs = Number.isFinite(selectedWindow.endMs) ? selectedWindow.endMs : nowMs;
+  const rawTrendStartMs =
+    selectedWindow.key === 'all'
+      ? Number.isFinite(earliestSelectedStepMs)
+        ? earliestSelectedStepMs
+        : nowMs - 24 * 3600 * 1000
+      : selectedWindow.startMs;
+  const trendStartMs = Math.min(rawTrendStartMs, trendEndMs - 60 * 1000);
+  const trendSpanMs = Math.max(60 * 1000, trendEndMs - trendStartMs);
+  const slotWidthMs = trendSpanMs / trendSlotsCount;
+  const isShortSpan = trendSpanMs <= 36 * 3600 * 1000;
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const formatTrendLabel = (ms) => {
+    const d = new Date(ms);
+    if (isShortSpan) {
+      return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+    }
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+
+  const trendSeries = Array.from({ length: trendSlotsCount }, (_, idx) => {
+    const sMs = trendStartMs + idx * slotWidthMs;
+    return {
+      index: idx,
+      label: formatTrendLabel(sMs),
+      tokens: 0,
+      costUsd: 0,
+      calls: 0,
+    };
+  });
+
+  for (const item of selectedWindowSteps) {
+    const rawIdx = Math.floor((item.tMs - trendStartMs) / slotWidthMs);
+    const idx = Math.max(0, Math.min(trendSlotsCount - 1, rawIdx));
+    trendSeries[idx].tokens += item.tokens;
+    trendSeries[idx].costUsd = +(trendSeries[idx].costUsd + item.costUsd).toFixed(4);
+    trendSeries[idx].calls += 1;
   }
 
   const finalizedPresets = {};
@@ -838,6 +1246,17 @@ async function buildTelemetryPayloadInternal(
       account: finalizeUsageBucket(accountBuckets[k]),
     };
   }
+
+  const finalizedSelectedSession = finalizeUsageBucket(selectedSessionBucket);
+  const finalizedSelectedAccount = finalizeUsageBucket(selectedAccountBucket);
+
+  const sourcesBreakdown = Array.from(perSourceStats.values())
+    .filter((s) => s.totalTokens > 0 || s.calls > 0)
+    .map((s) => ({
+      ...s,
+      costUsd: +s.costUsd.toFixed(2),
+    }))
+    .sort((a, b) => b.totalTokens - a.totalTokens || b.calls - a.calls);
 
   const todayBucket = finalizedPresets.today.account;
   const weekBucket = finalizedPresets.week.account;
@@ -892,8 +1311,14 @@ async function buildTelemetryPayloadInternal(
   );
   const realAiCredits = Number(g1CreditEntry?.creditAmount || 0);
 
+  let uiBundleVersion = 0;
+  try {
+    uiBundleVersion = statSync(join(HERE, 'app.js')).mtimeMs || 0;
+  } catch {}
+
   return {
     timestamp: new Date().toISOString(),
+    uiBundleVersion,
     settings,
     diagnostics: diagnostics.status(),
     account: {
@@ -929,6 +1354,12 @@ async function buildTelemetryPayloadInternal(
         compactionUsedTokens,
         compactionLimitTokens,
         compactionUsedPct,
+        messagesTokens: ctxMessages,
+        systemToolsTokens: ctxSystemTools,
+        mcpToolsTokens: ctxMcpTools,
+        skillsTokens: ctxSkills,
+        systemPromptTokens: ctxSystemPrompt,
+        userRulesTokens: ctxUserRules,
         cachedTokens: ctxCached,
         freshInputTokens: ctxFreshInput,
         thinkingTokens: ctxThinking,
@@ -940,14 +1371,18 @@ async function buildTelemetryPayloadInternal(
       selectedRange: {
         key: selectedWindow.key,
         label: selectedWindow.label,
-        startMs: selectedWindow.startMs,
-        endMs: Number.isFinite(selectedWindow.endMs) ? selectedWindow.endMs : nowMs,
+        startMs: trendStartMs,
+        endMs: trendEndMs,
       },
-      session: finalizeUsageBucket(selectedSessionBucket),
+      session: finalizedSelectedSession,
       sessionAllTime: finalizedPresets.all.session,
-      account: finalizeUsageBucket(selectedAccountBucket),
+      account: finalizedSelectedAccount,
       accountAllTime: finalizedPresets.all.account,
       presets: finalizedPresets,
+      trendSeries,
+      sourcesBreakdown,
+      monthlyYear: currentYear,
+      monthlySeries,
     },
     quotas: {
       meta: {
@@ -1020,7 +1455,13 @@ function buildTelemetryPayload(requestedConvId, forceQuotaRefresh = false, filte
 
 const app = new SidecarApp();
 const diagnostics = new StreamDiagnostics({ dataDir: DATA_DIR, lsAddress: LS_ADDR, csrfToken: CSRF_TOKEN });
-const readLocal = (name) => readFileSync(join(HERE, name), 'utf8');
+const readLocalAsync = async (relPath) => {
+  const fullPath = join(HERE, relPath);
+  if (typeof fsPromises !== 'undefined' && fsPromises?.readFile) {
+    return fsPromises.readFile(fullPath, 'utf8');
+  }
+  return readFileSync(fullPath, 'utf8');
+};
 
 function isLocalHostRequest(req) {
   if (!req?.headers) return true;
@@ -1038,11 +1479,31 @@ function isLocalHostRequest(req) {
   return true;
 }
 
-app.page('/', () => readLocal('index.html'));
-app.page('/app.js', () => readLocal('app.js'));
+const NO_STORE_HEADERS = { 'Cache-Control': 'no-store, no-cache, must-revalidate' };
+
+app.page(
+  '/',
+  async () =>
+    new Response(await readLocalAsync('index.html'), {
+      contentType: 'text/html; charset=utf-8',
+      headers: NO_STORE_HEADERS,
+    })
+);
+app.page(
+  '/app.js',
+  async () =>
+    new Response(await readLocalAsync('app.js'), {
+      contentType: 'application/javascript; charset=utf-8',
+      headers: NO_STORE_HEADERS,
+    })
+);
 app.api(
   '/styles.css',
-  () => new Response(readLocal('styles.css'), { contentType: 'text/css' }),
+  async () =>
+    new Response(await readLocalAsync('styles.css'), {
+      contentType: 'text/css; charset=utf-8',
+      headers: NO_STORE_HEADERS,
+    }),
   'GET'
 );
 

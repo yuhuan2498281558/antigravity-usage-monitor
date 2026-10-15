@@ -1,5 +1,9 @@
 .data/
 node_modules/
+test/
+**/test/
+*.test.*
+*-harness.*
 *.log
 .DS_Store
 Thumbs.db

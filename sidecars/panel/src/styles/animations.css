@@ -1,0 +1,58 @@
+/*
+ * Fast, hardware-accelerated transitions (120ms-160ms) with zero sluggish bounce.
+ */
+
+@keyframes anim-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes anim-pulse-dot {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.22);
+    opacity: 0.62;
+  }
+}
+
+@keyframes anim-view-fade {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 3px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes anim-popover-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -3px, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+.view-pane {
+  animation: anim-view-fade var(--dur-fast) var(--ease-fast);
+}
+
+.is-spinning .svg-icon {
+  animation: anim-spin 520ms linear infinite;
+}
+
+.is-pulsing {
+  animation: anim-pulse-dot 950ms ease-in-out infinite;
+}

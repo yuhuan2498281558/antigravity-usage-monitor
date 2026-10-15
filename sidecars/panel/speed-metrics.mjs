@@ -43,11 +43,193 @@ function elapsed(start, end) {
   return start > 0 && end >= start ? (end - start) / 1000 : null;
 }
 
+function estimateUtf8Tokens(text) {
+  if (typeof text !== 'string' || !text) return 0;
+  return Math.ceil(Buffer.byteLength(text, 'utf8') / 3);
+}
+
+function classifyPromptSection(name) {
+  const key = String(name || '').trim().toLowerCase();
+  if (key === 'skills' || key === 'skill') return 'skills';
+  if (key === 'user_rules' || key === 'user_rule' || key === 'rules') return 'userRules';
+  if (key === 'mcp_servers' || key === 'mcp' || key.startsWith('mcp_')) return 'mcpTools';
+  return 'systemPrompt';
+}
+
+function isMcpToolItem(name, source = '', type = '') {
+  const n = String(name || '').trim().toLowerCase();
+  const src = String(source || '').toUpperCase();
+  const t = String(type || '').toUpperCase();
+  return (
+    src.includes('MCP') ||
+    t.includes('MCP') ||
+    n.startsWith('mcp_') ||
+    n.startsWith('mcp-') ||
+    n === 'call_mcp_tool' ||
+    n === 'list_mcp_resources' ||
+    n === 'read_mcp_resource'
+  );
+}
+
+export function extractContextBreakdown(chat) {
+  if (!chat || typeof chat !== 'object') return null;
+  const tb = chat?.chatStartMetadata?.contextWindowMetadata?.tokenBreakdown;
+  const groups = Array.isArray(tb?.groups) ? tb.groups : [];
+  const promptSections = Array.isArray(chat?.promptSections) ? chat.promptSections : [];
+  const tools = Array.isArray(chat?.tools) ? chat.tools : [];
+  const messagePrompts = Array.isArray(chat?.messagePrompts) ? chat.messagePrompts : [];
+
+  if (!groups.length && !promptSections.length && !tools.length && !messagePrompts.length) {
+    return null;
+  }
+
+  let messagesTokens = 0;
+  let systemToolsTokens = 0;
+  let mcpToolsTokens = 0;
+  let skillsTokens = 0;
+  let systemPromptTokens = 0;
+  let userRulesTokens = 0;
+
+  let hasPromptGroup = false;
+  let hasToolsGroup = false;
+  let hasMessagesGroup = false;
+
+  for (const g of groups) {
+    const gType = String(g?.type || '').toUpperCase();
+    const gName = String(g?.name || '').trim().toLowerCase();
+    const gSource = String(g?.source || '').toUpperCase();
+    const gTokens = Math.max(0, Number(g?.numTokens || 0));
+    const children = Array.isArray(g?.children) ? g.children : [];
+
+    if (gType === 'TOKEN_TYPE_SYSTEM_PROMPT' || gName === 'system prompt') {
+      hasPromptGroup = true;
+      if (children.length > 0) {
+        let childSum = 0;
+        for (const c of children) {
+          const tok = Math.max(0, Number(c?.numTokens || 0));
+          childSum += tok;
+          const bucket = classifyPromptSection(c?.name ?? c?.title);
+          if (bucket === 'skills') skillsTokens += tok;
+          else if (bucket === 'userRules') userRulesTokens += tok;
+          else if (bucket === 'mcpTools') mcpToolsTokens += tok;
+          else systemPromptTokens += tok;
+        }
+        if (gTokens > childSum) {
+          systemPromptTokens += gTokens - childSum;
+        }
+      } else {
+        systemPromptTokens += gTokens;
+      }
+    } else if (
+      gType === 'TOKEN_TYPE_TOOLS' ||
+      gName === 'tools' ||
+      gType.includes('MCP') ||
+      gSource.includes('MCP')
+    ) {
+      hasToolsGroup = true;
+      if (children.length > 0) {
+        let childSum = 0;
+        for (const c of children) {
+          const tok = Math.max(0, Number(c?.numTokens || 0));
+          childSum += tok;
+          if (isMcpToolItem(c?.name, c?.source || g?.source, c?.type || g?.type)) {
+            mcpToolsTokens += tok;
+          } else {
+            systemToolsTokens += tok;
+          }
+        }
+        if (gTokens > childSum) {
+          if (isMcpToolItem(g?.name, g?.source, g?.type)) mcpToolsTokens += gTokens - childSum;
+          else systemToolsTokens += gTokens - childSum;
+        }
+      } else if (isMcpToolItem(g?.name, g?.source, g?.type)) {
+        mcpToolsTokens += gTokens;
+      } else {
+        systemToolsTokens += gTokens;
+      }
+    } else if (
+      gType === 'TOKEN_TYPE_CHAT_MESSAGES' ||
+      gName === 'chat messages' ||
+      gName === 'messages'
+    ) {
+      hasMessagesGroup = true;
+      if (gTokens > 0) {
+        messagesTokens += gTokens;
+      } else {
+        for (const c of children) {
+          messagesTokens += Math.max(0, Number(c?.numTokens || 0));
+        }
+      }
+    }
+  }
+
+  if (!hasPromptGroup && promptSections.length > 0) {
+    for (const s of promptSections) {
+      const tok =
+        Number.isFinite(Number(s?.numTokens)) && Number(s?.numTokens) >= 0
+          ? Number(s.numTokens)
+          : estimateUtf8Tokens(s?.content ?? s?.text ?? '');
+      const bucket = classifyPromptSection(s?.title ?? s?.name);
+      if (bucket === 'skills') skillsTokens += tok;
+      else if (bucket === 'userRules') userRulesTokens += tok;
+      else if (bucket === 'mcpTools') mcpToolsTokens += tok;
+      else systemPromptTokens += tok;
+    }
+  }
+
+  if (!hasToolsGroup && tools.length > 0) {
+    for (const t of tools) {
+      const rawText = `${t?.name || ''}${t?.description || ''}${t?.jsonSchemaString || ''}`;
+      const tok =
+        Number.isFinite(Number(t?.numTokens)) && Number(t?.numTokens) >= 0
+          ? Number(t.numTokens)
+          : estimateUtf8Tokens(rawText);
+      if (isMcpToolItem(t?.name, t?.source, t?.type)) {
+        mcpToolsTokens += tok;
+      } else {
+        systemToolsTokens += tok;
+      }
+    }
+  }
+
+  if (!hasMessagesGroup && messagePrompts.length > 0) {
+    for (const m of messagePrompts) {
+      const tok =
+        Number.isFinite(Number(m?.numTokens)) && Number(m?.numTokens) >= 0
+          ? Number(m.numTokens)
+          : estimateUtf8Tokens(m?.prompt ?? m?.content ?? '');
+      messagesTokens += tok;
+    }
+  }
+
+  const totalTokens =
+    messagesTokens +
+    systemToolsTokens +
+    mcpToolsTokens +
+    skillsTokens +
+    systemPromptTokens +
+    userRulesTokens;
+
+  return {
+    messagesTokens,
+    systemToolsTokens,
+    mcpToolsTokens,
+    skillsTokens,
+    systemPromptTokens,
+    userRulesTokens,
+    totalTokens,
+  };
+}
+
 export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
   const genByStep = new Map();
+  let latestBreakdownChat = null;
   for (const gm of generatorMetadata || []) {
     if (!gm?.chatModel) continue;
     for (const index of gm?.stepIndices || []) genByStep.set(Number(index), gm);
+    if (extractContextBreakdown(gm.chatModel)) {
+      latestBreakdownChat = gm.chatModel;
+    }
   }
   const result = [];
   rawSteps.forEach((s, index) => {
@@ -84,6 +266,7 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     const shortOutputSample = totalTokPerSec !== null && outputTokens < MIN_MEAN_OUTPUT_TOKENS;
     const speedReason = timingReason || (isCompactionStep ? 'compaction' : shortOutputSample ? 'short_sample' : null);
     const context = chat?.chatStartMetadata?.contextWindowMetadata;
+    const contextBreakdown = extractContextBreakdown(chat);
     result.push({
       stepIndex, isCompactionStep,
       modelKey: u.model || chat?.model || m.generatorModel || 'MODEL_PLACEHOLDER_M418',
@@ -92,8 +275,9 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       hasVisibleText: String(p.modifiedResponse || p.response || '').trim().length > 0,
       hasToolCalls: Array.isArray(p.toolCalls) && p.toolCalls.length > 0,
       inputTokens, cacheReadTokens, outputTokens, thinkingTokens, responseTokens,
-      estimatedContextTokens: Number(context?.estimatedTokensUsed || 0),
+      estimatedContextTokens: Number(context?.estimatedTokensUsed || contextBreakdown?.totalTokens || 0),
       maxContextBudgetTokens: Number(context?.maxContextTokens || 256000),
+      contextBreakdown,
       measurementVersion: MEASUREMENT_VERSION,
       isComplete: complete, nativeTtftSec, nativeStreamSec,
       viewableDelaySec: elapsed(start, parseIsoMs(m.viewableAt)),
@@ -104,6 +288,20 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       speedReason,
     });
   });
+  if (result.length > 0 && !result[result.length - 1].contextBreakdown && latestBreakdownChat) {
+    const lastStep = result[result.length - 1];
+    const fallbackBreakdown = extractContextBreakdown(latestBreakdownChat);
+    const fallbackCtx = latestBreakdownChat?.chatStartMetadata?.contextWindowMetadata;
+    lastStep.contextBreakdown = fallbackBreakdown;
+    if (!lastStep.estimatedContextTokens) {
+      lastStep.estimatedContextTokens = Number(
+        fallbackCtx?.estimatedTokensUsed || fallbackBreakdown?.totalTokens || 0
+      );
+    }
+    if (fallbackCtx?.maxContextTokens) {
+      lastStep.maxContextBudgetTokens = Number(fallbackCtx.maxContextTokens);
+    }
+  }
   return result;
 }
 

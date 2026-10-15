@@ -1,0 +1,82 @@
+/*
+ * Semantic Design Tokens for Antigravity Usage & Speed Monitor.
+ * All visual tokens derive from host CSS variables and perceptual color-mix(),
+ * eliminating hardcoded hex colors across components and views.
+ */
+
+:root {
+  /* Architectural Geometry: Only Top Nav uses --radius-pill */
+  --radius-pill: 999px;
+  --radius-sm: 4px;
+  --radius-xs: 2px;
+
+  /* Host-Bridged Surfaces (Clean, zero-muddy-gray light mode) */
+  --surface-bg: var(--background, hsl(0 0% 100%));
+  --surface-panel: var(--card, hsl(0 0% 100%));
+  --surface-subtle: color-mix(in srgb, var(--surface-panel) 97%, var(--text-primary) 3%);
+  --surface-track: color-mix(in srgb, var(--border-hairline) 42%, var(--surface-panel));
+  --surface-elevated: var(--surface-panel);
+  --surface-hover: color-mix(in srgb, var(--accent-primary) 6%, var(--surface-panel));
+  --surface-active: color-mix(in srgb, var(--accent-primary) 12%, var(--surface-panel));
+  --surface-backdrop: color-mix(in srgb, var(--surface-bg) 78%, transparent);
+
+  /* Crisp 1px Hairline Borders */
+  --border-hairline: color-mix(in srgb, var(--border, hsl(214 18% 88%)) 82%, var(--surface-panel));
+  --border-strong: color-mix(in srgb, var(--border-hairline) 72%, var(--text-primary) 28%);
+  --border-focus: var(--accent-primary);
+
+  /* Typography Hierarchy */
+  --text-primary: var(--foreground, hsl(215 22% 15%));
+  --text-secondary: var(--muted-foreground, hsl(215 12% 44%));
+  --text-muted: color-mix(in srgb, var(--text-secondary) 74%, var(--surface-panel) 26%);
+  --text-inverse: var(--surface-panel);
+
+  /* Semantic Telemetry Accents */
+  --accent-primary: var(--primary, hsl(217 82% 51%));
+  --accent-primary-soft: color-mix(in srgb, var(--accent-primary) 13%, transparent);
+  --accent-primary-border: color-mix(in srgb, var(--accent-primary) 38%, var(--border-hairline));
+
+  --metric-speed: hsl(14 76% 52%);
+  --metric-speed-soft: color-mix(in srgb, var(--metric-speed) 14%, transparent);
+
+  --metric-ok: hsl(145 64% 38%);
+  --metric-ok-soft: color-mix(in srgb, var(--metric-ok) 14%, transparent);
+
+  --metric-warn: hsl(34 86% 44%);
+  --metric-warn-soft: color-mix(in srgb, var(--metric-warn) 15%, transparent);
+
+  --metric-danger: var(--destructive, hsl(0 74% 50%));
+  --metric-danger-soft: color-mix(in srgb, var(--metric-danger) 15%, transparent);
+
+  /* Context Window 6-Channel Palette */
+  --ctx-messages: hsl(217 82% 51%);
+  --ctx-system-tools: hsl(22 86% 50%);
+  --ctx-mcp-tools: hsl(268 72% 56%);
+  --ctx-skills: hsl(145 64% 38%);
+  --ctx-system-prompt: hsl(190 80% 38%);
+  --ctx-user-rules: hsl(340 76% 52%);
+
+  /* Legacy 4-Channel Palette (retained for compatibility) */
+  --ctx-cached: hsl(217 82% 51%);
+  --ctx-input: hsl(22 86% 50%);
+  --ctx-thinking: hsl(145 64% 38%);
+  --ctx-output: hsl(190 80% 38%);
+
+  /* Elevation & Shadows */
+  --shadow-popover: 0 6px 20px color-mix(in srgb, var(--text-primary) 14%, transparent);
+  --shadow-glider: 0 1px 2px color-mix(in srgb, var(--text-primary) 10%, transparent);
+
+  /* Fast Hardware-Accelerated Motion Tokens */
+  --ease-fast: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-instant: 90ms;
+  --dur-fast: 140ms;
+  --dur-normal: 180ms;
+
+  /* Spacing & Density */
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 10px;
+  --space-5: 12px;
+  --space-6: 14px;
+}
