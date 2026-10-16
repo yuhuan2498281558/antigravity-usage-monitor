@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Sidecar backend and web UI for Antigravity Usage & Speed Monitor.",
   "scripts": {
-    "build": "node scripts/build-bundle.mjs"
+    "build": "node scripts/build-bundle.mjs",
+    "test": "node --test test/*.test.mjs"
   }
 }

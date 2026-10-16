@@ -571,18 +571,20 @@ function formatDateSpanBadge(startMs, endMs) {
   return `${s.getMonth() + 1}月${s.getDate()}日 ~ ${e.getMonth() + 1}月${e.getDate()}日`;
 }
 
-function formatUsd(amount, { precise = false, estimated = false } = {}) {
+function formatUsd(amount, { precise = false, estimated = false, unpricedCalls = 0 } = {}) {
+  if (amount == null || !Number.isFinite(Number(amount))) return '待定';
   const val = Number(amount || 0);
   const prefix = estimated ? '≈$' : '$';
+  const suffix = unpricedCalls > 0 ? ' + 待定' : '';
   if (precise) {
-    return val >= 1 ? `${prefix}${val.toFixed(2)}` : `${prefix}${val.toFixed(3)}`;
+    return (val >= 1 ? `${prefix}${val.toFixed(2)}` : `${prefix}${val.toFixed(3)}`) + suffix;
   }
-  return `${prefix}${val.toFixed(2)}`;
+  return `${prefix}${val.toFixed(2)}${suffix}`;
 }
 
 function speedReasonText(reason) {
   return ({
-    compaction: '自动压缩不计测速',
+    compaction: '自动压缩不计均速',
     incomplete_or_invalid_timing: '未完成或计时缺失',
     invalid_output_tokens: '输出 Token 计数无效',
     inconsistent_timing: '原生首响应与总计时不一致',
@@ -754,6 +756,8 @@ function isEquivalentTelemetry(prev, next) {
   if (pAct?.isRunning !== nAct?.isRunning) return false;
   if (pAct?.latestTokPerSec !== nAct?.latestTokPerSec) return false;
   if (pAct?.latestTtftSec !== nAct?.latestTtftSec) return false;
+  if (pAct?.activeModelShort !== nAct?.activeModelShort || pAct?.activeModelLabel !== nAct?.activeModelLabel) return false;
+  if (pAct?.latestStepCostUsd !== nAct?.latestStepCostUsd || pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls) return false;
   const pCtx = pAct?.context;
   const nCtx = nAct?.context;
   if (pCtx?.totalTokens !== nCtx?.totalTokens) return false;
@@ -764,6 +768,11 @@ function isEquivalentTelemetry(prev, next) {
   if (pCtx?.systemPromptTokens !== nCtx?.systemPromptTokens) return false;
   if (pCtx?.userRulesTokens !== nCtx?.userRulesTokens) return false;
   if ((pAct?.recentSteps?.length || 0) !== (nAct?.recentSteps?.length || 0)) return false;
+  for (let i = 0; i < (pAct?.recentSteps?.length || 0); i++) {
+    const before = pAct.recentSteps[i], after = nAct.recentSteps[i];
+    if (before.modelKey !== after.modelKey || before.modelShort !== after.modelShort ||
+        before.modelSource !== after.modelSource || before.costUsd !== after.costUsd) return false;
+  }
 
   const pRange = prev.consumption?.selectedRange;
   const nRange = next.consumption?.selectedRange;
@@ -776,12 +785,14 @@ function isEquivalentTelemetry(prev, next) {
   const nCons = next.consumption?.session;
   if (pCons?.totalTokens !== nCons?.totalTokens) return false;
   if (pCons?.costUsd !== nCons?.costUsd) return false;
+  if (pCons?.unpricedCalls !== nCons?.unpricedCalls) return false;
 
   const pAcct = prev.consumption?.account;
   const nAcct = next.consumption?.account;
   if (pAcct?.totalTokens !== nAcct?.totalTokens) return false;
   if (pAcct?.calls !== nAcct?.calls) return false;
   if (pAcct?.costUsd !== nAcct?.costUsd) return false;
+  if (pAcct?.unpricedCalls !== nAcct?.unpricedCalls) return false;
 
   const pTrend = prev.consumption?.trendSeries || [];
   const nTrend = next.consumption?.trendSeries || [];
@@ -798,6 +809,9 @@ function isEquivalentTelemetry(prev, next) {
   for (let i = 0; i < pModels.length; i++) {
     if (
       pModels[i]?.label !== nModels[i]?.label ||
+      pModels[i]?.shortName !== nModels[i]?.shortName ||
+      pModels[i]?.costUsd !== nModels[i]?.costUsd ||
+      pModels[i]?.unpricedCalls !== nModels[i]?.unpricedCalls ||
       pModels[i]?.totalTokens !== nModels[i]?.totalTokens ||
       pModels[i]?.calls !== nModels[i]?.calls
     ) {
@@ -811,6 +825,8 @@ function isEquivalentTelemetry(prev, next) {
   for (let i = 0; i < pSources.length; i++) {
     if (
       pSources[i]?.name !== nSources[i]?.name ||
+      pSources[i]?.costUsd !== nSources[i]?.costUsd ||
+      pSources[i]?.unpricedCalls !== nSources[i]?.unpricedCalls ||
       pSources[i]?.totalTokens !== nSources[i]?.totalTokens ||
       pSources[i]?.calls !== nSources[i]?.calls
     ) {
@@ -2078,7 +2094,7 @@ const LiveOverviewView = defineComponent({
   setup({ onCleanup }) {
     // 1. 4-Cell Real-time Telemetry Matrix
     const tpsVal = h('strong', { className: 'cell-value accent-speed', text: '—' });
-    const tpsSub = h('span', { className: 'cell-sub', text: 'argon-4' });
+    const tpsSub = h('span', { className: 'cell-sub', text: '模型未知' });
     const pulseDot = createSvgIcon('dot', { size: 10 });
 
     const ttftVal = h('strong', { className: 'cell-value', text: '—' });
@@ -2312,7 +2328,7 @@ const LiveOverviewView = defineComponent({
       const reason = speedReasonText(active.latestSpeedReason);
       patchText(
         tpsSub,
-        reason ? `${active.activeModelShort || 'argon-4'} · ${reason}` : active.activeModelShort || 'argon-4'
+        reason ? `${active.activeModelShort || '模型未知'} · ${reason}` : active.activeModelShort || '模型未知'
       );
 
       patchText(ttftVal, formatMetric(active.latestTtftSec, 's'));
@@ -2321,11 +2337,11 @@ const LiveOverviewView = defineComponent({
       patchText(avgVal, formatMetric(active.avgTokPerSec, ' tok/s'));
       patchText(avgSub, `有效 ${sampleSummary(active.speedSummary)}`);
 
-      const stepCost = Number(active.latestStepCostUsd ?? active.recentSteps?.[0]?.costUsd ?? 0);
+      const stepCost = active.latestStepCostUsd;
       patchText(costVal, formatUsd(stepCost, { precise: true }));
       patchText(
         cacheSub,
-        `缓 ${active.latestCacheHitPct ?? 0}% · 累 ${formatUsd(active.sessionCostUsd || 0)}`
+        `缓 ${active.latestCacheHitPct ?? 0}% · 累 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
       );
 
       // 2. Context (Auto Compaction Baseline)
@@ -2360,16 +2376,17 @@ const LiveOverviewView = defineComponent({
         {};
       const claudePool =
         pools.find((p) => p.family === 'Claude & GPT' || p.family === 'Claude') ||
-        (activePool.family && activePool.family !== 'Gemini' ? activePool : null) ||
+        (['Claude & GPT', 'Claude', 'GPT'].includes(activePool.family) ? activePool : null) ||
         {};
 
-      const activeIsGemini = (activePool.family || 'Gemini') === 'Gemini';
+      const activeIsGemini = activePool.family === 'Gemini';
+      const activeIsThirdParty = ['Claude & GPT', 'Claude', 'GPT'].includes(activePool.family);
       syncPoolQuotaBlock(geminiQuotaBlock, 'Gemini', geminiPool, weekly, activeIsGemini);
-      syncPoolQuotaBlock(claudeQuotaBlock, 'Claude & GPT', claudePool, weekly, !activeIsGemini);
+      syncPoolQuotaBlock(claudeQuotaBlock, 'Claude & GPT', claudePool, weekly, activeIsThirdParty);
 
       patchText(
         wkFootLeft,
-        `本周本机: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0)})`
+        `本周本机: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0, { unpricedCalls: weekly.unpricedCalls })})`
       );
       patchText(
         wkFootRight,
@@ -2923,7 +2940,7 @@ const ConsumptionView = defineComponent({
       patchText(refs.pctBadge, `${share.toFixed(1)}%`);
       patchText(refs.totalTokEl, showTokensInHeader ? formatTokensPrecise(total) : '');
       patchAttr(refs.totalTokEl, 'hidden', !showTokensInHeader);
-      patchText(refs.costEl, formatUsd(item.costUsd || 0));
+      patchText(refs.costEl, formatUsd(item.costUsd || 0, { unpricedCalls: item.unpricedCalls }));
 
       const responseTok =
         item.responseTokens != null
@@ -2975,8 +2992,8 @@ const ConsumptionView = defineComponent({
 
       patchText(heroTotalTokens, formatTokensPrecise(totalTokens));
       patchText(heroTotalCalls, `${acct.calls || 0} 调用`);
-      patchText(heroCostUsd, formatUsd(costUsd));
-      patchText(heroCostCny, formatCnyApprox(costUsd));
+      patchText(heroCostUsd, formatUsd(costUsd, { unpricedCalls: acct.unpricedCalls }));
+      patchText(heroCostCny, acct.unpricedCalls > 0 ? `${acct.unpricedCalls} 步费用待定` : formatCnyApprox(costUsd));
 
       patchText(cacheHitPctEl, `${Number(acct.cacheHitPct ?? 0).toFixed(1)}%`);
       patchText(cacheTokensEl, `命中 ${formatTokensPrecise(cacheTokens)}`);
@@ -3029,7 +3046,7 @@ const ConsumptionView = defineComponent({
       patchKeyedList(modelsListEl, models, {
         keyFn: (m) => m.label || m.shortName,
         sigFn: (m) =>
-          `${m.label}:${m.totalTokens}:${m.costUsd}:${m.calls}:${modelsTotalTok}`,
+          `${m.label}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.calls}:${modelsTotalTok}`,
         createRow: createBreakdownItemRow,
         updateRow: (refs, m) => updateBreakdownItemRow(refs, m, modelsTotalTok, true),
       });
@@ -3039,7 +3056,7 @@ const ConsumptionView = defineComponent({
       const sourcesTotalTok = sources.reduce((s, x) => s + Number(x.totalTokens || 0), 0);
       patchKeyedList(sourcesListEl, sources, {
         keyFn: (s) => s.name,
-        sigFn: (s) => `${s.name}:${s.totalTokens}:${s.costUsd}:${s.calls}:${sourcesTotalTok}`,
+        sigFn: (s) => `${s.name}:${s.totalTokens}:${s.costUsd}:${s.unpricedCalls}:${s.calls}:${sourcesTotalTok}`,
         createRow: createBreakdownItemRow,
         updateRow: (refs, s) => updateBreakdownItemRow(refs, s, sourcesTotalTok, true),
       });
@@ -3069,7 +3086,8 @@ const ConsumptionView = defineComponent({
           patchText(col.tokText, '');
         } else {
           const cVal = Number(m.costUsd || 0);
-          patchText(col.costText, cVal >= 10 ? `$${Math.round(cVal)}` : `$${cVal.toFixed(2)}`);
+          patchText(col.costText, m.unpricedCalls > 0 ? formatUsd(cVal, { unpricedCalls: m.unpricedCalls })
+            : cVal >= 10 ? `$${Math.round(cVal)}` : `$${cVal.toFixed(2)}`);
           patchText(col.tokText, formatTokensPrecise(mTot));
 
           const totalHeightPct = Math.max(8, Math.min(100, (mTot / maxMonthTokens) * 100));
@@ -3309,7 +3327,7 @@ const StepsDetailView = defineComponent({
           );
           patchText(refs.tdCache, `${Number(st.cacheHitPct ?? 0)}%`);
 
-          const costVal = Number(st.costUsd || 0);
+          const costVal = st.costUsd;
           patchText(refs.tdCost, formatUsd(costVal, { precise: true }));
           patchClasses(refs.tdCost, { 'accent-speed': costVal >= 0.15 });
         },
@@ -3318,7 +3336,7 @@ const StepsDetailView = defineComponent({
       patchKeyedList(modelsTbody, models, {
         keyFn: (m) => m.label || m.shortName,
         sigFn: (m) =>
-          `${m.shortName}:${m.calls}:${m.avgTokPerSec}:${m.totalTokens}:${m.costUsd}:${m.speedSummary?.sampleCount}`,
+          `${m.shortName}:${m.calls}:${m.avgTokPerSec}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.speedSummary?.sampleCount}`,
         createRow: () => {
           const tdName = h('td', { style: 'font-weight: 600;' });
           const tdCalls = h('td');
@@ -3339,7 +3357,7 @@ const StepsDetailView = defineComponent({
           patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' tok/s'));
           patchText(refs.speedSub, `有效 ${sampleSummary(m.speedSummary)}`);
           patchText(refs.tdTokens, formatTokens(m.totalTokens || 0));
-          patchText(refs.tdCost, formatUsd(m.costUsd || 0, { estimated: m.isEstimatedPrice }));
+          patchText(refs.tdCost, formatUsd(m.costUsd, { estimated: m.isEstimatedPrice, unpricedCalls: m.unpricedCalls }));
         },
       });
 

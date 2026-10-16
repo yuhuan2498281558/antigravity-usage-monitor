@@ -24,14 +24,13 @@ const CSRF_TOKEN = process.env.ANTIGRAVITY_CSRF_TOKEN;
 const DEFAULT_SETTINGS = {
   contextWindowLimit: 256000,  // 256k auto-compaction budget default (can be toggled to 256k / 1M / 2M)
   weeklyTokenBudget: 150000000, // 150M tokens default custom weekly target
-  weeklyCostBudget: 100,       // $100 default custom weekly cost target (matches Ultra weekly pool)
+  weeklyCostBudget: 100,       // Default user-configurable local cost target
   weeklyLimitMode: 'official', // 'official' | 'custom_tokens' | 'custom_cost'
 };
 
-// Official API pricing in USD per 1M tokens (Input, CacheRead, Output incl. Thinking)
-// Verified to 6 decimal places against RetrieveUserQuotaSummary({ forceRefresh: true }):
-// Gemini 4 Argon official price (until 2026-11-30): Input $2.00 / Cache $0.10 / Output $10.00
-// Ultra 5h Pool (100%) = $25.00 USD | Ultra Weekly Pool (100%) = $100.00 USD
+// Local API price catalog in USD per 1M tokens (Input, CacheRead, Output).
+// These estimates do not establish a conversion to subscription quota.
+// Missing model/price evidence is left unpriced, never filled from another model.
 const MODEL_PRICING = {
   // Gemini 4 & 3.x & 2.5 Official Catalog Pricing (USD / 1M tokens)
   'gemini-4-argon-high': { input: 2.00, cache: 0.10, output: 10.0, short: 'argon-4-high', family: 'Gemini' },
@@ -116,10 +115,12 @@ const PLACEHOLDER_MAP = {
 };
 
 // In-memory cache of trajectory step usage: cascadeId -> { signature, steps }
-const CACHE_SCHEMA_VERSION = 'v9-unified-throughput';
-let trajectoryCache = Object.fromEntries(Object.entries(loadJson(CACHE_FILE, {})).map(([id, entry]) => [
+const CACHE_SCHEMA_VERSION = 'v10-model-identity';
+const loadedTrajectoryCache = loadJson(CACHE_FILE, {});
+let trajectoryCache = Object.fromEntries(Object.entries(loadedTrajectoryCache).map(([id, entry]) => [
   id, { ...entry, steps: (entry.steps || []).map(normalizeCachedStep) },
 ]));
+let cacheNeedsSave = JSON.stringify(trajectoryCache) !== JSON.stringify(loadedTrajectoryCache);
 let externalDeepStatsMemo = { sig: '', convos: new Map() };
 const inFlightRequests = new Map();
 let quotaSummaryCache = { ts: 0, data: null, error: null };
@@ -137,8 +138,10 @@ function saveJson(filePath, data) {
   try {
     mkdirSync(DATA_DIR, { recursive: true });
     writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+    return true;
   } catch (err) {
     console.error(`Failed writing ${filePath}: ${err.message}`);
+    return false;
   }
 }
 
@@ -250,13 +253,13 @@ function formatGenericModelSlug(slug = '') {
 function resolveModelInfo(rawModelKey, dynamicModelMap, apiProvider = '', modelDisplayName = '') {
   const dyn = dynamicModelMap.get(rawModelKey) || PLACEHOLDER_MAP[rawModelKey];
   const cleanRawFallback =
-    rawModelKey && !/^MODEL_PLACEHOLDER_/i.test(String(rawModelKey)) ? rawModelKey : '';
+    rawModelKey && rawModelKey !== 'unknown' ? rawModelKey : '';
   const derivedDisplay =
     modelDisplayName ||
     dyn?.label ||
     formatGenericModelSlug(rawModelKey) ||
     cleanRawFallback ||
-    'Unknown Model';
+    '模型未知';
   const baseLabel = getBaseModelLabel(derivedDisplay);
   const canonicalSlug = baseLabel.toLowerCase().replace(/\s+/g, '-');
   const dashedSlug = canonicalSlug.replace(/\./g, '-');
@@ -280,45 +283,20 @@ function resolveModelInfo(rawModelKey, dynamicModelMap, apiProvider = '', modelD
   }
 
   const inferredFamily = inferFamilyFromProviderOrKey(rawModelKey, modelId, apiProvider);
-  const rawUpper = String(`${rawModelKey || ''} ${modelId || ''} ${derivedDisplay}`).toUpperCase();
-  let fallbackPricing;
-  if (inferredFamily === 'Gemini') {
-    if (rawUpper.includes('LITE')) {
-      fallbackPricing = { input: 0.10, cache: 0.01, output: 0.40, short: 'gemini-lite', family: 'Gemini' };
-    } else if (rawUpper.includes('FLASH')) {
-      fallbackPricing = { input: 0.30, cache: 0.03, output: 2.50, short: 'gemini-flash', family: 'Gemini' };
-    } else if (rawUpper.includes('PRO')) {
-      fallbackPricing = { input: 1.25, cache: 0.125, output: 10.0, short: 'gemini-pro', family: 'Gemini' };
-    } else {
-      fallbackPricing = { input: 2.00, cache: 0.10, output: 10.0, short: 'gemini', family: 'Gemini' };
-    }
-  } else if (inferredFamily === 'Claude') {
-    fallbackPricing = { input: 3.0, cache: 0.30, output: 15.0, short: 'claude', family: 'Claude' };
-  } else if (inferredFamily === 'GPT') {
-    fallbackPricing = { input: 0.80, cache: 0.10, output: 2.40, short: 'gpt', family: 'GPT' };
-  } else {
-    fallbackPricing = {
-      input: 0,
-      cache: 0,
-      output: 0,
-      short: (derivedDisplay || 'unknown').split(' ')[0].toLowerCase(),
-      family: 'Other',
-    };
-  }
-
   return {
     rawModel: rawModelKey,
     modelId,
     label: derivedDisplay,
     baseLabel: getBaseModelLabel(derivedDisplay),
-    shortName: fallbackPricing.short,
-    family: fallbackPricing.family,
-    pricing: fallbackPricing,
+    shortName: derivedDisplay,
+    family: inferredFamily,
+    pricing: null,
     isEstimatedPrice: true,
   };
 }
 
 function computeStepCost(step, pricing) {
+  if (!pricing) return null;
   const inCost = (step.inputTokens / 1_000_000) * pricing.input;
   const cacheCost = (step.cacheReadTokens / 1_000_000) * pricing.cache;
   const outCost = (step.outputTokens / 1_000_000) * pricing.output;
@@ -433,8 +411,10 @@ function createUsageBucket() {
 
 function accumulateStepIntoBucket(bucket, st, mInfo, stepCost, cascadeId) {
   const stepTotalTokens = st.inputTokens + st.cacheReadTokens + st.outputTokens;
-  const savedCost =
-    (st.cacheReadTokens / 1_000_000) * Math.max(0, mInfo.pricing.input - mInfo.pricing.cache);
+  const savedCost = mInfo.pricing
+    ? (st.cacheReadTokens / 1_000_000) * Math.max(0, mInfo.pricing.input - mInfo.pricing.cache) : 0;
+  if (stepCost === null) bucket.unpricedCalls = (bucket.unpricedCalls || 0) + 1;
+  stepCost = stepCost ?? 0;
   bucket.calls += 1;
   if (cascadeId) bucket.conversationsSet.add(cascadeId);
   bucket.inputTokens += st.inputTokens;
@@ -471,6 +451,7 @@ function finalizeUsageBucket(bucket) {
     responseTokens: bucket.responseTokens,
     totalTokens: bucket.totalTokens,
     costUsd: +bucket.costUsd.toFixed(2),
+    unpricedCalls: bucket.unpricedCalls || 0,
     savedCostUsd: +bucket.savedCostUsd.toFixed(2),
     cacheHitPct,
     geminiTokens: bucket.geminiTokens,
@@ -815,7 +796,7 @@ async function buildTelemetryPayloadInternal(
   const activeCascadeId = activeConvSummary?.cascadeId || requestedConvId || null;
 
   // Refresh trajectory cache for any uncached, schema-outdated, or updated conversation
-  let cacheDirty = false;
+  let cacheDirty = cacheNeedsSave;
 
   const toFetch = conversations.filter((conv) => {
     const cached = trajectoryCache[conv.cascadeId];
@@ -891,7 +872,7 @@ async function buildTelemetryPayloadInternal(
   }
 
   if (cacheDirty) {
-    saveJson(CACHE_FILE, trajectoryCache);
+    cacheNeedsSave = !saveJson(CACHE_FILE, trajectoryCache);
   }
 
   // Compute Active Conversation Metrics
@@ -901,15 +882,17 @@ async function buildTelemetryPayloadInternal(
   const sessionSpeed = summarizeSpeed(activeSteps);
   const sessionTtft = summarizeTtft(activeSteps);
   let sessionCostUsd = 0;
+  let sessionUnpricedCalls = 0;
   let sessionInputTokens = 0;
   let sessionCacheReadTokens = 0;
 
   const enrichedActiveSteps = activeSteps.map((st) => {
-    const mInfo = resolveModelInfo(st.modelKey, dynamicModelMap, st.apiProvider);
+    const mInfo = resolveModelInfo(st.modelKey, dynamicModelMap, st.apiProvider, st.modelDisplayName);
     const costUsd = computeStepCost(st, mInfo.pricing);
     const metric = speedMetric(st);
 
-    sessionCostUsd += costUsd;
+    sessionCostUsd += costUsd ?? 0;
+    if (costUsd === null) sessionUnpricedCalls++;
     sessionInputTokens += st.inputTokens;
     sessionCacheReadTokens += st.cacheReadTokens;
 
@@ -917,9 +900,9 @@ async function buildTelemetryPayloadInternal(
     const totalPrompt = st.inputTokens + st.cacheReadTokens;
     const cacheHitPct = totalPrompt > 0 ? (st.cacheReadTokens / totalPrompt) * 100 : 0;
 
-    const inCostUsd = (st.inputTokens / 1_000_000) * mInfo.pricing.input;
-    const cacheCostUsd = (st.cacheReadTokens / 1_000_000) * mInfo.pricing.cache;
-    const outCostUsd = (st.outputTokens / 1_000_000) * mInfo.pricing.output;
+    const inCostUsd = mInfo.pricing ? (st.inputTokens / 1_000_000) * mInfo.pricing.input : null;
+    const cacheCostUsd = mInfo.pricing ? (st.cacheReadTokens / 1_000_000) * mInfo.pricing.cache : null;
+    const outCostUsd = mInfo.pricing ? (st.outputTokens / 1_000_000) * mInfo.pricing.output : null;
 
     return {
       ...st,
@@ -930,10 +913,10 @@ async function buildTelemetryPayloadInternal(
       selectedSpeedReason: metric.reason,
       ttftSec: st.nativeTtftSec,
       cacheHitPct: +cacheHitPct.toFixed(1),
-      costUsd: +costUsd.toFixed(4),
-      inCostUsd: +inCostUsd.toFixed(4),
-      cacheCostUsd: +cacheCostUsd.toFixed(4),
-      outCostUsd: +outCostUsd.toFixed(4),
+      costUsd: costUsd === null ? null : +costUsd.toFixed(4),
+      inCostUsd: inCostUsd === null ? null : +inCostUsd.toFixed(4),
+      cacheCostUsd: cacheCostUsd === null ? null : +cacheCostUsd.toFixed(4),
+      outCostUsd: outCostUsd === null ? null : +outCostUsd.toFixed(4),
       contextTokens: st.inputTokens + st.cacheReadTokens + st.outputTokens,
     };
   });
@@ -991,11 +974,13 @@ async function buildTelemetryPayloadInternal(
     sessionPromptTokens > 0 ? Math.round((sessionCacheReadTokens / sessionPromptTokens) * 100) : 0;
 
   // Determine active pool and its official cycle anchors for time window alignment
-  const rawActiveFamily = latestEnriched?.family || 'Gemini';
-  const activePoolKey = rawActiveFamily === 'Gemini' ? 'Gemini' : 'Claude & GPT';
-  const activeLive5h = officialBuckets.get(activePoolKey === 'Gemini' ? 'gemini-5h' : '3p-5h');
+  const rawActiveFamily = latestEnriched?.family || 'Other';
+  const activePoolKey = rawActiveFamily === 'Gemini' ? 'Gemini'
+    : ['Claude', 'GPT'].includes(rawActiveFamily) ? 'Claude & GPT' : 'Unknown';
+  const activeLive5h = officialBuckets.get(activePoolKey === 'Gemini' ? 'gemini-5h'
+    : activePoolKey === 'Claude & GPT' ? '3p-5h' : null);
   const activeLiveWeekly = officialBuckets.get(
-    activePoolKey === 'Gemini' ? 'gemini-weekly' : '3p-weekly'
+    activePoolKey === 'Gemini' ? 'gemini-weekly' : activePoolKey === 'Claude & GPT' ? '3p-weekly' : null
   );
   const cycleAnchors = {
     fiveHourResetMs: parseIsoMs(activeLive5h?.resetTime),
@@ -1098,6 +1083,7 @@ async function buildTelemetryPayloadInternal(
       );
       const stepTotalTokens = st.inputTokens + st.cacheReadTokens + st.outputTokens;
       const stepCost = computeStepCost(st, mInfo.pricing);
+      const unpriced = stepCost === null ? 1 : 0;
       const tMs = st.createdAtMs || 0;
 
       if (tMs > 0) {
@@ -1111,7 +1097,8 @@ async function buildTelemetryPayloadInternal(
             mBucket.responseTokens += st.responseTokens || 0;
             mBucket.thinkingTokens += st.thinkingTokens || 0;
             mBucket.totalTokens += stepTotalTokens;
-            mBucket.costUsd = +(mBucket.costUsd + stepCost).toFixed(4);
+            mBucket.costUsd = +(mBucket.costUsd + (stepCost ?? 0)).toFixed(4);
+            mBucket.unpricedCalls = (mBucket.unpricedCalls || 0) + unpriced;
           }
         }
       }
@@ -1140,7 +1127,8 @@ async function buildTelemetryPayloadInternal(
           selectedWindowSteps.push({
             tMs,
             tokens: stepTotalTokens,
-            costUsd: stepCost,
+            costUsd: stepCost ?? 0,
+            unpricedCalls: unpriced,
           });
         }
 
@@ -1163,7 +1151,8 @@ async function buildTelemetryPayloadInternal(
         sAgg.responseTokens += st.responseTokens || 0;
         sAgg.thinkingTokens += st.thinkingTokens || 0;
         sAgg.totalTokens += stepTotalTokens;
-        sAgg.costUsd += stepCost;
+        sAgg.costUsd += stepCost ?? 0;
+        sAgg.unpricedCalls = (sAgg.unpricedCalls || 0) + unpriced;
 
         const modelGroupKey = mInfo.baseLabel || mInfo.label;
         if (!perModelStats.has(modelGroupKey)) {
@@ -1192,7 +1181,8 @@ async function buildTelemetryPayloadInternal(
         agg.thinkingTokens += st.thinkingTokens || 0;
         agg.responseTokens += st.responseTokens || 0;
         agg.totalTokens += stepTotalTokens;
-        agg.costUsd += stepCost;
+        agg.costUsd += stepCost ?? 0;
+        agg.unpricedCalls = (agg.unpricedCalls || 0) + unpriced;
       }
     }
   }
@@ -1235,6 +1225,7 @@ async function buildTelemetryPayloadInternal(
     const idx = Math.max(0, Math.min(trendSlotsCount - 1, rawIdx));
     trendSeries[idx].tokens += item.tokens;
     trendSeries[idx].costUsd = +(trendSeries[idx].costUsd + item.costUsd).toFixed(4);
+    trendSeries[idx].unpricedCalls = (trendSeries[idx].unpricedCalls || 0) + item.unpricedCalls;
     trendSeries[idx].calls += 1;
   }
 
@@ -1263,7 +1254,8 @@ async function buildTelemetryPayloadInternal(
 
   const familyPoolQuota = quotaPoolsMap.get(activePoolKey);
   const activePoolQuota = familyPoolQuota || {
-    poolName: activePoolKey === 'Gemini' ? 'Gemini 模型池' : 'Claude & GPT 模型池',
+    poolName: activePoolKey === 'Gemini' ? 'Gemini 模型池'
+      : activePoolKey === 'Claude & GPT' ? 'Claude & GPT 模型池' : '模型池未知',
     family: activePoolKey,
     isAvailable: Boolean(activeLive5h),
     remainingPct: activeLive5h?.remainingPct ?? null,
@@ -1279,7 +1271,8 @@ async function buildTelemetryPayloadInternal(
 
   const fallbackWeeklyPct =
     settings.weeklyLimitMode === 'custom_cost' || settings.weeklyLimitMode === 'cost'
-      ? Math.min(100, +((weekBucket.costUsd / Math.max(1, settings.weeklyCostBudget)) * 100).toFixed(1))
+      ? weekBucket.unpricedCalls > 0 ? null
+        : Math.min(100, +((weekBucket.costUsd / Math.max(1, settings.weeklyCostBudget)) * 100).toFixed(1))
       : Math.min(
           100,
           +((weekBucket.totalTokens / Math.max(1000, settings.weeklyTokenBudget)) * 100).toFixed(1)
@@ -1296,12 +1289,12 @@ async function buildTelemetryPayloadInternal(
       : null;
   const weeklyRemainingPct = useOfficialWeekly
     ? activeLiveWeekly.remainingPct
-    : isCustomWeeklyMode
+    : isCustomWeeklyMode && fallbackWeeklyPct !== null
       ? +(100 - fallbackWeeklyPct).toFixed(1)
       : null;
   const weeklyRemainingIntPct = useOfficialWeekly
     ? activeLiveWeekly.remainingIntPct
-    : isCustomWeeklyMode
+    : isCustomWeeklyMode && fallbackWeeklyPct !== null
       ? Math.max(0, Math.floor(100 - fallbackWeeklyPct))
       : null;
 
@@ -1341,12 +1334,13 @@ async function buildTelemetryPayloadInternal(
       avgTokPerSec: sessionAvgTokPerSec,
       speedSummary: sessionSpeed,
       ttftSummary: sessionTtft,
-      latestStepCostUsd: latestEnriched?.costUsd ?? 0,
+      latestStepCostUsd: latestEnriched?.costUsd ?? null,
       sessionCostUsd: +sessionCostUsd.toFixed(2),
+      sessionUnpricedCalls,
       latestCacheHitPct,
       sessionCacheHitPct,
-      activeModelShort: latestEnriched?.modelShort || 'argon-4',
-      activeModelLabel: latestEnriched?.modelLabel || 'Gemini 4 Argon (Medium)',
+      activeModelShort: latestEnriched?.modelShort || '模型未知',
+      activeModelLabel: latestEnriched?.modelLabel || '模型未知',
       context: {
         totalTokens: ctxTotal,
         limitTokens: ctxLimit,
@@ -1408,6 +1402,7 @@ async function buildTelemetryPayloadInternal(
         calls: weekBucket.calls,
         tokens: weekBucket.totalTokens,
         costUsd: weekBucket.costUsd,
+        unpricedCalls: weekBucket.unpricedCalls,
         usedPct: weeklyUsedPct,
         remainingPct: weeklyRemainingPct,
         remainingIntPct: weeklyRemainingIntPct,
@@ -1421,6 +1416,7 @@ async function buildTelemetryPayloadInternal(
         calls: todayBucket.calls,
         tokens: todayBucket.totalTokens,
         costUsd: todayBucket.costUsd,
+        unpricedCalls: todayBucket.unpricedCalls,
       },
     },
     modelBreakdown: Array.from(perModelStats.values())

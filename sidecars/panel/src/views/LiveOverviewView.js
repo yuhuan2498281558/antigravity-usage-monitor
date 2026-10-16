@@ -31,7 +31,7 @@ export const LiveOverviewView = defineComponent({
   setup({ onCleanup }) {
     // 1. 4-Cell Real-time Telemetry Matrix
     const tpsVal = h('strong', { className: 'cell-value accent-speed', text: '—' });
-    const tpsSub = h('span', { className: 'cell-sub', text: 'argon-4' });
+    const tpsSub = h('span', { className: 'cell-sub', text: '模型未知' });
     const pulseDot = createSvgIcon('dot', { size: 10 });
 
     const ttftVal = h('strong', { className: 'cell-value', text: '—' });
@@ -265,7 +265,7 @@ export const LiveOverviewView = defineComponent({
       const reason = speedReasonText(active.latestSpeedReason);
       patchText(
         tpsSub,
-        reason ? `${active.activeModelShort || 'argon-4'} · ${reason}` : active.activeModelShort || 'argon-4'
+        reason ? `${active.activeModelShort || '模型未知'} · ${reason}` : active.activeModelShort || '模型未知'
       );
 
       patchText(ttftVal, formatMetric(active.latestTtftSec, 's'));
@@ -274,11 +274,11 @@ export const LiveOverviewView = defineComponent({
       patchText(avgVal, formatMetric(active.avgTokPerSec, ' tok/s'));
       patchText(avgSub, `有效 ${sampleSummary(active.speedSummary)}`);
 
-      const stepCost = Number(active.latestStepCostUsd ?? active.recentSteps?.[0]?.costUsd ?? 0);
+      const stepCost = active.latestStepCostUsd;
       patchText(costVal, formatUsd(stepCost, { precise: true }));
       patchText(
         cacheSub,
-        `缓 ${active.latestCacheHitPct ?? 0}% · 累 ${formatUsd(active.sessionCostUsd || 0)}`
+        `缓 ${active.latestCacheHitPct ?? 0}% · 累 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
       );
 
       // 2. Context (Auto Compaction Baseline)
@@ -313,16 +313,17 @@ export const LiveOverviewView = defineComponent({
         {};
       const claudePool =
         pools.find((p) => p.family === 'Claude & GPT' || p.family === 'Claude') ||
-        (activePool.family && activePool.family !== 'Gemini' ? activePool : null) ||
+        (['Claude & GPT', 'Claude', 'GPT'].includes(activePool.family) ? activePool : null) ||
         {};
 
-      const activeIsGemini = (activePool.family || 'Gemini') === 'Gemini';
+      const activeIsGemini = activePool.family === 'Gemini';
+      const activeIsThirdParty = ['Claude & GPT', 'Claude', 'GPT'].includes(activePool.family);
       syncPoolQuotaBlock(geminiQuotaBlock, 'Gemini', geminiPool, weekly, activeIsGemini);
-      syncPoolQuotaBlock(claudeQuotaBlock, 'Claude & GPT', claudePool, weekly, !activeIsGemini);
+      syncPoolQuotaBlock(claudeQuotaBlock, 'Claude & GPT', claudePool, weekly, activeIsThirdParty);
 
       patchText(
         wkFootLeft,
-        `本周本机: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0)})`
+        `本周本机: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0, { unpricedCalls: weekly.unpricedCalls })})`
       );
       patchText(
         wkFootRight,

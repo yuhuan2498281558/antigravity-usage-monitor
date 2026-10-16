@@ -189,7 +189,7 @@ export const StepsDetailView = defineComponent({
           );
           patchText(refs.tdCache, `${Number(st.cacheHitPct ?? 0)}%`);
 
-          const costVal = Number(st.costUsd || 0);
+          const costVal = st.costUsd;
           patchText(refs.tdCost, formatUsd(costVal, { precise: true }));
           patchClasses(refs.tdCost, { 'accent-speed': costVal >= 0.15 });
         },
@@ -198,7 +198,7 @@ export const StepsDetailView = defineComponent({
       patchKeyedList(modelsTbody, models, {
         keyFn: (m) => m.label || m.shortName,
         sigFn: (m) =>
-          `${m.shortName}:${m.calls}:${m.avgTokPerSec}:${m.totalTokens}:${m.costUsd}:${m.speedSummary?.sampleCount}`,
+          `${m.shortName}:${m.calls}:${m.avgTokPerSec}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.speedSummary?.sampleCount}`,
         createRow: () => {
           const tdName = h('td', { style: 'font-weight: 600;' });
           const tdCalls = h('td');
@@ -219,7 +219,7 @@ export const StepsDetailView = defineComponent({
           patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' tok/s'));
           patchText(refs.speedSub, `有效 ${sampleSummary(m.speedSummary)}`);
           patchText(refs.tdTokens, formatTokens(m.totalTokens || 0));
-          patchText(refs.tdCost, formatUsd(m.costUsd || 0, { estimated: m.isEstimatedPrice }));
+          patchText(refs.tdCost, formatUsd(m.costUsd, { estimated: m.isEstimatedPrice, unpricedCalls: m.unpricedCalls }));
         },
       });
 

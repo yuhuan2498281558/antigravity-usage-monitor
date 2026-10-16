@@ -37,18 +37,20 @@ export function formatDateSpanBadge(startMs, endMs) {
   return `${s.getMonth() + 1}月${s.getDate()}日 ~ ${e.getMonth() + 1}月${e.getDate()}日`;
 }
 
-export function formatUsd(amount, { precise = false, estimated = false } = {}) {
+export function formatUsd(amount, { precise = false, estimated = false, unpricedCalls = 0 } = {}) {
+  if (amount == null || !Number.isFinite(Number(amount))) return '待定';
   const val = Number(amount || 0);
   const prefix = estimated ? '≈$' : '$';
+  const suffix = unpricedCalls > 0 ? ' + 待定' : '';
   if (precise) {
-    return val >= 1 ? `${prefix}${val.toFixed(2)}` : `${prefix}${val.toFixed(3)}`;
+    return (val >= 1 ? `${prefix}${val.toFixed(2)}` : `${prefix}${val.toFixed(3)}`) + suffix;
   }
-  return `${prefix}${val.toFixed(2)}`;
+  return `${prefix}${val.toFixed(2)}${suffix}`;
 }
 
 export function speedReasonText(reason) {
   return ({
-    compaction: '自动压缩不计测速',
+    compaction: '自动压缩不计均速',
     incomplete_or_invalid_timing: '未完成或计时缺失',
     invalid_output_tokens: '输出 Token 计数无效',
     inconsistent_timing: '原生首响应与总计时不一致',

@@ -521,7 +521,7 @@ export const ConsumptionView = defineComponent({
       patchText(refs.pctBadge, `${share.toFixed(1)}%`);
       patchText(refs.totalTokEl, showTokensInHeader ? formatTokensPrecise(total) : '');
       patchAttr(refs.totalTokEl, 'hidden', !showTokensInHeader);
-      patchText(refs.costEl, formatUsd(item.costUsd || 0));
+      patchText(refs.costEl, formatUsd(item.costUsd || 0, { unpricedCalls: item.unpricedCalls }));
 
       const responseTok =
         item.responseTokens != null
@@ -573,8 +573,8 @@ export const ConsumptionView = defineComponent({
 
       patchText(heroTotalTokens, formatTokensPrecise(totalTokens));
       patchText(heroTotalCalls, `${acct.calls || 0} 调用`);
-      patchText(heroCostUsd, formatUsd(costUsd));
-      patchText(heroCostCny, formatCnyApprox(costUsd));
+      patchText(heroCostUsd, formatUsd(costUsd, { unpricedCalls: acct.unpricedCalls }));
+      patchText(heroCostCny, acct.unpricedCalls > 0 ? `${acct.unpricedCalls} 步费用待定` : formatCnyApprox(costUsd));
 
       patchText(cacheHitPctEl, `${Number(acct.cacheHitPct ?? 0).toFixed(1)}%`);
       patchText(cacheTokensEl, `命中 ${formatTokensPrecise(cacheTokens)}`);
@@ -627,7 +627,7 @@ export const ConsumptionView = defineComponent({
       patchKeyedList(modelsListEl, models, {
         keyFn: (m) => m.label || m.shortName,
         sigFn: (m) =>
-          `${m.label}:${m.totalTokens}:${m.costUsd}:${m.calls}:${modelsTotalTok}`,
+          `${m.label}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.calls}:${modelsTotalTok}`,
         createRow: createBreakdownItemRow,
         updateRow: (refs, m) => updateBreakdownItemRow(refs, m, modelsTotalTok, true),
       });
@@ -637,7 +637,7 @@ export const ConsumptionView = defineComponent({
       const sourcesTotalTok = sources.reduce((s, x) => s + Number(x.totalTokens || 0), 0);
       patchKeyedList(sourcesListEl, sources, {
         keyFn: (s) => s.name,
-        sigFn: (s) => `${s.name}:${s.totalTokens}:${s.costUsd}:${s.calls}:${sourcesTotalTok}`,
+        sigFn: (s) => `${s.name}:${s.totalTokens}:${s.costUsd}:${s.unpricedCalls}:${s.calls}:${sourcesTotalTok}`,
         createRow: createBreakdownItemRow,
         updateRow: (refs, s) => updateBreakdownItemRow(refs, s, sourcesTotalTok, true),
       });
@@ -667,7 +667,8 @@ export const ConsumptionView = defineComponent({
           patchText(col.tokText, '');
         } else {
           const cVal = Number(m.costUsd || 0);
-          patchText(col.costText, cVal >= 10 ? `$${Math.round(cVal)}` : `$${cVal.toFixed(2)}`);
+          patchText(col.costText, m.unpricedCalls > 0 ? formatUsd(cVal, { unpricedCalls: m.unpricedCalls })
+            : cVal >= 10 ? `$${Math.round(cVal)}` : `$${cVal.toFixed(2)}`);
           patchText(col.tokText, formatTokensPrecise(mTot));
 
           const totalHeightPct = Math.max(8, Math.min(100, (mTot / maxMonthTokens) * 100));

@@ -1,6 +1,7 @@
 // Client-observed request throughput, including waiting and thinking.
 // One formula for text and tools; no rate-based clipping or denominator changes.
 export const MEASUREMENT_VERSION = 4;
+export const MODEL_IDENTITY_VERSION = 1;
 export const MIN_SPEED_DURATION_SECONDS = 0.5;
 export const MIN_MEAN_OUTPUT_TOKENS = 50;
 
@@ -267,9 +268,22 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     const speedReason = timingReason || (isCompactionStep ? 'compaction' : shortOutputSample ? 'short_sample' : null);
     const context = chat?.chatStartMetadata?.contextWindowMetadata;
     const contextBreakdown = extractContextBreakdown(chat);
+    // Only use model evidence belonging to this request. A checkpoint can use
+    // a different model from its neighbouring planner steps (or omit it).
+    const modelCandidates = [
+      ['usage.model', u.model], ['chat.usage.model', chat?.usage?.model],
+      ['chat.model', chat?.model], ['metadata.generatorModel', m.generatorModel],
+      ['chat.responseModel', chat?.responseModel],
+    ];
+    const identity = modelCandidates.find(([, value]) =>
+      typeof value === 'string' && value.trim() &&
+      !/^(?:0|unknown|MODEL_(?:UNSPECIFIED|UNKNOWN))$/i.test(value.trim()));
     result.push({
       stepIndex, isCompactionStep,
-      modelKey: u.model || chat?.model || m.generatorModel || 'MODEL_PLACEHOLDER_M418',
+      modelKey: identity ? identity[1].trim() : 'unknown',
+      modelSource: identity?.[0] || 'unavailable',
+      modelIdentityVersion: MODEL_IDENTITY_VERSION,
+      modelDisplayName: chat?.modelDisplayName || '',
       apiProvider: u.apiProvider || chat?.usage?.apiProvider || '',
       createdAt: m.createdAt || null, createdAtMs: Math.floor(start),
       hasVisibleText: String(p.modifiedResponse || p.response || '').trim().length > 0,
@@ -306,6 +320,19 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
 }
 
 export function normalizeCachedStep(step) {
+  if (step.modelIdentityVersion !== MODEL_IDENTITY_VERSION) {
+    // v9 wrote M418 both for real Argon calls and as the missing-model default.
+    // Without raw evidence they are indistinguishable; keep usage and timing,
+    // mark the identity unresolved, and let the schema reload recover it.
+    const ambiguous = !step.modelKey || step.modelKey === 'MODEL_PLACEHOLDER_M418';
+    step = {
+      ...step, modelIdentityVersion: MODEL_IDENTITY_VERSION,
+      ...(ambiguous ? {
+        legacyModelKey: step.modelKey || null, modelKey: 'unknown',
+        modelDisplayName: '', modelSource: 'legacy_unverified',
+      } : { modelSource: 'legacy_explicit' }),
+    };
+  }
   if (step.measurementVersion === MEASUREMENT_VERSION) return step;
   // Keep billing through failed reloads, but never show old derived speeds as
   // current measurements. Raw trajectories rebuild measurements after migration.

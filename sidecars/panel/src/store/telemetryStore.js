@@ -34,6 +34,8 @@ function isEquivalentTelemetry(prev, next) {
   if (pAct?.isRunning !== nAct?.isRunning) return false;
   if (pAct?.latestTokPerSec !== nAct?.latestTokPerSec) return false;
   if (pAct?.latestTtftSec !== nAct?.latestTtftSec) return false;
+  if (pAct?.activeModelShort !== nAct?.activeModelShort || pAct?.activeModelLabel !== nAct?.activeModelLabel) return false;
+  if (pAct?.latestStepCostUsd !== nAct?.latestStepCostUsd || pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls) return false;
   const pCtx = pAct?.context;
   const nCtx = nAct?.context;
   if (pCtx?.totalTokens !== nCtx?.totalTokens) return false;
@@ -44,6 +46,11 @@ function isEquivalentTelemetry(prev, next) {
   if (pCtx?.systemPromptTokens !== nCtx?.systemPromptTokens) return false;
   if (pCtx?.userRulesTokens !== nCtx?.userRulesTokens) return false;
   if ((pAct?.recentSteps?.length || 0) !== (nAct?.recentSteps?.length || 0)) return false;
+  for (let i = 0; i < (pAct?.recentSteps?.length || 0); i++) {
+    const before = pAct.recentSteps[i], after = nAct.recentSteps[i];
+    if (before.modelKey !== after.modelKey || before.modelShort !== after.modelShort ||
+        before.modelSource !== after.modelSource || before.costUsd !== after.costUsd) return false;
+  }
 
   const pRange = prev.consumption?.selectedRange;
   const nRange = next.consumption?.selectedRange;
@@ -56,12 +63,14 @@ function isEquivalentTelemetry(prev, next) {
   const nCons = next.consumption?.session;
   if (pCons?.totalTokens !== nCons?.totalTokens) return false;
   if (pCons?.costUsd !== nCons?.costUsd) return false;
+  if (pCons?.unpricedCalls !== nCons?.unpricedCalls) return false;
 
   const pAcct = prev.consumption?.account;
   const nAcct = next.consumption?.account;
   if (pAcct?.totalTokens !== nAcct?.totalTokens) return false;
   if (pAcct?.calls !== nAcct?.calls) return false;
   if (pAcct?.costUsd !== nAcct?.costUsd) return false;
+  if (pAcct?.unpricedCalls !== nAcct?.unpricedCalls) return false;
 
   const pTrend = prev.consumption?.trendSeries || [];
   const nTrend = next.consumption?.trendSeries || [];
@@ -78,6 +87,9 @@ function isEquivalentTelemetry(prev, next) {
   for (let i = 0; i < pModels.length; i++) {
     if (
       pModels[i]?.label !== nModels[i]?.label ||
+      pModels[i]?.shortName !== nModels[i]?.shortName ||
+      pModels[i]?.costUsd !== nModels[i]?.costUsd ||
+      pModels[i]?.unpricedCalls !== nModels[i]?.unpricedCalls ||
       pModels[i]?.totalTokens !== nModels[i]?.totalTokens ||
       pModels[i]?.calls !== nModels[i]?.calls
     ) {
@@ -91,6 +103,8 @@ function isEquivalentTelemetry(prev, next) {
   for (let i = 0; i < pSources.length; i++) {
     if (
       pSources[i]?.name !== nSources[i]?.name ||
+      pSources[i]?.costUsd !== nSources[i]?.costUsd ||
+      pSources[i]?.unpricedCalls !== nSources[i]?.unpricedCalls ||
       pSources[i]?.totalTokens !== nSources[i]?.totalTokens ||
       pSources[i]?.calls !== nSources[i]?.calls
     ) {
