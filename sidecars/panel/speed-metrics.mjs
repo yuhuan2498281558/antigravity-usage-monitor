@@ -268,20 +268,25 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     const speedReason = timingReason || (isCompactionStep ? 'compaction' : shortOutputSample ? 'short_sample' : null);
     const context = chat?.chatStartMetadata?.contextWindowMetadata;
     const contextBreakdown = extractContextBreakdown(chat);
-    // Only use model evidence belonging to this request. A checkpoint can use
-    // a different model from its neighbouring planner steps (or omit it).
+    // Only use model evidence belonging to this request first. If a checkpoint
+    // omits model metadata, inferCompactionStepModels will fall back to the
+    // nearest explicit step in the same trajectory with a compatible provider.
+    const isValidModelValue = (value) =>
+      typeof value === 'string' && value.trim() &&
+      !/^(?:0|unknown|MODEL_(?:UNSPECIFIED|UNKNOWN))$/i.test(value.trim());
     const modelCandidates = [
       ['usage.model', u.model], ['chat.usage.model', chat?.usage?.model],
       ['chat.model', chat?.model], ['metadata.generatorModel', m.generatorModel],
       ['chat.responseModel', chat?.responseModel],
     ];
-    const identity = modelCandidates.find(([, value]) =>
-      typeof value === 'string' && value.trim() &&
-      !/^(?:0|unknown|MODEL_(?:UNSPECIFIED|UNKNOWN))$/i.test(value.trim()));
+    const identity = modelCandidates.find(([, value]) => isValidModelValue(value));
+    const rawResponseModel = [chat?.responseModel, u?.responseModel, m?.responseModel]
+      .find(isValidModelValue);
     result.push({
       stepIndex, isCompactionStep,
       modelKey: identity ? identity[1].trim() : 'unknown',
       modelSource: identity?.[0] || 'unavailable',
+      responseModel: rawResponseModel ? rawResponseModel.trim() : '',
       modelIdentityVersion: MODEL_IDENTITY_VERSION,
       modelDisplayName: chat?.modelDisplayName || '',
       apiProvider: u.apiProvider || chat?.usage?.apiProvider || '',
@@ -316,7 +321,69 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       lastStep.maxContextBudgetTokens = Number(fallbackCtx.maxContextTokens);
     }
   }
-  return result;
+  return inferCompactionStepModels(result);
+}
+
+export function inferCompactionStepModels(steps) {
+  if (!Array.isArray(steps) || steps.length < 2) return steps;
+  const isExplicitDonor = (step) =>
+    Boolean(
+      step &&
+      step.modelKey &&
+      step.modelKey !== 'unknown' &&
+      step.modelSource !== 'inferred_compaction' &&
+      step.modelSource !== 'legacy_unverified'
+    );
+  const isProviderCompatible = (target, donor) =>
+    !target.apiProvider || !donor.apiProvider || target.apiProvider === donor.apiProvider;
+
+  return steps.map((step, idx) => {
+    if (!step?.isCompactionStep) return step;
+    const needsModel = !step.modelKey || step.modelKey === 'unknown';
+    const needsUpstream = step.modelSource === 'inferred_compaction' && !step.responseModel;
+    if (!needsModel && !needsUpstream) return step;
+
+    let donor = null;
+    for (let j = idx - 1; j >= 0; j--) {
+      if (isExplicitDonor(steps[j]) && isProviderCompatible(step, steps[j])) {
+        donor = steps[j];
+        break;
+      }
+    }
+    if (!donor) {
+      for (let j = idx + 1; j < steps.length; j++) {
+        if (isExplicitDonor(steps[j]) && isProviderCompatible(step, steps[j])) {
+          donor = steps[j];
+          break;
+        }
+      }
+    }
+    if (!donor) {
+      for (let j = idx - 1; j >= 0; j--) {
+        if (isExplicitDonor(steps[j])) {
+          donor = steps[j];
+          break;
+        }
+      }
+    }
+    if (!donor) {
+      for (let j = idx + 1; j < steps.length; j++) {
+        if (isExplicitDonor(steps[j])) {
+          donor = steps[j];
+          break;
+        }
+      }
+    }
+    if (!donor) return step;
+
+    return {
+      ...step,
+      modelKey: needsModel ? donor.modelKey : step.modelKey,
+      modelSource: needsModel ? 'inferred_compaction' : step.modelSource,
+      responseModel: step.responseModel || donor.responseModel || '',
+      modelDisplayName: step.modelDisplayName || donor.modelDisplayName || '',
+    };
+  });
 }
 
 export function normalizeCachedStep(step) {

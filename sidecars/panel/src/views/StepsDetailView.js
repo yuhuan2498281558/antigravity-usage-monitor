@@ -123,6 +123,7 @@ export const StepsDetailView = defineComponent({
       if (!slice) return;
       const steps = slice.recentSteps || [];
       const models = slice.modelBreakdown || [];
+      const showUpstream = Boolean(slice.showUpstreamModel);
 
       subTabSwitch.setProps({
         options: [
@@ -134,13 +135,15 @@ export const StepsDetailView = defineComponent({
       patchKeyedList(stepsTbody, steps, {
         keyFn: (st) => `${slice.cascadeId || 'conv'}-${st.stepIndex}`,
         sigFn: (st) =>
-          `${st.stepIndex}:${st.modelShort}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}`,
+          `${st.stepIndex}:${showUpstream ? st.modelUpstream || st.responseModel || st.modelShort : st.modelShort}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}`,
         createRow: () => {
           const stepNumText = h('span');
           const compIcon = createSvgIcon('bolt', { size: 11, className: 'text-muted' });
           const tdStep = h('td', {}, [stepNumText, compIcon]);
 
-          const tdModel = h('td');
+          const tdModel = h('td', {
+            style: 'max-width: 140px; overflow: hidden; text-overflow: ellipsis;',
+          });
           const speedMain = h('strong', {
             className: 'cell-value accent-speed',
             style: 'font-size: 11px;',
@@ -175,7 +178,12 @@ export const StepsDetailView = defineComponent({
         updateRow: (refs, st) => {
           patchText(refs.stepNumText, `#${Number(st.stepIndex)} `);
           patchAttr(refs.compIcon, 'hidden', !st.isCompactionStep);
-          patchText(refs.tdModel, st.modelShort || '—');
+          const modelText =
+            (showUpstream ? st.modelUpstream || st.responseModel : st.modelShort) ||
+            st.modelShort ||
+            '—';
+          patchText(refs.tdModel, modelText);
+          patchAttr(refs.tdModel, 'title', modelText);
 
           patchText(refs.speedMain, formatMetric(st.tokPerSec, ' tok/s'));
           const reason = speedReasonText(st.selectedSpeedReason);
@@ -198,9 +206,11 @@ export const StepsDetailView = defineComponent({
       patchKeyedList(modelsTbody, models, {
         keyFn: (m) => m.label || m.shortName,
         sigFn: (m) =>
-          `${m.shortName}:${m.calls}:${m.avgTokPerSec}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.speedSummary?.sampleCount}`,
+          `${showUpstream ? m.upstreamName || m.shortName : m.shortName}:${m.calls}:${m.avgTokPerSec}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.speedSummary?.sampleCount}`,
         createRow: () => {
-          const tdName = h('td', { style: 'font-weight: 600;' });
+          const tdName = h('td', {
+            style: 'font-weight: 600; max-width: 165px; overflow: hidden; text-overflow: ellipsis;',
+          });
           const tdCalls = h('td');
           const speedMain = h('div');
           const speedSub = h('div', { className: 'text-muted', style: 'font-size: 9.5px;' });
@@ -214,7 +224,15 @@ export const StepsDetailView = defineComponent({
           };
         },
         updateRow: (refs, m) => {
-          patchText(refs.tdName, m.shortName || m.label);
+          const nameText = showUpstream
+            ? m.upstreamName || m.shortName || m.label
+            : m.shortName || m.label;
+          patchText(refs.tdName, nameText);
+          const fullUpstreamTitle =
+            showUpstream && Array.isArray(m.upstreamModels) && m.upstreamModels.length > 1
+              ? m.upstreamModels.join(' / ')
+              : nameText;
+          patchAttr(refs.tdName, 'title', fullUpstreamTitle);
           patchText(refs.tdCalls, String(Number(m.calls || 0)));
           patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' tok/s'));
           patchText(refs.speedSub, `有效 ${sampleSummary(m.speedSummary)}`);
@@ -233,6 +251,7 @@ export const StepsDetailView = defineComponent({
         recentSteps: st.telemetry?.activeConversation?.recentSteps,
         modelBreakdown: st.telemetry?.modelBreakdown,
         rangeLabel: st.telemetry?.consumption?.selectedRange?.label || '全部时间',
+        showUpstreamModel: Boolean(st.telemetry?.settings?.showUpstreamModel),
       }),
       (slice) => {
         latestSlice = slice;

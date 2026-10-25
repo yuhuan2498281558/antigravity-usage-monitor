@@ -22,19 +22,46 @@ async function payload(steps, options = {}) {
     trajectories: { test: { trajectory: { steps } } }, ...options }).buildTelemetryPayloadInternal('test');
 }
 
-test('missing checkpoint identity stays unknown between Flash steps; its token totals survive', async () => {
+test('missing checkpoint identity infers model and pricing from neighbouring steps', async () => {
   const rows = [step(209, FLASH), step(211, undefined, true), step(212, FLASH)];
+  const raw = {
+    trajectory: {
+      steps: rows,
+      generatorMetadata: [
+        { stepIndices: [209], chatModel: { model: FLASH, responseModel: 'gemini-3.8-flash-n' } },
+        { stepIndices: [212], chatModel: { model: FLASH, responseModel: 'gemini-3.8-flash-n' } },
+      ],
+    },
+  };
+  const p = await payload(rows, { trajectories: { test: raw } });
+  const cp = p.activeConversation.recentSteps.find(s => s.stepIndex === 211);
+  assert.equal(cp.modelKey, FLASH);
+  assert.equal(cp.modelSource, 'inferred_compaction');
+  assert.equal(cp.modelShort, 'flash-3.8-high·压缩');
+  assert.equal(cp.responseModel, 'gemini-3.8-flash-n');
+  assert.equal(cp.modelUpstream, 'gemini-3.8-flash-n·压缩');
+  assert.equal(cp.costUsd, 0.0052);
+  assert.equal(cp.inCostUsd, 0.0008);
+  assert.equal(cp.contextTokens, 11000);
+  assert.equal(cp.tokPerSec, 100);
+  assert.equal(p.activeConversation.speedSummary.sampleCount, 2);
+  assert.equal(p.consumption.account.totalTokens, 33000);
+  assert.equal(p.consumption.account.unpricedCalls, 0);
+  assert.equal(p.modelBreakdown.find(m => m.shortName === 'flash-3.8-high').calls, 3);
+  assert(!p.modelBreakdown.some(m => /argon/i.test(m.label)));
+});
+
+test('isolated checkpoint without known neighbours stays unknown; its token totals survive', async () => {
+  const rows = [step(211, undefined, true)];
   const p = await payload(rows);
   const cp = p.activeConversation.recentSteps.find(s => s.stepIndex === 211);
   assert.equal(cp.modelKey, 'unknown'); assert.equal(cp.modelShort, '模型未知·压缩');
   assert.equal(cp.costUsd, null); assert.equal(cp.inCostUsd, null);
   assert.equal(cp.contextTokens, 11000); assert.equal(cp.tokPerSec, 100);
-  assert.equal(p.activeConversation.speedSummary.sampleCount, 2);
-  assert.equal(p.consumption.account.totalTokens, 33000);
+  assert.equal(p.activeConversation.speedSummary.sampleCount, 0);
+  assert.equal(p.consumption.account.totalTokens, 11000);
   assert.equal(p.consumption.account.unpricedCalls, 1);
   assert.equal(p.modelBreakdown.find(m => m.label === '模型未知').unpricedCalls, 1);
-  assert.equal(p.modelBreakdown.find(m => m.shortName === 'flash-3.8-high').calls, 2);
-  assert(!p.modelBreakdown.some(m => /argon/i.test(m.label)));
   assert.equal(p.consumption.trendSeries.reduce((n,s) => n+(s.unpricedCalls || 0),0), 1);
   assert.equal(p.consumption.sourcesBreakdown[0].unpricedCalls, 1);
   assert.equal(p.consumption.monthlySeries.reduce((n,s) => n+(s.unpricedCalls || 0),0), 1);
@@ -86,6 +113,21 @@ test('response model and display name are preserved when enum model is absent', 
   }}]}};
   const p = await payload([], {trajectories: {test:raw}});
   assert.equal(p.activeConversation.activeModelShort,'flash-3.8-high');
+});
+
+test('upstream responseModel is preserved alongside placeholder modelKey for StepsDetailView', async () => {
+  const row = step(211, FLASH);
+  const raw = {trajectory: { steps: [row], generatorMetadata: [{stepIndices:[211],chatModel:{
+    model: FLASH,
+    responseModel: 'gemini-3.8-flash-n',
+  }}]}};
+  const p = await payload([], {trajectories: {test:raw}});
+  const st = p.activeConversation.recentSteps[0];
+  assert.equal(st.modelKey, FLASH);
+  assert.equal(st.modelShort, 'flash-3.8-high');
+  assert.equal(st.responseModel, 'gemini-3.8-flash-n');
+  assert.equal(st.modelUpstream, 'gemini-3.8-flash-n');
+  assert.equal(p.modelBreakdown[0].upstreamName, 'gemini-3.8-flash-n');
 });
 
 test('server model catalog overrides static placeholder mapping', () => {
