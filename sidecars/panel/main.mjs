@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Response, SidecarApp } from 'sidecar_sdk';
-import { extractModelSteps, parseIsoMs, normalizeCachedStep, speedMetric, summarizeSpeed, summarizeTtft, createSpeedAccumulator, accumulateSpeed, finishSpeed } from './speed-metrics.mjs';
+import { extractModelSteps, inferCompactionStepModels, parseIsoMs, normalizeCachedStep, speedMetric, summarizeSpeed, summarizeTtft, createSpeedAccumulator, accumulateSpeed, finishSpeed } from './speed-metrics.mjs';
 import { StreamDiagnostics } from './stream-diagnostics.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -26,6 +26,7 @@ const DEFAULT_SETTINGS = {
   weeklyTokenBudget: 150000000, // 150M tokens default custom weekly target
   weeklyCostBudget: 100,       // Default user-configurable local cost target
   weeklyLimitMode: 'official', // 'official' | 'custom_tokens' | 'custom_cost'
+  showUpstreamModel: false,    // Replace step model short names with upstream responseModel
 };
 
 // Local API price catalog in USD per 1M tokens (Input, CacheRead, Output).
@@ -118,7 +119,7 @@ const PLACEHOLDER_MAP = {
 const CACHE_SCHEMA_VERSION = 'v10-model-identity';
 const loadedTrajectoryCache = loadJson(CACHE_FILE, {});
 let trajectoryCache = Object.fromEntries(Object.entries(loadedTrajectoryCache).map(([id, entry]) => [
-  id, { ...entry, steps: (entry.steps || []).map(normalizeCachedStep) },
+  id, { ...entry, steps: inferCompactionStepModels((entry.steps || []).map(normalizeCachedStep)) },
 ]));
 let cacheNeedsSave = JSON.stringify(trajectoryCache) !== JSON.stringify(loadedTrajectoryCache);
 let externalDeepStatsMemo = { sig: '', convos: new Map() };
@@ -803,20 +804,21 @@ async function buildTelemetryPayloadInternal(
     if (!cached || conv.needsInitialLoad) return true;
     const hasCurrentSchema = String(cached.signature || '').startsWith(`${CACHE_SCHEMA_VERSION}:`);
     if (!hasCurrentSchema) return true;
+    const lastCachedStep = cached.steps?.[cached.steps.length - 1];
+    const missingBreakdownField =
+      Boolean(lastCachedStep) &&
+      (!Object.prototype.hasOwnProperty.call(lastCachedStep, 'contextBreakdown') ||
+        cached.steps.some((s) => !Object.prototype.hasOwnProperty.call(s, 'responseModel')));
+    if (missingBreakdownField) return true;
     if (!conv.inSummaries) {
       return conv.diskMtimeMs > 0 && conv.diskMtimeMs > (cached.diskMtimeMs || cached.lastModifiedMs || 0);
     }
     const sig = `${CACHE_SCHEMA_VERSION}:${conv.stepCount}:${conv.lastModifiedTime}`;
     const isRunning = conv.status === 'CASCADE_RUN_STATUS_RUNNING';
-    const lastCachedStep = cached.steps?.[cached.steps.length - 1];
-    const missingBreakdownField =
-      Boolean(lastCachedStep) &&
-      !Object.prototype.hasOwnProperty.call(lastCachedStep, 'contextBreakdown');
     return (
       cached.signature !== sig ||
       isRunning ||
-      Boolean(cached.wasRunning) ||
-      missingBreakdownField
+      Boolean(cached.wasRunning)
     );
   });
 
@@ -886,6 +888,22 @@ async function buildTelemetryPayloadInternal(
   let sessionInputTokens = 0;
   let sessionCacheReadTokens = 0;
 
+  // Map known modelKey -> latest observed upstream responseModel so in-flight steps
+  // whose generatorMetadata has not arrived yet do not flicker to local catalog modelIds
+  const knownUpstreamByModelKey = new Map();
+  for (const entry of Object.values(trajectoryCache)) {
+    for (const s of entry?.steps || []) {
+      if (s?.modelKey && s.modelKey !== 'unknown' && s.responseModel) {
+        knownUpstreamByModelKey.set(s.modelKey, s.responseModel);
+      }
+    }
+  }
+  for (const s of activeSteps) {
+    if (s?.modelKey && s.modelKey !== 'unknown' && s.responseModel) {
+      knownUpstreamByModelKey.set(s.modelKey, s.responseModel);
+    }
+  }
+
   const enrichedActiveSteps = activeSteps.map((st) => {
     const mInfo = resolveModelInfo(st.modelKey, dynamicModelMap, st.apiProvider, st.modelDisplayName);
     const costUsd = computeStepCost(st, mInfo.pricing);
@@ -903,9 +921,18 @@ async function buildTelemetryPayloadInternal(
     const inCostUsd = mInfo.pricing ? (st.inputTokens / 1_000_000) * mInfo.pricing.input : null;
     const cacheCostUsd = mInfo.pricing ? (st.cacheReadTokens / 1_000_000) * mInfo.pricing.cache : null;
     const outCostUsd = mInfo.pricing ? (st.outputTokens / 1_000_000) * mInfo.pricing.output : null;
+    const resolvedResponseModel =
+      st.responseModel ||
+      (st.modelKey && st.modelKey !== 'unknown' ? knownUpstreamByModelKey.get(st.modelKey) || '' : '');
+    const rawUpstreamModel =
+      resolvedResponseModel ||
+      (mInfo.modelId && mInfo.modelId !== 'unknown' ? mInfo.modelId : mInfo.shortName);
+    const modelUpstream = st.isCompactionStep ? `${rawUpstreamModel}·压缩` : rawUpstreamModel;
 
     return {
       ...st,
+      responseModel: st.responseModel || '',
+      modelUpstream,
       modelLabel: st.isCompactionStep ? `${mInfo.label} [自动压缩]` : mInfo.label,
       modelShort: st.isCompactionStep ? `${mInfo.shortName}·压缩` : mInfo.shortName,
       family: mInfo.family,
@@ -1159,6 +1186,8 @@ async function buildTelemetryPayloadInternal(
           perModelStats.set(modelGroupKey, {
             label: modelGroupKey,
             shortName: mInfo.shortName,
+            fallbackModelId: mInfo.modelId && mInfo.modelId !== 'unknown' ? mInfo.modelId : '',
+            upstreamModelCounts: new Map(),
             family: mInfo.family,
             calls: 0,
             inputTokens: 0,
@@ -1172,6 +1201,12 @@ async function buildTelemetryPayloadInternal(
           });
         }
         const agg = perModelStats.get(modelGroupKey);
+        if (st.responseModel) {
+          agg.upstreamModelCounts.set(
+            st.responseModel,
+            (agg.upstreamModelCounts.get(st.responseModel) || 0) + 1
+          );
+        }
         accumulateSpeed(agg.speedAccumulator, st);
 
         agg.calls += 1;
@@ -1421,12 +1456,23 @@ async function buildTelemetryPayloadInternal(
     },
     modelBreakdown: Array.from(perModelStats.values())
       .sort((a, b) => b.calls - a.calls || String(a.label).localeCompare(String(b.label)))
-      .map(({ speedAccumulator, ...m }) => ({
-        ...m,
-        costUsd: +m.costUsd.toFixed(3),
-        avgTokPerSec: roundMetric(finishSpeed(speedAccumulator).avgTokPerSec),
-        speedSummary: finishSpeed(speedAccumulator),
-      })),
+      .map(({ speedAccumulator, upstreamModelCounts, fallbackModelId, ...m }) => {
+        const sortedUpstream = Array.from((upstreamModelCounts || new Map()).entries())
+          .sort((a, b) => b[1] - a[1])
+          .map(([name]) => name);
+        const primaryUpstream =
+          sortedUpstream.length > 0
+            ? sortedUpstream[0]
+            : fallbackModelId || m.shortName || m.label;
+        return {
+          ...m,
+          upstreamName: primaryUpstream,
+          upstreamModels: sortedUpstream,
+          costUsd: +m.costUsd.toFixed(3),
+          avgTokPerSec: roundMetric(finishSpeed(speedAccumulator).avgTokPerSec),
+          speedSummary: finishSpeed(speedAccumulator),
+        };
+      }),
   };
 }
 
@@ -1543,6 +1589,10 @@ app.api('/api/settings', (data, req) => {
     weeklyTokenBudget: Number(data.weeklyTokenBudget || current.weeklyTokenBudget),
     weeklyCostBudget: Number(data.weeklyCostBudget || current.weeklyCostBudget),
     weeklyLimitMode: data.weeklyLimitMode || current.weeklyLimitMode,
+    showUpstreamModel:
+      typeof data.showUpstreamModel === 'boolean'
+        ? data.showUpstreamModel
+        : Boolean(current.showUpstreamModel),
   };
   saveJson(SETTINGS_FILE, updated);
   return updated;

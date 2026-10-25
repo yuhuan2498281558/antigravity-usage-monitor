@@ -29,6 +29,10 @@ function isEquivalentTelemetry(prev, next) {
 
   const pAct = prev.activeConversation;
   const nAct = next.activeConversation;
+  if (prev.settings?.showUpstreamModel !== next.settings?.showUpstreamModel) return false;
+  if (prev.settings?.weeklyLimitMode !== next.settings?.weeklyLimitMode) return false;
+  if (prev.settings?.weeklyTokenBudget !== next.settings?.weeklyTokenBudget) return false;
+  if (prev.settings?.weeklyCostBudget !== next.settings?.weeklyCostBudget) return false;
   if (pAct?.cascadeId !== nAct?.cascadeId) return false;
   if (pAct?.stepCount !== nAct?.stepCount) return false;
   if (pAct?.isRunning !== nAct?.isRunning) return false;
@@ -49,6 +53,7 @@ function isEquivalentTelemetry(prev, next) {
   for (let i = 0; i < (pAct?.recentSteps?.length || 0); i++) {
     const before = pAct.recentSteps[i], after = nAct.recentSteps[i];
     if (before.modelKey !== after.modelKey || before.modelShort !== after.modelShort ||
+        before.modelUpstream !== after.modelUpstream || before.responseModel !== after.responseModel ||
         before.modelSource !== after.modelSource || before.costUsd !== after.costUsd) return false;
   }
 
@@ -88,6 +93,7 @@ function isEquivalentTelemetry(prev, next) {
     if (
       pModels[i]?.label !== nModels[i]?.label ||
       pModels[i]?.shortName !== nModels[i]?.shortName ||
+      pModels[i]?.upstreamName !== nModels[i]?.upstreamName ||
       pModels[i]?.costUsd !== nModels[i]?.costUsd ||
       pModels[i]?.unpricedCalls !== nModels[i]?.unpricedCalls ||
       pModels[i]?.totalTokens !== nModels[i]?.totalTokens ||
