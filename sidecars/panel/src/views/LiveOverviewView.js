@@ -8,7 +8,9 @@
 import { defineComponent } from '../core/component.js';
 import {
   h,
+  patchAttr,
   patchClasses,
+  patchKeyedList,
   patchStyleVar,
   patchText,
 } from '../core/domPatch.js';
@@ -141,38 +143,37 @@ export const LiveOverviewView = defineComponent({
       ]),
     ]);
 
-    // 3. Official 5h & Weekly Quotas Panel (Gemini Pool + Claude Pool)
+    // 3. Official 5h & Weekly Quotas Panel (Dynamic Pools: Gemini, Argon on Pro, Claude & GPT, etc.)
     const tierBadge = h('span', { className: 'panel-meta', text: 'Google AI · Pro' });
+    const poolsListEl = h('div', { style: 'display: flex; flex-direction: column; gap: 0;' });
 
-    function createPoolQuotaBlock(poolLabel) {
-      const title5h = h('span', { text: `5h 限额 (${poolLabel})` });
+    function createPoolQuotaRow() {
+      const title5h = h('span', { text: '5h 限额' });
       const meta5h = h('span', { className: 'panel-meta text-mono', text: '--' });
       const fill5h = h('div', { className: 'progress-fill' });
-
-      const titleWk = h('span', { text: `每周限额 (${poolLabel})` });
-      const metaWk = h('span', { className: 'panel-meta text-mono', text: '--' });
-      const fillWk = h('div', { className: 'progress-fill' });
-
-      const el = h('div', { style: 'display: flex; flex-direction: column; gap: 8px;' }, [
-        h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
-          h('div', { className: 'panel-header' }, [title5h, meta5h]),
-          h('div', { className: 'progress-track' }, [fill5h]),
-        ]),
-        h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
-          h('div', { className: 'panel-header' }, [titleWk, metaWk]),
-          h('div', { className: 'progress-track' }, [fillWk]),
-        ]),
+      const row5h = h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
+        h('div', { className: 'panel-header' }, [title5h, meta5h]),
+        h('div', { className: 'progress-track' }, [fill5h]),
       ]);
 
-      return { el, title5h, meta5h, fill5h, titleWk, metaWk, fillWk };
-    }
+      const titleWk = h('span', { text: '每周限额' });
+      const metaWk = h('span', { className: 'panel-meta text-mono', text: '--' });
+      const fillWk = h('div', { className: 'progress-fill' });
+      const rowWk = h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
+        h('div', { className: 'panel-header' }, [titleWk, metaWk]),
+        h('div', { className: 'progress-track' }, [fillWk]),
+      ]);
 
-    const geminiQuotaBlock = createPoolQuotaBlock('Gemini');
-    const claudeQuotaBlock = createPoolQuotaBlock('Claude & GPT');
-    claudeQuotaBlock.el.setAttribute(
-      'style',
-      'display: flex; flex-direction: column; gap: 8px; margin-top: 3px; padding-top: 10px; border-top: 1px solid var(--border-hairline);'
-    );
+      const el = h('div', { style: 'display: flex; flex-direction: column; gap: 8px;' }, [
+        row5h,
+        rowWk,
+      ]);
+
+      return {
+        el,
+        refs: { row5h, title5h, meta5h, fill5h, rowWk, titleWk, metaWk, fillWk },
+      };
+    }
 
     const wkFootLeft = h('span', { className: 'text-muted', text: '本周本机: 0 ($0.00)' });
     const wkFootRight = h('span', { className: 'text-muted', text: '' });
@@ -185,8 +186,7 @@ export const LiveOverviewView = defineComponent({
         ]),
         tierBadge,
       ]),
-      geminiQuotaBlock.el,
-      claudeQuotaBlock.el,
+      poolsListEl,
       h('div', { className: 'panel-header', style: 'font-size: 11px; padding-top: 2px;' }, [
         wkFootLeft,
         wkFootRight,
@@ -205,46 +205,65 @@ export const LiveOverviewView = defineComponent({
       className: 'view-pane',
     });
 
-    function syncPoolQuotaBlock(block, poolLabel, poolData, fallbackWeekly, isActiveFamily) {
+    function syncPoolQuotaRow(refs, item, idx, rowEl) {
+      const { poolData, poolLabel, fallbackWeekly, isActivePool } = item;
+      patchAttr(
+        rowEl,
+        'style',
+        idx === 0
+          ? 'display: flex; flex-direction: column; gap: 8px;'
+          : 'display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-hairline);'
+      );
+
       const has5h = poolData?.usedPct != null && poolData?.remainingPct != null;
       const used5hVal = has5h ? Number(poolData.usedPct) : 0;
       const rem5hVal = has5h ? Number(poolData.remainingPct) : 0;
-      patchText(block.title5h, `5h 限额 (${poolLabel})`);
-      patchText(
-        block.meta5h,
-        has5h
-          ? `${formatCountdown(poolData.resetTime)} · 已用 ${used5hVal.toFixed(1)}% (余 ${rem5hVal.toFixed(1)}%)`
-          : '获取失败 (--%)'
-      );
-      patchStyleVar(block.fill5h, '--fill-w', `${Math.min(100, used5hVal)}%`);
-      patchClasses(block.fill5h, {
-        'tone-warn': used5hVal >= 60 && used5hVal < 85,
-        'tone-danger': used5hVal >= 85,
-      });
 
       const wkUsedRaw =
-        poolData?.weeklyUsedPct ?? (isActiveFamily ? fallbackWeekly?.usedPct : null);
+        poolData?.weeklyUsedPct ?? (isActivePool ? fallbackWeekly?.usedPct : null);
       const wkRemRaw =
-        poolData?.weeklyRemainingPct ?? (isActiveFamily ? fallbackWeekly?.remainingPct : null);
+        poolData?.weeklyRemainingPct ?? (isActivePool ? fallbackWeekly?.remainingPct : null);
       const wkResetRaw =
-        poolData?.weeklyResetTime || (isActiveFamily ? fallbackWeekly?.resetTime : null);
+        poolData?.weeklyResetTime || (isActivePool ? fallbackWeekly?.resetTime : null);
       const hasWk = wkUsedRaw != null && wkRemRaw != null;
       const usedWkVal = hasWk ? Number(wkUsedRaw) : 0;
       const remWkVal = hasWk ? Number(wkRemRaw) : 0;
 
+      // Hide non-applicable window on weekly-only pools (e.g. Pro Argon pool or Plus tier)
+      // or 5h-only pools, while still showing both rows with error state if both failed.
+      const hide5h = !has5h && hasWk;
+      const hideWk = !hasWk && has5h;
+      refs.row5h.hidden = hide5h;
+      refs.row5h.style.display = hide5h ? 'none' : 'flex';
+      refs.rowWk.hidden = hideWk;
+      refs.rowWk.style.display = hideWk ? 'none' : 'flex';
+
+      patchText(refs.title5h, `5h 限额 (${poolLabel})`);
+      patchText(
+        refs.meta5h,
+        has5h
+          ? `${formatCountdown(poolData.resetTime)} · 已用 ${used5hVal.toFixed(1)}% (余 ${rem5hVal.toFixed(1)}%)`
+          : '获取失败 (--%)'
+      );
+      patchStyleVar(refs.fill5h, '--fill-w', `${Math.min(100, used5hVal)}%`);
+      patchClasses(refs.fill5h, {
+        'tone-warn': used5hVal >= 60 && used5hVal < 85,
+        'tone-danger': used5hVal >= 85,
+      });
+
       const customTitle =
-        isActiveFamily && fallbackWeekly?.isOfficial === false && fallbackWeekly?.title
+        isActivePool && fallbackWeekly?.isOfficial === false && fallbackWeekly?.title
           ? fallbackWeekly.title
           : `每周限额 (${poolLabel})`;
-      patchText(block.titleWk, customTitle);
+      patchText(refs.titleWk, customTitle);
       patchText(
-        block.metaWk,
+        refs.metaWk,
         hasWk
           ? `${formatCountdown(wkResetRaw)} · 已用 ${usedWkVal.toFixed(1)}% (余 ${remWkVal.toFixed(1)}%)`
           : '获取失败 (--%)'
       );
-      patchStyleVar(block.fillWk, '--fill-w', `${Math.min(100, usedWkVal)}%`);
-      patchClasses(block.fillWk, {
+      patchStyleVar(refs.fillWk, '--fill-w', `${Math.min(100, usedWkVal)}%`);
+      patchClasses(refs.fillWk, {
         'tone-warn': usedWkVal >= 60 && usedWkVal < 85,
         'tone-danger': usedWkVal >= 85,
       });
@@ -298,28 +317,45 @@ export const LiveOverviewView = defineComponent({
       patchText(bdSystemPrompt, formatTokens(ctx.systemPromptTokens || 0));
       patchText(bdUserRules, formatTokens(ctx.userRulesTokens || 0));
 
-      // 3. Quotas (Gemini + Claude & GPT)
+      // 3. Quotas (Dynamic Pools: Gemini, Argon on Pro, Claude & GPT, etc.)
       patchText(
         tierBadge,
         `${data.account?.tierName || 'Google AI'} · ${data.account?.planName || 'Pro'}`
       );
       const activePool = quotas.activePool || {};
-      const pools = quotas.pools || [];
+      const rawPools = Array.isArray(quotas.pools) && quotas.pools.length > 0
+        ? quotas.pools
+        : [
+            { poolKey: 'Gemini', poolLabel: 'Gemini', family: 'Gemini' },
+            { poolKey: 'Claude & GPT', poolLabel: 'Claude & GPT', family: 'Claude & GPT' },
+          ];
       const weekly = quotas.weekly || {};
+      const minuteTick = Math.floor(Date.now() / 30000);
+      const poolItems = rawPools.map((p) => {
+        const key = p.poolKey || p.family || p.poolLabel || 'Other';
+        const poolLabel = p.poolLabel || p.family || key;
+        const isActivePool =
+          Boolean(activePool.family) &&
+          (activePool.poolKey === key ||
+            activePool.family === p.family ||
+            (key === 'Claude & GPT' && ['Claude', 'GPT'].includes(activePool.family)));
+        return {
+          key,
+          poolLabel,
+          poolData: p,
+          fallbackWeekly: weekly,
+          isActivePool,
+          minuteTick,
+        };
+      });
 
-      const geminiPool =
-        pools.find((p) => p.family === 'Gemini') ||
-        (activePool.family === 'Gemini' ? activePool : null) ||
-        {};
-      const claudePool =
-        pools.find((p) => p.family === 'Claude & GPT' || p.family === 'Claude') ||
-        (['Claude & GPT', 'Claude', 'GPT'].includes(activePool.family) ? activePool : null) ||
-        {};
-
-      const activeIsGemini = activePool.family === 'Gemini';
-      const activeIsThirdParty = ['Claude & GPT', 'Claude', 'GPT'].includes(activePool.family);
-      syncPoolQuotaBlock(geminiQuotaBlock, 'Gemini', geminiPool, weekly, activeIsGemini);
-      syncPoolQuotaBlock(claudeQuotaBlock, 'Claude & GPT', claudePool, weekly, activeIsThirdParty);
+      patchKeyedList(poolsListEl, poolItems, {
+        keyFn: (item) => item.key,
+        sigFn: (item, idx) =>
+          `${idx}:${item.poolLabel}:${item.isActivePool}:${item.minuteTick}:${item.poolData?.usedPct}:${item.poolData?.remainingPct}:${item.poolData?.resetTime}:${item.poolData?.weeklyUsedPct}:${item.poolData?.weeklyRemainingPct}:${item.poolData?.weeklyResetTime}:${item.fallbackWeekly?.isOfficial}:${item.fallbackWeekly?.usedPct}:${item.fallbackWeekly?.title}`,
+        createRow: createPoolQuotaRow,
+        updateRow: syncPoolQuotaRow,
+      });
 
       patchText(
         wkFootLeft,

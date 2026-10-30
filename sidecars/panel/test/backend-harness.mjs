@@ -3,10 +3,10 @@ import path from 'node:path';
 import vm from 'node:vm';
 import * as metrics from '../speed-metrics.mjs';
 
-export function backendHarness({cache={},settings={},trajectories={},summaries={},userStatus={},sourceText=null,metricsImplementation=metrics}={}) {
+export function backendHarness({cache={},settings={},trajectories={},summaries={},userStatus={},quotaSummary={groups:[]},sourceText=null,metricsImplementation=metrics}={}) {
   const source=(sourceText ?? fs.readFileSync(new URL('../main.mjs',import.meta.url),'utf8'))
     .replace(/^import .*;\r?\n/gm,'').replaceAll('import.meta.url',JSON.stringify('file:///test/main.mjs'));
-  const state={calls:[],errors:[],saves:[],trajectories};
+  const state={calls:[],errors:[],saves:[],trajectories,userStatus,quotaSummary};
   const ctx={
     ...metricsImplementation, URL, AbortSignal,
     process:{env:{ANTIGRAVITY_EXECUTABLE_DATA_DIR:'/test-data',ANTIGRAVITY_LS_ADDRESS:'test.invalid',ANTIGRAVITY_CSRF_TOKEN:'test'}},
@@ -26,7 +26,11 @@ export function backendHarness({cache={},settings={},trajectories={},summaries={
         if(data instanceof Error) throw data;
         return {ok:true,json:async()=>data||{}};
       }
-      const data={GetUserStatus:{userStatus},GetAllCascadeTrajectories:{trajectorySummaries:summaries},RetrieveUserQuotaSummary:{response:{groups:[]}}}[method];
+      if(method==='RetrieveUserQuotaSummary') {
+        if(state.quotaSummary instanceof Error) throw state.quotaSummary;
+        return {ok:true,json:async()=>({response:state.quotaSummary})};
+      }
+      const data={GetUserStatus:{userStatus:state.userStatus},GetAllCascadeTrajectories:{trajectorySummaries:summaries}}[method];
       return {ok:true,json:async()=>data};
     },
   };

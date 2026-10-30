@@ -107,6 +107,10 @@ const PLACEHOLDER_MAP = {
   MODEL_PLACEHOLDER_M318: { modelId: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High)' },
   MODEL_PLACEHOLDER_M319: { modelId: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash (Medium)' },
   MODEL_PLACEHOLDER_M320: { modelId: 'gemini-3.8-flash-low', label: 'Gemini 3.8 Flash (Low)' },
+  MODEL_PLACEHOLDER_M322: { modelId: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Tiered)' },
+  MODEL_PLACEHOLDER_M198: { modelId: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash Lite' },
+  MODEL_PLACEHOLDER_M50: { modelId: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash Lite' },
+  MODEL_PLACEHOLDER_M18: { modelId: 'gemini-3-flash', label: 'Gemini 3 Flash' },
   MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE: { modelId: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },
   MODEL_GOOGLE_GEMINI_2_5_FLASH: { modelId: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
   MODEL_GOOGLE_GEMINI_2_5_PRO: { modelId: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
@@ -124,7 +128,7 @@ let trajectoryCache = Object.fromEntries(Object.entries(loadedTrajectoryCache).m
 let cacheNeedsSave = JSON.stringify(trajectoryCache) !== JSON.stringify(loadedTrajectoryCache);
 let externalDeepStatsMemo = { sig: '', convos: new Map() };
 const inFlightRequests = new Map();
-let quotaSummaryCache = { ts: 0, data: null, error: null };
+let quotaSummaryCache = { ts: 0, accountName: '', data: null, error: null };
 
 function loadJson(filePath, fallback) {
   if (!existsSync(filePath)) return fallback;
@@ -190,10 +194,16 @@ async function getOfficialQuotaSummary(forceRefresh = false) {
   }
   try {
     const res = await callLsRpc('RetrieveUserQuotaSummary', { forceRefresh: true }, 6000);
-    if (res?.response?.groups) {
-      quotaSummaryCache = { ts: now, data: res.response, error: null };
+    const payload = res?.response || res;
+    if (Array.isArray(payload?.groups) || Array.isArray(payload?.buckets)) {
+      quotaSummaryCache = {
+        ts: now,
+        accountName: quotaSummaryCache.accountName || '',
+        data: payload,
+        error: null,
+      };
       return {
-        data: res.response,
+        data: payload,
         fetchedAtMs: now,
         isStale: false,
         refreshFailed: false,
@@ -230,6 +240,106 @@ function inferFamilyFromProviderOrKey(rawModelKey = '', modelId = '', apiProvide
     return 'GPT';
   }
   return 'Other';
+}
+
+function isArgonModelIdentifier(...parts) {
+  return /argon|MODEL_PLACEHOLDER_M41[789]\b/i.test(parts.filter(Boolean).join(' '));
+}
+
+function normalizeQuotaFraction(rawObj) {
+  if (!rawObj || typeof rawObj !== 'object') return null;
+  let remFrac = null;
+  if (rawObj.disabled === true) {
+    remFrac = 0;
+  } else if (
+    rawObj.remainingFraction !== undefined &&
+    rawObj.remainingFraction !== null &&
+    Number.isFinite(Number(rawObj.remainingFraction))
+  ) {
+    remFrac = Math.max(0, Math.min(1, Number(rawObj.remainingFraction)));
+  } else if (typeof rawObj.resetTime === 'string' && rawObj.resetTime.trim().length > 0) {
+    // Proto3 omits numeric 0.0 default values when a quota bucket is completely exhausted.
+    remFrac = 0;
+  }
+  if (remFrac === null) return null;
+  const usedFrac = Math.max(0, Math.min(1, 1 - remFrac));
+  return {
+    remainingFraction: remFrac,
+    remainingPct: +(remFrac * 100).toFixed(1),
+    remainingIntPct: Math.floor(remFrac * 100 + 1e-6),
+    usedPct: +(usedFrac * 100).toFixed(1),
+    resetTime: rawObj.resetTime || null,
+    description: rawObj.description || '',
+  };
+}
+
+function classifyOfficialBucketWindow(bucket, groupBucketCount = 1, nowMs = Date.now()) {
+  const w = String(bucket?.window || '').trim().toLowerCase();
+  const idAndName = `${bucket?.bucketId || ''} ${bucket?.displayName || ''}`.toLowerCase();
+  if (
+    w === '5h' ||
+    /(?:^|[-_\s])5h(?:$|[-_\s])|five[-_\s]?hour/.test(w) ||
+    /(?:^|[-_\s])5h(?:$|[-_\s])|five[-_\s]?hour/.test(idAndName)
+  ) {
+    return '5h';
+  }
+  if (w === 'weekly' || w === '7d' || /week/.test(w) || /week/.test(idAndName)) {
+    return 'weekly';
+  }
+  const resetMs = parseIsoMs(bucket?.resetTime);
+  if (resetMs > nowMs + 6 * 3600 * 1000 || groupBucketCount === 1) {
+    return 'weekly';
+  }
+  return '5h';
+}
+
+function classifyQuotaPoolIdentity({ groupName = '', groupDesc = '', bucketId = '', bucketName = '' }) {
+  const bId = String(bucketId || '');
+  const bName = String(bucketName || '');
+  const gName = String(groupName || '');
+  const gDesc = String(groupDesc || '');
+  if (
+    /argon/i.test(bId) ||
+    /argon/i.test(bName) ||
+    /argon/i.test(gName) ||
+    (/\bargon\b/i.test(gDesc) && !/\bflash\b/i.test(gDesc) && !/^gemini models$/i.test(gName.trim()))
+  ) {
+    return {
+      poolKey: 'Argon',
+      poolLabel: 'Gemini 4 Argon',
+      poolName: 'Gemini 4 Argon 模型池',
+    };
+  }
+  if (/gemini/i.test(`${bId} ${bName} ${gName} ${gDesc}`)) {
+    return {
+      poolKey: 'Gemini',
+      poolLabel: 'Gemini',
+      poolName: 'Gemini 模型池',
+    };
+  }
+  if (/3p|claude|gpt|sonnet|opus|haiku|third[-_\s]?party/i.test(`${bId} ${gName} ${gDesc}`)) {
+    return {
+      poolKey: 'Claude & GPT',
+      poolLabel: 'Claude & GPT',
+      poolName: 'Claude & GPT 模型池',
+    };
+  }
+  const cleanLabel = (gName || bId || 'Other').trim();
+  return {
+    poolKey: cleanLabel,
+    poolLabel: cleanLabel,
+    poolName: `${cleanLabel} 模型池`,
+  };
+}
+
+function quotaFractionsMatch(a, b) {
+  if (!a || !b) return false;
+  if (Math.abs(a.remainingFraction - b.remainingFraction) > 0.015) return false;
+  if (a.resetTime && b.resetTime) {
+    const diffMs = Math.abs(parseIsoMs(a.resetTime) - parseIsoMs(b.resetTime));
+    if (diffMs > 120_000) return false;
+  }
+  return true;
 }
 
 function getBaseModelLabel(label = '') {
@@ -600,43 +710,89 @@ async function buildTelemetryPayloadInternal(
   filterOpts = {}
 ) {
   const settings = loadSettings();
-  const [userStatusRes, allTrajRes, officialQuotaInfo] = await Promise.all([
+  const [userStatusRes, allTrajRes, initialOfficialQuotaInfo] = await Promise.all([
     callLsRpc('GetUserStatus', {}).catch(() => ({})),
     callLsRpc('GetAllCascadeTrajectories', {}).catch(() => ({})),
     getOfficialQuotaSummary(forceQuotaRefresh),
   ]);
 
-  const officialQuota = officialQuotaInfo?.data || null;
   const userStatus = userStatusRes?.userStatus || {};
   const currentAccountName = userStatus?.email || userStatus?.name || '';
+  let officialQuotaInfo = initialOfficialQuotaInfo;
+  if (
+    currentAccountName &&
+    quotaSummaryCache.accountName &&
+    quotaSummaryCache.accountName !== currentAccountName
+  ) {
+    officialQuotaInfo = await getOfficialQuotaSummary(true);
+  }
+  if (currentAccountName && officialQuotaInfo?.data) {
+    quotaSummaryCache.accountName = currentAccountName;
+  }
+  const officialQuota = officialQuotaInfo?.data || null;
   const clientConfigs = userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
   const dynamicModelMap = new Map();
 
-  // Extract official real-time buckets from RetrieveUserQuotaSummary if available
+  // Extract official real-time buckets & dynamic pools from RetrieveUserQuotaSummary
+  const nowForQuotaMs = Date.now();
   const officialBuckets = new Map();
-  for (const grp of officialQuota?.groups || []) {
-    for (const b of grp?.buckets || []) {
-      if (b?.bucketId && b.remainingFraction !== undefined && b.remainingFraction !== null) {
-        const remFrac = Number(b.remainingFraction);
-        const usedFrac = Math.max(0, Math.min(1, 1 - remFrac));
-        officialBuckets.set(b.bucketId, {
-          bucketId: b.bucketId,
-          groupName: grp.displayName,
-          remainingFraction: remFrac,
-          remainingPct: +(remFrac * 100).toFixed(1),
-          remainingIntPct: Math.floor(remFrac * 100 + 1e-6),
-          usedPct: +(usedFrac * 100).toFixed(1),
-          resetTime: b.resetTime || null,
-          description: b.description || '',
-        });
+  const poolBuilders = new Map();
+
+  function ensurePoolBuilder({ poolKey, poolLabel, poolName }) {
+    if (!poolBuilders.has(poolKey)) {
+      poolBuilders.set(poolKey, {
+        poolKey,
+        poolLabel,
+        poolName,
+        bucket5h: null,
+        bucketWeekly: null,
+        fallback5h: null,
+        models: [],
+      });
+    }
+    return poolBuilders.get(poolKey);
+  }
+
+  const rawGroups = Array.isArray(officialQuota?.groups) ? [...officialQuota.groups] : [];
+  if (Array.isArray(officialQuota?.buckets) && officialQuota.buckets.length > 0 && rawGroups.length === 0) {
+    rawGroups.push({ displayName: '', description: '', buckets: officialQuota.buckets });
+  }
+
+  for (const grp of rawGroups) {
+    const grpBuckets = Array.isArray(grp?.buckets) ? grp.buckets : [];
+    for (const b of grpBuckets) {
+      const norm = normalizeQuotaFraction(b);
+      if (!norm) continue;
+      const ident = classifyQuotaPoolIdentity({
+        groupName: grp?.displayName,
+        groupDesc: grp?.description,
+        bucketId: b?.bucketId,
+        bucketName: b?.displayName,
+      });
+      const win = classifyOfficialBucketWindow(b, grpBuckets.length, nowForQuotaMs);
+      const entry = {
+        ...norm,
+        bucketId: b?.bucketId || '',
+        groupName: grp?.displayName || ident.poolLabel,
+        window: win,
+      };
+      if (b?.bucketId) {
+        officialBuckets.set(b.bucketId, entry);
+      }
+      const builder = ensurePoolBuilder(ident);
+      if (win === '5h' && !builder.bucket5h) {
+        builder.bucket5h = entry;
+      } else if (win === 'weekly' && !builder.bucketWeekly) {
+        builder.bucketWeekly = entry;
+      } else if (!builder.bucketWeekly) {
+        builder.bucketWeekly = entry;
       }
     }
   }
 
-  // Group 5h quotas by model pool
-  const quotaPoolsMap = new Map();
-  const modelQuotas = [];
-  const modelQuotaByKey = new Map();
+  // Register dynamic model map and inspect per-model quotaInfo from GetUserStatus
+  let sampleArgonCfgQuota = null;
+  let sampleStdGeminiCfgQuota = null;
 
   for (const cfg of clientConfigs) {
     const rawKey = cfg?.modelOrAlias?.model;
@@ -648,78 +804,125 @@ async function buildTelemetryPayloadInternal(
       });
     }
     const info = resolveModelInfo(rawKey, dynamicModelMap);
+    const cfgQuota = normalizeQuotaFraction(cfg?.quotaInfo);
+    if (!cfgQuota || info.family !== 'Gemini') continue;
+    if (isArgonModelIdentifier(rawKey, cfg?.modelId, cfg?.label, info.modelId)) {
+      if (!sampleArgonCfgQuota) sampleArgonCfgQuota = cfgQuota;
+    } else if (!sampleStdGeminiCfgQuota) {
+      sampleStdGeminiCfgQuota = cfgQuota;
+    }
+  }
+
+  // Fallback Pro Argon detection: if RetrieveUserQuotaSummary did not emit a separate Argon
+  // group/bucket, check whether GetUserStatus reports an independent quotaInfo for Argon models
+  // that diverges from standard Gemini (Flash/Pro) and shared Gemini buckets.
+  if (!poolBuilders.has('Argon') && sampleArgonCfgQuota) {
+    const geminiBuilder = poolBuilders.get('Gemini');
+    const hasGeminiBaseline = Boolean(
+      sampleStdGeminiCfgQuota || geminiBuilder?.bucket5h || geminiBuilder?.bucketWeekly
+    );
+    const matchesSharedGemini =
+      quotaFractionsMatch(sampleArgonCfgQuota, sampleStdGeminiCfgQuota) ||
+      quotaFractionsMatch(sampleArgonCfgQuota, geminiBuilder?.bucket5h) ||
+      quotaFractionsMatch(sampleArgonCfgQuota, geminiBuilder?.bucketWeekly);
+
+    if (hasGeminiBaseline && !matchesSharedGemini) {
+      const argonBuilder = ensurePoolBuilder({
+        poolKey: 'Argon',
+        poolLabel: 'Gemini 4 Argon',
+        poolName: 'Gemini 4 Argon 模型池',
+      });
+      argonBuilder.bucketWeekly = {
+        ...sampleArgonCfgQuota,
+        bucketId: 'argon-weekly-inferred',
+        groupName: 'Gemini 4 Argon',
+        window: 'weekly',
+      };
+    }
+  }
+
+  const hasDedicatedArgonPool = poolBuilders.has('Argon');
+  const modelQuotas = [];
+  const modelQuotaByKey = new Map();
+
+  for (const cfg of clientConfigs) {
+    const rawKey = cfg?.modelOrAlias?.model;
+    const info = resolveModelInfo(rawKey, dynamicModelMap);
+    const isArgon = isArgonModelIdentifier(rawKey, cfg?.modelId, cfg?.label, info.modelId);
     const isGemini = info.family === 'Gemini';
-    const live5h = officialBuckets.get(isGemini ? 'gemini-5h' : '3p-5h');
-    const liveWeekly = officialBuckets.get(isGemini ? 'gemini-weekly' : '3p-weekly');
+    const targetIdent =
+      isArgon && hasDedicatedArgonPool
+        ? { poolKey: 'Argon', poolLabel: 'Gemini 4 Argon', poolName: 'Gemini 4 Argon 模型池' }
+        : isGemini
+          ? { poolKey: 'Gemini', poolLabel: 'Gemini', poolName: 'Gemini 模型池' }
+          : { poolKey: 'Claude & GPT', poolLabel: 'Claude & GPT', poolName: 'Claude & GPT 模型池' };
 
-    const rawRemFrac = live5h?.remainingFraction ?? cfg?.quotaInfo?.remainingFraction ?? null;
-    const hasValid5h = rawRemFrac !== null && rawRemFrac !== undefined && Number.isFinite(Number(rawRemFrac));
-    const remFrac = hasValid5h ? Number(rawRemFrac) : null;
-    const usedFrac = hasValid5h ? Math.max(0, Math.min(1, 1 - remFrac)) : null;
-    const resetTime = live5h?.resetTime || cfg?.quotaInfo?.resetTime || null;
+    const builder = ensurePoolBuilder(targetIdent);
+    if (cfg?.label && !builder.models.includes(cfg.label)) {
+      builder.models.push(cfg.label);
+    }
 
+    const cfgQuota = normalizeQuotaFraction(cfg?.quotaInfo);
+    if (!builder.bucket5h && !builder.bucketWeekly && !builder.fallback5h && cfgQuota) {
+      if (targetIdent.poolKey === 'Argon') {
+        builder.bucketWeekly = cfgQuota;
+      } else {
+        builder.fallback5h = cfgQuota;
+      }
+    }
+
+    const eff5h = builder.bucket5h || (!builder.bucketWeekly ? cfgQuota : null);
+    const effWk = builder.bucketWeekly;
+    const hasValid5h = Boolean(eff5h);
     const quotaItem = {
       label: cfg.label,
       modelId: cfg.modelId,
       rawKey,
-      family: info.family,
-      isAvailable: hasValid5h,
-      remainingPct: hasValid5h ? +(remFrac * 100).toFixed(1) : null,
-      remainingIntPct: hasValid5h ? Math.floor(remFrac * 100 + 1e-6) : null,
-      usedPct: hasValid5h ? +(usedFrac * 100).toFixed(1) : null,
-      resetTime,
-      weeklyRemainingPct: liveWeekly?.remainingPct ?? null,
-      weeklyRemainingIntPct: liveWeekly?.remainingIntPct ?? null,
-      weeklyUsedPct: liveWeekly?.usedPct ?? null,
-      weeklyResetTime: liveWeekly?.resetTime ?? null,
+      family: targetIdent.poolKey,
+      isAvailable: Boolean(eff5h || effWk || cfgQuota),
+      remainingPct: hasValid5h ? eff5h.remainingPct : null,
+      remainingIntPct: hasValid5h ? eff5h.remainingIntPct : null,
+      usedPct: hasValid5h ? eff5h.usedPct : null,
+      resetTime: hasValid5h ? eff5h.resetTime : null,
+      weeklyRemainingPct: effWk?.remainingPct ?? null,
+      weeklyRemainingIntPct: effWk?.remainingIntPct ?? null,
+      weeklyUsedPct: effWk?.usedPct ?? null,
+      weeklyResetTime: effWk?.resetTime || null,
     };
     modelQuotas.push(quotaItem);
     if (rawKey) modelQuotaByKey.set(rawKey, quotaItem);
-
-    const poolKey = isGemini ? 'Gemini' : 'Claude & GPT';
-    if (!quotaPoolsMap.has(poolKey)) {
-      quotaPoolsMap.set(poolKey, {
-        poolName: isGemini ? 'Gemini 模型池' : 'Claude & GPT 模型池',
-        family: poolKey,
-        isAvailable: quotaItem.isAvailable,
-        remainingPct: quotaItem.remainingPct,
-        remainingIntPct: quotaItem.remainingIntPct,
-        usedPct: quotaItem.usedPct,
-        resetTime,
-        weeklyRemainingPct: quotaItem.weeklyRemainingPct,
-        weeklyRemainingIntPct: quotaItem.weeklyRemainingIntPct,
-        weeklyUsedPct: quotaItem.weeklyUsedPct,
-        weeklyResetTime: quotaItem.weeklyResetTime,
-        models: [cfg.label],
-      });
-    } else {
-      const existingPool = quotaPoolsMap.get(poolKey);
-      existingPool.models.push(cfg.label);
-    }
   }
 
-  for (const [poolKey, b5hKey, bWkKey, poolName] of [
-    ['Gemini', 'gemini-5h', 'gemini-weekly', 'Gemini 模型池'],
-    ['Claude & GPT', '3p-5h', '3p-weekly', 'Claude & GPT 模型池'],
-  ]) {
-    if (!quotaPoolsMap.has(poolKey)) {
-      const b5h = officialBuckets.get(b5hKey);
-      const bWk = officialBuckets.get(bWkKey);
-      quotaPoolsMap.set(poolKey, {
-        poolName,
-        family: poolKey,
-        isAvailable: Boolean(b5h),
-        remainingPct: b5h?.remainingPct ?? null,
-        remainingIntPct: b5h?.remainingIntPct ?? null,
-        usedPct: b5h?.usedPct ?? null,
-        resetTime: b5h?.resetTime || null,
-        weeklyRemainingPct: bWk?.remainingPct ?? null,
-        weeklyRemainingIntPct: bWk?.remainingIntPct ?? null,
-        weeklyUsedPct: bWk?.usedPct ?? null,
-        weeklyResetTime: bWk?.resetTime || null,
-        models: [],
-      });
-    }
+  // Ensure baseline Gemini and Claude & GPT pools always exist
+  ensurePoolBuilder({ poolKey: 'Gemini', poolLabel: 'Gemini', poolName: 'Gemini 模型池' });
+  ensurePoolBuilder({
+    poolKey: 'Claude & GPT',
+    poolLabel: 'Claude & GPT',
+    poolName: 'Claude & GPT 模型池',
+  });
+
+  const quotaPoolsMap = new Map();
+  for (const [poolKey, builder] of poolBuilders.entries()) {
+    const b5h = builder.bucket5h || builder.fallback5h || null;
+    const bWk = builder.bucketWeekly || null;
+    quotaPoolsMap.set(poolKey, {
+      poolKey,
+      poolLabel: builder.poolLabel,
+      poolName: builder.poolName,
+      family: poolKey,
+      isAvailable: Boolean(b5h || bWk),
+      has5h: Boolean(b5h),
+      hasWeekly: Boolean(bWk),
+      remainingPct: b5h?.remainingPct ?? null,
+      remainingIntPct: b5h?.remainingIntPct ?? null,
+      usedPct: b5h?.usedPct ?? null,
+      resetTime: b5h?.resetTime || null,
+      weeklyRemainingPct: bWk?.remainingPct ?? null,
+      weeklyRemainingIntPct: bWk?.remainingIntPct ?? null,
+      weeklyUsedPct: bWk?.usedPct ?? null,
+      weeklyResetTime: bWk?.resetTime || null,
+      models: builder.models,
+    });
   }
 
   // Enumerate all conversations from LS + local disk + existing cache
@@ -1001,14 +1204,40 @@ async function buildTelemetryPayloadInternal(
     sessionPromptTokens > 0 ? Math.round((sessionCacheReadTokens / sessionPromptTokens) * 100) : 0;
 
   // Determine active pool and its official cycle anchors for time window alignment
+  const latestIsArgon = latestEnriched
+    ? isArgonModelIdentifier(
+        latestEnriched.modelKey,
+        latestEnriched.responseModel,
+        latestEnriched.modelUpstream,
+        latestEnriched.modelLabel
+      )
+    : false;
   const rawActiveFamily = latestEnriched?.family || 'Other';
-  const activePoolKey = rawActiveFamily === 'Gemini' ? 'Gemini'
-    : ['Claude', 'GPT'].includes(rawActiveFamily) ? 'Claude & GPT' : 'Unknown';
-  const activeLive5h = officialBuckets.get(activePoolKey === 'Gemini' ? 'gemini-5h'
-    : activePoolKey === 'Claude & GPT' ? '3p-5h' : null);
-  const activeLiveWeekly = officialBuckets.get(
-    activePoolKey === 'Gemini' ? 'gemini-weekly' : activePoolKey === 'Claude & GPT' ? '3p-weekly' : null
-  );
+  const activePoolKey =
+    latestIsArgon && quotaPoolsMap.has('Argon')
+      ? 'Argon'
+      : rawActiveFamily === 'Gemini'
+        ? 'Gemini'
+        : ['Claude', 'GPT'].includes(rawActiveFamily)
+          ? 'Claude & GPT'
+          : 'Unknown';
+  const matchedActivePool = quotaPoolsMap.get(activePoolKey) || null;
+  const activeLive5h = matchedActivePool?.has5h
+    ? {
+        remainingPct: matchedActivePool.remainingPct,
+        remainingIntPct: matchedActivePool.remainingIntPct,
+        usedPct: matchedActivePool.usedPct,
+        resetTime: matchedActivePool.resetTime,
+      }
+    : null;
+  const activeLiveWeekly = matchedActivePool?.hasWeekly
+    ? {
+        remainingPct: matchedActivePool.weeklyRemainingPct,
+        remainingIntPct: matchedActivePool.weeklyRemainingIntPct,
+        usedPct: matchedActivePool.weeklyUsedPct,
+        resetTime: matchedActivePool.weeklyResetTime,
+      }
+    : null;
   const cycleAnchors = {
     fiveHourResetMs: parseIsoMs(activeLive5h?.resetTime),
     weeklyResetMs: parseIsoMs(activeLiveWeekly?.resetTime),
@@ -1288,11 +1517,22 @@ async function buildTelemetryPayloadInternal(
   const weekBucket = finalizedPresets.week.account;
 
   const familyPoolQuota = quotaPoolsMap.get(activePoolKey);
+  const activePoolLabel = familyPoolQuota?.poolLabel || activePoolKey;
   const activePoolQuota = familyPoolQuota || {
-    poolName: activePoolKey === 'Gemini' ? 'Gemini 模型池'
-      : activePoolKey === 'Claude & GPT' ? 'Claude & GPT 模型池' : '模型池未知',
+    poolKey: activePoolKey,
+    poolLabel: activePoolKey === 'Unknown' ? '未知' : activePoolKey,
+    poolName:
+      activePoolKey === 'Argon'
+        ? 'Gemini 4 Argon 模型池'
+        : activePoolKey === 'Gemini'
+          ? 'Gemini 模型池'
+          : activePoolKey === 'Claude & GPT'
+            ? 'Claude & GPT 模型池'
+            : '模型池未知',
     family: activePoolKey,
-    isAvailable: Boolean(activeLive5h),
+    isAvailable: Boolean(activeLive5h || activeLiveWeekly),
+    has5h: Boolean(activeLive5h),
+    hasWeekly: Boolean(activeLiveWeekly),
     remainingPct: activeLive5h?.remainingPct ?? null,
     remainingIntPct: activeLive5h?.remainingIntPct ?? null,
     usedPct: activeLive5h?.usedPct ?? null,
@@ -1424,7 +1664,7 @@ async function buildTelemetryPayloadInternal(
       },
       activePool: activePoolQuota,
       pools: Array.from(quotaPoolsMap.values()).sort((a, b) => {
-        const order = { Gemini: 0, 'Claude & GPT': 1 };
+        const order = { Gemini: 0, Argon: 1, 'Claude & GPT': 2 };
         return (order[a.family] ?? 99) - (order[b.family] ?? 99);
       }),
       models: modelQuotas.sort((a, b) => String(a.label).localeCompare(String(b.label))),
@@ -1433,7 +1673,7 @@ async function buildTelemetryPayloadInternal(
         poolFamily: activePoolKey,
         title: isCustomWeeklyMode
           ? '每周限额 (自定义本机)'
-          : `每周限额 (${activePoolKey || '当前'})`,
+          : `每周限额 (${activePoolLabel && activePoolLabel !== 'Unknown' ? activePoolLabel : '当前'})`,
         calls: weekBucket.calls,
         tokens: weekBucket.totalTokens,
         costUsd: weekBucket.costUsd,
