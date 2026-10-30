@@ -16,14 +16,14 @@ import { CustomNumberInput } from '../components/ui/CustomNumberInput.js';
 import { CustomSelect } from '../components/ui/CustomSelect.js';
 
 const WEEKLY_MODE_OPTIONS = [
-  { value: 'official', label: '官方云端周限额 (与 Models & Usage 同步)' },
-  { value: 'custom_tokens', label: '按自定义每周 Token 预算计算百分比' },
-  { value: 'custom_cost', label: '按自定义每周美元 ($) 预算计算百分比' },
+  { value: 'official', label: '官方周限额 (自动同步)' },
+  { value: 'custom_tokens', label: '自定义 Token 预算' },
+  { value: 'custom_cost', label: '自定义费用预算 (USD)' },
 ];
 
 const STEP_MODEL_DISPLAY_OPTIONS = [
-  { value: 'short', label: '本地简称 (如 argon-4-high / flash-3.8-high)' },
-  { value: 'upstream', label: '上游真实模型名 (如 gemini-4-argon / gemini-3.8-flash-n)' },
+  { value: 'short', label: 'Antigravity 内部代号 (如 argon-4-high / flash-3.8-high)' },
+  { value: 'upstream', label: '模型实际名称 (如 gemini-4-argon / gemini-3.8-flash-n)' },
 ];
 
 export const SettingsView = defineComponent({
@@ -73,7 +73,7 @@ export const SettingsView = defineComponent({
             showUpstreamModel: draftShowUpstreamModel,
           });
         }
-        showSaveFeedback('正在异步保存...');
+        showSaveFeedback('正在保存…');
         await saveSettingsPatch({
           showUpstreamModel: draftShowUpstreamModel,
         });
@@ -107,7 +107,7 @@ export const SettingsView = defineComponent({
         type: 'button',
         className: 'btn-primary',
         onClick: async () => {
-          showSaveFeedback('正在异步保存...');
+          showSaveFeedback('正在保存…');
           await saveSettingsPatch({
             weeklyLimitMode: draftMode,
             weeklyTokenBudget: draftTokens,
@@ -124,25 +124,25 @@ export const SettingsView = defineComponent({
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
           createSvgIcon('sliders', { size: 13 }),
-          h('span', { text: '监控口径与周限额基准设置' }),
+          h('span', { text: '配额监控与预算设置' }),
         ]),
         saveStatusText,
       ]),
       h('div', { className: 'form-row' }, [
-        h('span', { className: 'form-label', text: '步骤明细模型名称显示' }),
+        h('span', { className: 'form-label', text: '步骤表中的模型名显示方式' }),
         stepModelSelect.el,
       ]),
       h('div', { className: 'form-row' }, [
-        h('span', { className: 'form-label', text: '每周进度条统计维度' }),
+        h('span', { className: 'form-label', text: '每周用量的计算方式' }),
         modeSelect.el,
       ]),
       h('div', { className: 'dual-grid' }, [
         h('div', { className: 'form-row' }, [
-          h('span', { className: 'form-label', text: '每周 Token 预算基准 (步进 1M)' }),
+          h('span', { className: 'form-label', text: '每周 Token 预算 (每次调整 1M)' }),
           tokenBudgetInput.el,
         ]),
         h('div', { className: 'form-row' }, [
-          h('span', { className: 'form-label', text: '每周费用预算基准 (USD $, 步进 $5)' }),
+          h('span', { className: 'form-label', text: '每周费用预算 (每次调整 $5)' }),
           costBudgetInput.el,
         ]),
       ]),

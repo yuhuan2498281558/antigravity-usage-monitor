@@ -50,13 +50,13 @@ export function formatUsd(amount, { precise = false, estimated = false, unpriced
 
 export function speedReasonText(reason) {
   return ({
-    compaction: '自动压缩不计均速',
+    compaction: '上下文自动压缩，不纳入均速',
     incomplete_or_invalid_timing: '未完成或计时缺失',
-    invalid_output_tokens: '输出 Token 计数无效',
-    inconsistent_timing: '原生首响应与总计时不一致',
+    invalid_output_tokens: '输出 Token 数异常',
+    inconsistent_timing: '首字节响应与总耗时数据不一致',
     short_timing: '计时过短，暂不测速',
-    short_sample: '短样本，不计均速',
-    legacy_cache: '旧缓存，等待重新读取',
+    short_sample: '样本太少，暂不计入均速',
+    legacy_cache: '缓存已过期，等待刷新',
   })[reason] || '';
 }
 

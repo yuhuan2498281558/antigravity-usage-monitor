@@ -72,7 +72,7 @@ export const StepsDetailView = defineComponent({
             h('th', { text: '次数' }),
             h('th', { text: '均速' }),
             h('th', { text: '总 Token' }),
-            h('th', { text: '折算费用' }),
+            h('th', { text: '预估费用' }),
           ]),
         ]),
         modelsTbody,
@@ -94,7 +94,7 @@ export const StepsDetailView = defineComponent({
         h('div', { className: 'panel-header' }, [
           h('span', { className: 'panel-title' }, [
             createSvgIcon('table', { size: 13 }),
-            h('span', { text: '全量测速与计费矩阵' }),
+            h('span', { text: '速度与费用明细' }),
           ]),
           subTabSwitch.el,
         ]),
