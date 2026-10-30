@@ -584,13 +584,13 @@ function formatUsd(amount, { precise = false, estimated = false, unpricedCalls =
 
 function speedReasonText(reason) {
   return ({
-    compaction: '自动压缩不计均速',
+    compaction: '上下文自动压缩，不纳入均速',
     incomplete_or_invalid_timing: '未完成或计时缺失',
-    invalid_output_tokens: '输出 Token 计数无效',
-    inconsistent_timing: '原生首响应与总计时不一致',
+    invalid_output_tokens: '输出 Token 数异常',
+    inconsistent_timing: '首字节响应与总耗时数据不一致',
     short_timing: '计时过短，暂不测速',
-    short_sample: '短样本，不计均速',
-    legacy_cache: '旧缓存，等待重新读取',
+    short_sample: '样本太少，暂不计入均速',
+    legacy_cache: '缓存已过期，等待刷新',
   })[reason] || '';
 }
 
@@ -2003,7 +2003,7 @@ const TopSessionHeader = defineComponent({
       {
         type: 'button',
         className: 'icon-btn',
-        'aria-label': '立即强制同步官方额度与测速',
+        'aria-label': '立即刷新额度与测速数据',
         onClick: () => fetchTelemetry({ force: true }),
       },
       [createSvgIcon('refresh', { size: 13 })]
@@ -2132,10 +2132,10 @@ const LiveOverviewView = defineComponent({
     const ttftSub = h('span', { className: 'cell-sub', text: '均值 —' });
 
     const avgVal = h('strong', { className: 'cell-value', text: '—' });
-    const avgSub = h('span', { className: 'cell-sub', text: '有效 0/0 步' });
+    const avgSub = h('span', { className: 'cell-sub', text: '有效样本 0/0 步' });
 
     const costVal = h('strong', { className: 'cell-value', text: '$0.000' });
-    const cacheSub = h('span', { className: 'cell-sub accent-ok', text: '缓存 0% · 累 $0.00' });
+    const cacheSub = h('span', { className: 'cell-sub accent-ok', text: '缓存 0% · 累计 $0.00' });
 
     const matrixEl = h('section', { className: 'telemetry-matrix', 'aria-label': '核心测速指标' }, [
       h('div', { className: 'matrix-cell' }, [
@@ -2228,7 +2228,7 @@ const LiveOverviewView = defineComponent({
         h('div', { className: 'legend-item' }, [
           h('span', { className: 'legend-left' }, [
             h('span', { className: 'swatch seg-user-rules' }),
-            h('span', { text: 'user_rule' }),
+            h('span', { text: '用户规则' }),
           ]),
           bdUserRules,
         ]),
@@ -2389,7 +2389,7 @@ const LiveOverviewView = defineComponent({
       patchText(costVal, formatUsd(stepCost, { precise: true }));
       patchText(
         cacheSub,
-        `缓 ${active.latestCacheHitPct ?? 0}% · 累 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
+        `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
       );
 
       // 2. Context (Auto Compaction Baseline)
@@ -3275,7 +3275,7 @@ const StepsDetailView = defineComponent({
             h('th', { text: '次数' }),
             h('th', { text: '均速' }),
             h('th', { text: '总 Token' }),
-            h('th', { text: '折算费用' }),
+            h('th', { text: '预估费用' }),
           ]),
         ]),
         modelsTbody,
@@ -3297,7 +3297,7 @@ const StepsDetailView = defineComponent({
         h('div', { className: 'panel-header' }, [
           h('span', { className: 'panel-title' }, [
             createSvgIcon('table', { size: 13 }),
-            h('span', { text: '全量测速与计费矩阵' }),
+            h('span', { text: '速度与费用明细' }),
           ]),
           subTabSwitch.el,
         ]),
@@ -3504,14 +3504,14 @@ const StepsDetailView = defineComponent({
 
 
 const WEEKLY_MODE_OPTIONS = [
-  { value: 'official', label: '官方云端周限额 (与 Models & Usage 同步)' },
-  { value: 'custom_tokens', label: '按自定义每周 Token 预算计算百分比' },
-  { value: 'custom_cost', label: '按自定义每周美元 ($) 预算计算百分比' },
+  { value: 'official', label: '官方周限额 (自动同步)' },
+  { value: 'custom_tokens', label: '自定义 Token 预算' },
+  { value: 'custom_cost', label: '自定义费用预算 (USD)' },
 ];
 
 const STEP_MODEL_DISPLAY_OPTIONS = [
-  { value: 'short', label: '本地简称 (如 argon-4-high / flash-3.8-high)' },
-  { value: 'upstream', label: '上游真实模型名 (如 gemini-4-argon / gemini-3.8-flash-n)' },
+  { value: 'short', label: 'Antigravity 内部代号 (如 argon-4-high / flash-3.8-high)' },
+  { value: 'upstream', label: '模型实际名称 (如 gemini-4-argon / gemini-3.8-flash-n)' },
 ];
 
 const SettingsView = defineComponent({
@@ -3561,7 +3561,7 @@ const SettingsView = defineComponent({
             showUpstreamModel: draftShowUpstreamModel,
           });
         }
-        showSaveFeedback('正在异步保存...');
+        showSaveFeedback('正在保存…');
         await saveSettingsPatch({
           showUpstreamModel: draftShowUpstreamModel,
         });
@@ -3595,7 +3595,7 @@ const SettingsView = defineComponent({
         type: 'button',
         className: 'btn-primary',
         onClick: async () => {
-          showSaveFeedback('正在异步保存...');
+          showSaveFeedback('正在保存…');
           await saveSettingsPatch({
             weeklyLimitMode: draftMode,
             weeklyTokenBudget: draftTokens,
@@ -3612,25 +3612,25 @@ const SettingsView = defineComponent({
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
           createSvgIcon('sliders', { size: 13 }),
-          h('span', { text: '监控口径与周限额基准设置' }),
+          h('span', { text: '配额监控与预算设置' }),
         ]),
         saveStatusText,
       ]),
       h('div', { className: 'form-row' }, [
-        h('span', { className: 'form-label', text: '步骤明细模型名称显示' }),
+        h('span', { className: 'form-label', text: '步骤表中的模型名显示方式' }),
         stepModelSelect.el,
       ]),
       h('div', { className: 'form-row' }, [
-        h('span', { className: 'form-label', text: '每周进度条统计维度' }),
+        h('span', { className: 'form-label', text: '每周用量的计算方式' }),
         modeSelect.el,
       ]),
       h('div', { className: 'dual-grid' }, [
         h('div', { className: 'form-row' }, [
-          h('span', { className: 'form-label', text: '每周 Token 预算基准 (步进 1M)' }),
+          h('span', { className: 'form-label', text: '每周 Token 预算 (每次调整 1M)' }),
           tokenBudgetInput.el,
         ]),
         h('div', { className: 'form-row' }, [
-          h('span', { className: 'form-label', text: '每周费用预算基准 (USD $, 步进 $5)' }),
+          h('span', { className: 'form-label', text: '每周费用预算 (每次调整 $5)' }),
           costBudgetInput.el,
         ]),
       ]),
