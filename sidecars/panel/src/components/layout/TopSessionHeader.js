@@ -33,7 +33,7 @@ export const TopSessionHeader = defineComponent({
       {
         type: 'button',
         className: 'icon-btn',
-        'aria-label': '立即强制同步官方额度与测速',
+        'aria-label': '立即刷新额度与测速数据',
         onClick: () => fetchTelemetry({ force: true }),
       },
       [createSvgIcon('refresh', { size: 13 })]

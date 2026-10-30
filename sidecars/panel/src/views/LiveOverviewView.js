@@ -40,10 +40,10 @@ export const LiveOverviewView = defineComponent({
     const ttftSub = h('span', { className: 'cell-sub', text: '均值 —' });
 
     const avgVal = h('strong', { className: 'cell-value', text: '—' });
-    const avgSub = h('span', { className: 'cell-sub', text: '有效 0/0 步' });
+    const avgSub = h('span', { className: 'cell-sub', text: '有效样本 0/0 步' });
 
     const costVal = h('strong', { className: 'cell-value', text: '$0.000' });
-    const cacheSub = h('span', { className: 'cell-sub accent-ok', text: '缓存 0% · 累 $0.00' });
+    const cacheSub = h('span', { className: 'cell-sub accent-ok', text: '缓存 0% · 累计 $0.00' });
 
     const matrixEl = h('section', { className: 'telemetry-matrix', 'aria-label': '核心测速指标' }, [
       h('div', { className: 'matrix-cell' }, [
@@ -136,7 +136,7 @@ export const LiveOverviewView = defineComponent({
         h('div', { className: 'legend-item' }, [
           h('span', { className: 'legend-left' }, [
             h('span', { className: 'swatch seg-user-rules' }),
-            h('span', { text: 'user_rule' }),
+            h('span', { text: '用户规则' }),
           ]),
           bdUserRules,
         ]),
@@ -297,7 +297,7 @@ export const LiveOverviewView = defineComponent({
       patchText(costVal, formatUsd(stepCost, { precise: true }));
       patchText(
         cacheSub,
-        `缓 ${active.latestCacheHitPct ?? 0}% · 累 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
+        `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
       );
 
       // 2. Context (Auto Compaction Baseline)

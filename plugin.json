@@ -1,7 +1,7 @@
 {
   "name": "usage-monitor",
   "displayName": "Usage & Speed Monitor",
-  "version": "1.2.0",
+  "version": "1.3.1",
   "description": "实时监控请求整体 TPS、原生首 Token 延迟(TTFT)、缓存命中率、上下文窗口占用、5h 限额以及今日/每周累计消耗。",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
