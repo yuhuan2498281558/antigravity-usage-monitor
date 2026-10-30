@@ -118,11 +118,36 @@ function isEquivalentTelemetry(prev, next) {
     }
   }
 
+  if (prev.account?.tierName !== next.account?.tierName || prev.account?.planName !== next.account?.planName) {
+    return false;
+  }
+
   const pQuot = prev.quotas?.activePool;
   const nQuot = next.quotas?.activePool;
+  if (pQuot?.family !== nQuot?.family) return false;
   if (pQuot?.usedPct !== nQuot?.usedPct) return false;
   if (pQuot?.remainingPct !== nQuot?.remainingPct) return false;
+  if (pQuot?.weeklyUsedPct !== nQuot?.weeklyUsedPct) return false;
   if (prev.quotas?.weekly?.usedPct !== next.quotas?.weekly?.usedPct) return false;
+  if (prev.quotas?.weekly?.remainingPct !== next.quotas?.weekly?.remainingPct) return false;
+
+  const pPools = prev.quotas?.pools || [];
+  const nPools = next.quotas?.pools || [];
+  if (pPools.length !== nPools.length) return false;
+  for (let i = 0; i < pPools.length; i++) {
+    if (
+      pPools[i]?.poolKey !== nPools[i]?.poolKey ||
+      pPools[i]?.poolLabel !== nPools[i]?.poolLabel ||
+      pPools[i]?.usedPct !== nPools[i]?.usedPct ||
+      pPools[i]?.remainingPct !== nPools[i]?.remainingPct ||
+      pPools[i]?.resetTime !== nPools[i]?.resetTime ||
+      pPools[i]?.weeklyUsedPct !== nPools[i]?.weeklyUsedPct ||
+      pPools[i]?.weeklyRemainingPct !== nPools[i]?.weeklyRemainingPct ||
+      pPools[i]?.weeklyResetTime !== nPools[i]?.weeklyResetTime
+    ) {
+      return false;
+    }
+  }
 
   if ((prev.conversations?.length || 0) !== (next.conversations?.length || 0)) return false;
 
