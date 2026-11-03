@@ -6,9 +6,9 @@ import { createReactiveStore } from '../core/reactive.js';
 
 export const VIEW_TABS = Object.freeze([
   { value: 'overview', label: '实时监控', icon: 'pulse' },
-  { value: 'consumption', label: '消耗统计', icon: 'chart-bar' },
-  { value: 'steps', label: '步骤明细', icon: 'table' },
-  { value: 'settings', label: '系统设置', icon: 'sliders' },
+  { value: 'consumption', label: '用量统计', icon: 'chart-bar' },
+  { value: 'steps', label: '调用明细', icon: 'table' },
+  { value: 'settings', label: '偏好设置', icon: 'sliders' },
 ]);
 
 export const uiStore = createReactiveStore({

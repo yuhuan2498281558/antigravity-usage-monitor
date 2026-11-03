@@ -1,8 +1,11 @@
 /**
  * @fileoverview View 1: LiveOverviewView (实时监控视图).
- * Displays real-time TPS, TTFT, weighted mean speed, 4-channel Context Window
- * breakdown automatically anchored to the current model's compaction baseline,
- * and official 5h/weekly quota pools for both Gemini and Claude & GPT.
+ * 负责展示当前活跃会话的核心实时遥测指标：
+ * 1. 4 格实时测速矩阵：实时吞吐 (TPS)、首 Token 延迟 (TTFT)、会话有效加权均速与本步费用/缓存命中率；
+ * 2. 6 通道上下文窗口构成：自动锚定当前模型的上下文压缩基线 (`compactionLimitTokens`)，
+ *    通过 6 段进度条与双列图例展示消息、系统工具、MCP 工具、Skill、系统提示词与用户规则的 Token 占用；
+ * 3. 动态多配额池监控卡片：支持 Gemini、Pro 订阅专属独立 Argon 周配额池、Claude & GPT 等动态配额池，
+ *    自动适配 5h/每周双窗口或单窗口模式，并展示本机周累计消耗与 AI 积分脚标。
  */
 
 import { defineComponent } from '../core/component.js';
@@ -31,7 +34,7 @@ import { CustomScrollbar } from '../components/ui/CustomScrollbar.js';
 export const LiveOverviewView = defineComponent({
   name: 'LiveOverviewView',
   setup({ onCleanup }) {
-    // 1. 4-Cell Real-time Telemetry Matrix
+    // --- 1. 4 格实时测速矩阵 (实时吞吐 / 首Token / 会话均速 / 本步消费) ---
     const tpsVal = h('strong', { className: 'cell-value accent-speed', text: '—' });
     const tpsSub = h('span', { className: 'cell-sub', text: '模型未知' });
     const pulseDot = createSvgIcon('dot', { size: 10 });
@@ -45,15 +48,15 @@ export const LiveOverviewView = defineComponent({
     const costVal = h('strong', { className: 'cell-value', text: '$0.000' });
     const cacheSub = h('span', { className: 'cell-sub accent-ok', text: '缓存 0% · 累计 $0.00' });
 
-    const matrixEl = h('section', { className: 'telemetry-matrix', 'aria-label': '核心测速指标' }, [
+    const matrixEl = h('section', { className: 'telemetry-matrix', 'aria-label': '实时指标' }, [
       h('div', { className: 'matrix-cell' }, [
-        h('div', { className: 'cell-label' }, [h('span', { text: '实时吞吐' }), pulseDot]),
+        h('div', { className: 'cell-label' }, [h('span', { text: '输出速度' }), pulseDot]),
         tpsVal,
         tpsSub,
       ]),
       h('div', { className: 'matrix-cell' }, [
         h('div', { className: 'cell-label' }, [
-          h('span', { text: '首Token' }),
+          h('span', { text: '首字延迟' }),
           createSvgIcon('clock', { size: 11 }),
         ]),
         ttftVal,
@@ -61,7 +64,7 @@ export const LiveOverviewView = defineComponent({
       ]),
       h('div', { className: 'matrix-cell' }, [
         h('div', { className: 'cell-label' }, [
-          h('span', { text: '会话均速' }),
+          h('span', { text: '平均速度' }),
           createSvgIcon('pulse', { size: 11 }),
         ]),
         avgVal,
@@ -69,7 +72,7 @@ export const LiveOverviewView = defineComponent({
       ]),
       h('div', { className: 'matrix-cell' }, [
         h('div', { className: 'cell-label' }, [
-          h('span', { text: '本步消费' }),
+          h('span', { text: '本次费用' }),
           createSvgIcon('bolt', { size: 11 }),
         ]),
         costVal,
@@ -77,7 +80,7 @@ export const LiveOverviewView = defineComponent({
       ]),
     ]);
 
-    // 2. Context Window 6-Segment Panel (Auto Compaction Baseline)
+    // --- 2. 6 段上下文窗口构成面板（自动锚定模型上下文压缩基线） ---
     const ctxSummaryText = h('span', { className: 'text-mono', text: '0 / 256.0k (0%)' });
     const ctxSegmentBar = ContextSegmentMeter({ context: {} });
 
@@ -92,7 +95,7 @@ export const LiveOverviewView = defineComponent({
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
           createSvgIcon('layers', { size: 13 }),
-          h('span', { text: '上下文窗口构成' }),
+          h('span', { text: '上下文占用' }),
         ]),
         h('span', { className: 'panel-meta' }, [ctxSummaryText]),
       ]),
@@ -143,10 +146,13 @@ export const LiveOverviewView = defineComponent({
       ]),
     ]);
 
-    // 3. Official 5h & Weekly Quotas Panel (Dynamic Pools: Gemini, Argon on Pro, Claude & GPT, etc.)
+    // --- 3. 官方动态多配额池监控面板 (Gemini / Pro 独立 Argon 池 / Claude & GPT) ---
     const tierBadge = h('span', { className: 'panel-meta', text: 'Google AI · Pro' });
     const poolsListEl = h('div', { style: 'display: flex; flex-direction: column; gap: 0;' });
 
+    /**
+     * 创建单个配额池的 DOM 行结构，内含 5h 限额与每周限额两个可独立显隐的子窗口进度条。
+     */
     function createPoolQuotaRow() {
       const title5h = h('span', { text: '5h 限额' });
       const meta5h = h('span', { className: 'panel-meta text-mono', text: '--' });
@@ -175,14 +181,14 @@ export const LiveOverviewView = defineComponent({
       };
     }
 
-    const wkFootLeft = h('span', { className: 'text-muted', text: '本周本机: 0 ($0.00)' });
+    const wkFootLeft = h('span', { className: 'text-muted', text: '本周累计: 0 ($0.00)' });
     const wkFootRight = h('span', { className: 'text-muted', text: '' });
 
     const quotaPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
           createSvgIcon('pulse', { size: 13 }),
-          h('span', { text: '官方配额与周期监控' }),
+          h('span', { text: '可用额度' }),
         ]),
         tierBadge,
       ]),
@@ -205,6 +211,12 @@ export const LiveOverviewView = defineComponent({
       className: 'view-pane',
     });
 
+    /**
+     * 同步单个配额池行的 5h 与每周窗口状态：
+     * - 对于仅有周限额的独立配额池（例如 Google AI Pro 账号下的 Argon 池或 Plus 档位）自动隐藏 5h 行；
+     * - 对于仅有 5h 限额的配额池自动隐藏每周行；
+     * - 若两个窗口均无数据（如首次拉取失败），则同时保留两行并显示“获取失败 (--%)”占位提示。
+     */
     function syncPoolQuotaRow(refs, item, idx, rowEl) {
       const { poolData, poolLabel, fallbackWeekly, isActivePool } = item;
       patchAttr(
@@ -229,8 +241,7 @@ export const LiveOverviewView = defineComponent({
       const usedWkVal = hasWk ? Number(wkUsedRaw) : 0;
       const remWkVal = hasWk ? Number(wkRemRaw) : 0;
 
-      // Hide non-applicable window on weekly-only pools (e.g. Pro Argon pool or Plus tier)
-      // or 5h-only pools, while still showing both rows with error state if both failed.
+      // 在单窗口配额池（如 Pro 账号独立 Argon 周配额池或仅 5h 池）中隐藏不适用的另一窗口
       const hide5h = !has5h && hasWk;
       const hideWk = !hasWk && has5h;
       refs.row5h.hidden = hide5h;
@@ -272,13 +283,16 @@ export const LiveOverviewView = defineComponent({
     let latestData = null;
     let isDirty = false;
 
+    /**
+     * 将最新遥测载荷渲染至 4 格测速矩阵、6 段上下文进度条与动态配额池列表。
+     */
     function renderData(data) {
       if (!data) return;
       const active = data.activeConversation || {};
       const ctx = active.context || {};
       const quotas = data.quotas || {};
 
-      // 1. Matrix
+      // 1. 更新 4 格实时测速矩阵
       patchClasses(pulseDot, { 'is-pulsing': Boolean(active.isRunning) });
       patchText(tpsVal, formatMetric(active.latestTokPerSec, ' tok/s'));
       const reason = speedReasonText(active.latestSpeedReason);
@@ -300,7 +314,7 @@ export const LiveOverviewView = defineComponent({
         `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
       );
 
-      // 2. Context (Auto Compaction Baseline)
+      // 2. 更新 6 段上下文窗口构成（优先使用模型自动压缩基线 compactionLimitTokens）
       const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000);
       const totalTokens = Number(ctx.totalTokens || 0);
       const usedPct =
@@ -317,7 +331,7 @@ export const LiveOverviewView = defineComponent({
       patchText(bdSystemPrompt, formatTokens(ctx.systemPromptTokens || 0));
       patchText(bdUserRules, formatTokens(ctx.userRulesTokens || 0));
 
-      // 3. Quotas (Dynamic Pools: Gemini, Argon on Pro, Claude & GPT, etc.)
+      // 3. 更新动态配额池列表（支持 Gemini、Pro 独立 Argon 池、Claude & GPT 等）
       patchText(
         tierBadge,
         `${data.account?.tierName || 'Google AI'} · ${data.account?.planName || 'Pro'}`
@@ -359,13 +373,13 @@ export const LiveOverviewView = defineComponent({
 
       patchText(
         wkFootLeft,
-        `本周本机: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0, { unpricedCalls: weekly.unpricedCalls })})`
+        `本周累计: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0, { unpricedCalls: weekly.unpricedCalls })})`
       );
       patchText(
         wkFootRight,
         data.account?.aiCredits > 0
           ? `AI 积分: ${data.account.aiCredits}`
-          : `本机调用: ${weekly.calls || 0} 步`
+          : `本周调用: ${weekly.calls || 0} 次`
       );
 
       viewScrollbar.refresh();

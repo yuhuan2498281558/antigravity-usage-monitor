@@ -1,8 +1,9 @@
 /**
  * @fileoverview View 3: StepsDetailView (步骤明细与按模型汇总视图).
- * Uses patchKeyedList for incremental row reconciliation without innerHTML resets,
- * wraps tables in bespoke CustomScrollbar (zero native OS scrollbars), and provides
- * a live row inspector bar replacing native browser title tooltips.
+ * 提供“单步测速”与“按模型汇总”双子表切换：
+ * - 采用 `patchKeyedList` 实现行级 DOM 增量对账与就地复用，彻底避免全表 `innerHTML` 重建引发的闪烁；
+ * - 两个表格各自包裹在独立的 `CustomScrollbar` 容器中，兼具粘性表头与零原生滚动条体验；
+ * - 支持在内部代号 (`modelShort`) 与实际响应模型名 (`modelUpstream`) 之间无缝切换显示。
  */
 
 import { defineComponent } from '../core/component.js';
@@ -29,11 +30,12 @@ import { SegmentedControl } from '../components/ui/SegmentedControl.js';
 export const StepsDetailView = defineComponent({
   name: 'StepsDetailView',
   setup({ onCleanup }) {
+    // 顶部子表分段切换器：在“按步查看”与“按模型汇总”之间切换
     const subTabSwitch = SegmentedControl({
       ariaLabel: '明细表视图切换',
       modelValue: uiStore.getState().stepsSubTab,
       options: [
-        { value: 'steps', label: '单步测速 (0步)' },
+        { value: 'steps', label: '按步查看 (0)' },
         { value: 'models', label: '按模型汇总' },
       ],
       onUpdateModelValue: (nextTab) => {
@@ -41,18 +43,19 @@ export const StepsDetailView = defineComponent({
       },
     });
 
+    // --- 子表 1：单步明细表（列定义：步序、模型、吞吐速度、首字延迟、上下文/输出、缓存命中率、单步费用） ---
     const stepsTbody = h('tbody');
     const stepsTablePane = h('div', { className: 'table-viewport' }, [
       h('table', { className: 'data-table' }, [
         h('thead', {}, [
           h('tr', {}, [
-            h('th', { text: '步' }),
+            h('th', { text: '步序' }),
             h('th', { text: '模型' }),
             h('th', { text: '速度' }),
-            h('th', { text: '首Token' }),
-            h('th', { text: '上下文/输出' }),
+            h('th', { text: '首字' }),
+            h('th', { text: '上下文 / 输出' }),
             h('th', { text: '缓存' }),
-            h('th', { text: '消费' }),
+            h('th', { text: '费用' }),
           ]),
         ]),
         stepsTbody,
@@ -63,6 +66,7 @@ export const StepsDetailView = defineComponent({
       className: 'table-scroll-host',
     });
 
+    // --- 子表 2：按模型汇总表（列定义：模型名称、调用次数、有效均速、总 Token、费用） ---
     const modelsTbody = h('tbody');
     const modelsTablePane = h('div', { className: 'table-viewport' }, [
       h('table', { className: 'data-table' }, [
@@ -72,7 +76,7 @@ export const StepsDetailView = defineComponent({
             h('th', { text: '次数' }),
             h('th', { text: '均速' }),
             h('th', { text: '总 Token' }),
-            h('th', { text: '预估费用' }),
+            h('th', { text: '费用' }),
           ]),
         ]),
         modelsTbody,
@@ -94,7 +98,7 @@ export const StepsDetailView = defineComponent({
         h('div', { className: 'panel-header' }, [
           h('span', { className: 'panel-title' }, [
             createSvgIcon('table', { size: 13 }),
-            h('span', { text: '速度与费用明细' }),
+            h('span', { text: '调用记录' }),
           ]),
           subTabSwitch.el,
         ]),
@@ -119,6 +123,9 @@ export const StepsDetailView = defineComponent({
     let latestSlice = null;
     let isDirty = false;
 
+    /**
+     * 对单步测速表和按模型汇总表执行基于 `patchKeyedList` 的键值增量对账与行更新。
+     */
     function renderStepsData(slice) {
       if (!slice) return;
       const steps = slice.recentSteps || [];
@@ -127,11 +134,12 @@ export const StepsDetailView = defineComponent({
 
       subTabSwitch.setProps({
         options: [
-          { value: 'steps', label: `单步测速 (${steps.length}步)` },
+          { value: 'steps', label: `按步查看 (${steps.length})` },
           { value: 'models', label: `按模型汇总 (${slice.rangeLabel})` },
         ],
       });
 
+      // 1. 单步测速表增量对账：以 `<cascadeId>-<stepIndex>` 为稳定行键，仅在签名变化时刷新单元格
       patchKeyedList(stepsTbody, steps, {
         keyFn: (st) => `${slice.cascadeId || 'conv'}-${st.stepIndex}`,
         sigFn: (st) =>
@@ -203,6 +211,7 @@ export const StepsDetailView = defineComponent({
         },
       });
 
+      // 2. 按模型汇总表增量对账：以模型标识为稳定行键，展示调用次数、加权均速、有效样本比与总费用
       patchKeyedList(modelsTbody, models, {
         keyFn: (m) => m.label || m.shortName,
         sigFn: (m) =>

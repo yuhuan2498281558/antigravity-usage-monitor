@@ -14,7 +14,10 @@ const cssOrder = [
   'src/styles/tokens.css',
   'src/styles/base.css',
   'src/styles/animations.css',
-  'src/styles/components.css',
+  'src/styles/controls.css',
+  'src/styles/views-overview.css',
+  'src/styles/views-consumption.css',
+  'src/styles/views-tables.css',
 ];
 
 const cssBundle =
@@ -41,6 +44,8 @@ const jsOrder = [
   'src/components/ui/CustomScrollbar.js',
   'src/components/ui/SegmentedControl.js',
   'src/components/ui/ContextSegmentMeter.js',
+  'src/components/ui/FourSegmentBar.js',
+  'src/components/charts/TrendAreaChart.js',
   'src/components/layout/TopSessionHeader.js',
   'src/views/LiveOverviewView.js',
   'src/views/ConsumptionView.js',
