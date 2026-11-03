@@ -1,11 +1,12 @@
 /**
  * @fileoverview View 2: ConsumptionView (全景消耗统计视图).
- * Implements the 5-part analytics layout:
- * 1. 用量概览 (Total Tokens k/M/B, USD + CNY approx, Input/Output split, Cache Hit % + Saved Cost badge, 4-color bar)
- * 2. 历史趋势 (Pure SVG smooth cubic-bezier spline area chart with peak callout and 3 time anchors)
- * 3. 热门模型 (Per-model share badge, 4-segment bar, and Input/Cache/Output/Thinking breakdown)
- * 4. 数据来源 (SOURCES breakdown with 4-segment bar)
- * 5. 按月细分 (12-month stacked vertical bar chart with cost, stacked bars, and k/M/B totals)
+ * 采用 5 段式分析布局展示指定时间窗口内的全量 Token 与费用消耗：
+ * 1. 用量概览：支持预设时间段与自定义区间筛选，通过 3+2 组合矩阵展示总 Token/调用次数、
+ *    USD/CNY 预估费用、缓存命中率与命中量、输入/输出细分占比，以及底部 4 段比例条 (`FourSegmentBar`)。
+ * 2. 历史趋势：基于 `TrendAreaChart` 渲染纯 SVG 三次贝塞尔平滑曲线面积图、峰值气泡与首/中/末三时间锚点。
+ * 3. 热门模型：按 Token 总量降序展示各模型的消耗占比徽章、4 段构成条及输入/缓存/输出/思考/调用明细。
+ * 4. 数据来源：按调用来源聚合展示 Token 构成、占比与费用明细。
+ * 5. 按月细分：12 个月垂直 4 段堆叠柱状图，直观对比全年各月费用、Token 总量与缓存/思考结构。
  */
 
 import { defineComponent } from '../core/component.js';
@@ -23,13 +24,16 @@ import {
   formatTokensPrecise,
   formatUsd,
 } from '../core/formatters.js';
-import { createSvgIcon, SVG_NS } from '../icons/SvgIcon.js';
+import { createSvgIcon } from '../icons/SvgIcon.js';
 import { fetchTelemetry, telemetryStore } from '../store/telemetryStore.js';
 import { uiStore } from '../store/uiStore.js';
+import { createTrendAreaChart } from '../components/charts/TrendAreaChart.js';
 import { CustomDateTimePicker } from '../components/ui/CustomDateTimePicker.js';
 import { CustomScrollbar } from '../components/ui/CustomScrollbar.js';
+import { createFourSegmentBar } from '../components/ui/FourSegmentBar.js';
 import { SegmentedControl } from '../components/ui/SegmentedControl.js';
 
+/** 消耗统计顶栏支持的时间范围预设项 */
 const TIME_RANGE_OPTIONS = [
   { value: 'today', label: '今天' },
   { value: '24h', label: '1天' },
@@ -40,167 +44,10 @@ const TIME_RANGE_OPTIONS = [
   { value: 'custom', label: '自定义' },
 ];
 
-function createFourSegmentBar() {
-  const segInput = h('div', { className: 'progress-seg seg-input' });
-  const segCached = h('div', { className: 'progress-seg seg-cached' });
-  const segOutput = h('div', { className: 'progress-seg seg-output' });
-  const segThinking = h('div', { className: 'progress-seg seg-thinking' });
-  const el = h('div', { className: 'progress-track cons-seg-bar' }, [
-    segInput,
-    segCached,
-    segOutput,
-    segThinking,
-  ]);
-
-  function update({ inputTokens = 0, cacheReadTokens = 0, responseTokens = 0, thinkingTokens = 0 }) {
-    const total = Math.max(1, inputTokens + cacheReadTokens + responseTokens + thinkingTokens);
-    patchStyleVar(segInput, '--seg-w', `${((inputTokens / total) * 100).toFixed(2)}%`);
-    patchStyleVar(segCached, '--seg-w', `${((cacheReadTokens / total) * 100).toFixed(2)}%`);
-    patchStyleVar(segOutput, '--seg-w', `${((responseTokens / total) * 100).toFixed(2)}%`);
-    patchStyleVar(segThinking, '--seg-w', `${((thinkingTokens / total) * 100).toFixed(2)}%`);
-  }
-
-  return { el, update };
-}
-
-function buildSmoothSplinePath(points) {
-  if (!points.length) return '';
-  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
-  let d = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[i];
-    const p1 = points[i + 1];
-    const cpx1 = p0.x + (p1.x - p0.x) * 0.45;
-    const cpx2 = p1.x - (p1.x - p0.x) * 0.45;
-    d += ` C ${cpx1.toFixed(1)} ${p0.y.toFixed(1)}, ${cpx2.toFixed(1)} ${p1.y.toFixed(1)}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
-  }
-  return d;
-}
-
-function createTrendAreaChart() {
-  const svg = document.createElementNS(SVG_NS, 'svg');
-  svg.setAttribute('viewBox', '0 0 460 116');
-  svg.setAttribute('class', 'trend-svg');
-  svg.setAttribute('aria-hidden', 'true');
-
-  const defs = document.createElementNS(SVG_NS, 'defs');
-  const grad = document.createElementNS(SVG_NS, 'linearGradient');
-  grad.setAttribute('id', 'trend-area-grad');
-  grad.setAttribute('x1', '0');
-  grad.setAttribute('y1', '0');
-  grad.setAttribute('x2', '0');
-  grad.setAttribute('y2', '1');
-
-  const stop1 = document.createElementNS(SVG_NS, 'stop');
-  stop1.setAttribute('offset', '0%');
-  stop1.setAttribute('stop-color', 'var(--ctx-cached)');
-  stop1.setAttribute('stop-opacity', '0.36');
-
-  const stop2 = document.createElementNS(SVG_NS, 'stop');
-  stop2.setAttribute('offset', '100%');
-  stop2.setAttribute('stop-color', 'var(--ctx-cached)');
-  stop2.setAttribute('stop-opacity', '0.0');
-
-  grad.appendChild(stop1);
-  grad.appendChild(stop2);
-  defs.appendChild(grad);
-  svg.appendChild(defs);
-
-  // Subtle grid lines
-  const gridGroup = document.createElementNS(SVG_NS, 'g');
-  gridGroup.setAttribute('class', 'trend-grid');
-  for (const y of [26, 62, 98]) {
-    const line = document.createElementNS(SVG_NS, 'line');
-    line.setAttribute('x1', '10');
-    line.setAttribute('y1', String(y));
-    line.setAttribute('x2', '450');
-    line.setAttribute('y2', String(y));
-    gridGroup.appendChild(line);
-  }
-  for (const x of [118, 230, 342]) {
-    const line = document.createElementNS(SVG_NS, 'line');
-    line.setAttribute('x1', String(x));
-    line.setAttribute('y1', '16');
-    line.setAttribute('x2', String(x));
-    line.setAttribute('y2', '98');
-    gridGroup.appendChild(line);
-  }
-  svg.appendChild(gridGroup);
-
-  const areaPath = document.createElementNS(SVG_NS, 'path');
-  areaPath.setAttribute('fill', 'url(#trend-area-grad)');
-  svg.appendChild(areaPath);
-
-  const linePath = document.createElementNS(SVG_NS, 'path');
-  linePath.setAttribute('class', 'trend-line');
-  linePath.setAttribute('fill', 'none');
-  svg.appendChild(linePath);
-
-  const peakDot = document.createElementNS(SVG_NS, 'circle');
-  peakDot.setAttribute('r', '3');
-  peakDot.setAttribute('class', 'trend-peak-dot');
-  svg.appendChild(peakDot);
-
-  const peakPill = h('span', { className: 'trend-peak-pill text-mono', text: '0' });
-  const chartWrap = h('div', { className: 'trend-chart-wrap' }, [peakPill, svg]);
-
-  let lastLineD = '';
-
-  function update(series = []) {
-    const slots = series.length >= 2 ? series : [
-      { label: '00:00', tokens: 0 },
-      { label: '06:00', tokens: 0 },
-      { label: '12:00', tokens: 0 },
-    ];
-    let maxTokens = 0;
-    let peakIdx = 0;
-    for (let i = 0; i < slots.length; i++) {
-      const t = Number(slots[i].tokens || 0);
-      if (t >= maxTokens) {
-        maxTokens = t;
-        peakIdx = i;
-      }
-    }
-
-    const leftX = 12;
-    const rightX = 448;
-    const topY = 26;
-    const bottomY = 98;
-    const spanX = rightX - leftX;
-    const spanY = bottomY - topY;
-    const denom = Math.max(1, maxTokens);
-
-    const pts = slots.map((s, idx) => {
-      const x = leftX + (idx / Math.max(1, slots.length - 1)) * spanX;
-      const ratio = maxTokens > 0 ? Number(s.tokens || 0) / denom : 0;
-      const y = bottomY - ratio * spanY;
-      return { x, y };
-    });
-
-    const lineD = buildSmoothSplinePath(pts);
-    if (lineD !== lastLineD) {
-      lastLineD = lineD;
-      const areaD = `${lineD} L ${pts[pts.length - 1].x.toFixed(1)} ${bottomY} L ${pts[0].x.toFixed(1)} ${bottomY} Z`;
-      patchAttr(linePath, 'd', lineD);
-      patchAttr(areaPath, 'd', areaD);
-    }
-
-    const peakPt = pts[peakIdx] || { x: 230, y: bottomY };
-    patchAttr(peakDot, 'cx', peakPt.x.toFixed(1));
-    patchAttr(peakDot, 'cy', peakPt.y.toFixed(1));
-
-    patchText(peakPill, formatTokensPrecise(maxTokens));
-    const pctLeft = Math.max(8, Math.min(92, (peakPt.x / 460) * 100));
-    patchStyleVar(peakPill, '--peak-x', `${pctLeft.toFixed(1)}%`);
-  }
-
-  return { el: chartWrap, update };
-}
-
 export const ConsumptionView = defineComponent({
   name: 'ConsumptionView',
   setup({ onCleanup }) {
-    // Default to 'today' if store is on initial 'all' or keep user's selection
+    // --- 时间筛选栏：快速时间段分段控制器与自定义起止时间选择条 ---
     const timeFilterSwitch = SegmentedControl({
       ariaLabel: '消耗统计时间范围',
       modelValue: telemetryStore.getState().selectedTimeRange,
@@ -254,10 +101,10 @@ export const ConsumptionView = defineComponent({
       ]
     );
 
-    // --- Section 1: 用量概览 (Compact Integrated Overview) ---
+    // --- Section 1: 用量概览矩阵 (上层 3 列核心总量 + 下层 2 列输入/输出拆分 + 底部 4 段比例条) ---
     const dateSpanBadge = h('span', { className: 'cons-badge text-mono', text: '-- ~ --' });
     const heroTotalTokens = h('strong', { className: 'cons-hero-num text-mono', text: '0' });
-    const heroTotalCalls = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '0 调用' });
+    const heroTotalCalls = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '0 次' });
     const heroCostUsd = h('strong', { className: 'cons-hero-cost text-mono', text: '$0.00' });
     const heroCostCny = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '≈ ¥0' });
 
@@ -266,18 +113,18 @@ export const ConsumptionView = defineComponent({
 
     const inputSharePct = h('span', { className: 'text-mono', style: 'color: var(--ctx-input); font-weight: 600; font-size: 11.5px;', text: '0%' });
     const inputMainTokens = h('strong', { className: 'cons-mid-num text-mono', text: '0' });
-    const inputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '直接输入 0 · 缓存读取 0' });
+    const inputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '新输入 0 · 缓存 0' });
 
     const outputSharePct = h('span', { className: 'text-mono', style: 'color: var(--ctx-output); font-weight: 600; font-size: 11.5px;', text: '0%' });
     const outputMainTokens = h('strong', { className: 'cons-mid-num text-mono', text: '0' });
-    const outputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '内容生成 0 · 思考推理 0' });
+    const outputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '回复 0 · 思考 0' });
 
     const overviewSegBar = createFourSegmentBar();
 
     const overviewPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header cons-overview-head' }, [
         h('span', { className: 'panel-title' }, [
-          h('span', { text: '用量概览' }),
+          h('span', { text: '用量总览' }),
           dateSpanBadge,
         ]),
         timeFilterSwitch.el,
@@ -286,7 +133,7 @@ export const ConsumptionView = defineComponent({
       h('div', { className: 'cons-box cons-unified-matrix' }, [
         h('div', { className: 'cons-split-3' }, [
           h('div', { className: 'cons-col' }, [
-            h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '总 Token 数' }),
+            h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '总 Token' }),
             h('div', { className: 'cons-baseline' }, [heroTotalTokens, heroTotalCalls]),
           ]),
           h('div', { className: 'cons-col is-bordered-col' }, [
@@ -329,7 +176,7 @@ export const ConsumptionView = defineComponent({
       overviewSegBar.el,
     ]);
 
-    // --- Section 2: 历史趋势 (Historical Trend SVG Spline Area Chart) ---
+    // --- Section 2: 历史趋势 (SVG 三次贝塞尔平滑曲线图 + 首/中/末三时间锚点) ---
     const trendRangeBadge = h('span', { className: 'cons-badge', text: '全部时间' });
     const trendChart = createTrendAreaChart();
     const anchorStartTime = h('span', { className: 'text-muted text-mono', text: '00:00' });
@@ -341,7 +188,7 @@ export const ConsumptionView = defineComponent({
 
     const trendPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
-        h('span', { className: 'panel-title', text: '历史趋势' }),
+        h('span', { className: 'panel-title', text: '用量趋势' }),
         trendRangeBadge,
       ]),
       trendChart.el,
@@ -352,25 +199,25 @@ export const ConsumptionView = defineComponent({
       ]),
     ]);
 
-    // --- Section 3: 热门模型 (Popular Models Breakdown) ---
+    // --- Section 3: 模型排行列表 ---
     const modelsListEl = h('div', { className: 'cons-item-list' });
     const modelsPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
-        h('span', { className: 'panel-title', text: '热门模型' }),
+        h('span', { className: 'panel-title', text: '模型排行' }),
       ]),
       modelsListEl,
     ]);
 
-    // --- Section 4: 数据来源 ---
+    // --- Section 4: 客户端来源列表 ---
     const sourcesListEl = h('div', { className: 'cons-item-list' });
     const sourcesPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
-        h('span', { className: 'panel-title', text: '数据来源' }),
+        h('span', { className: 'panel-title', text: '客户端来源' }),
       ]),
       sourcesListEl,
     ]);
 
-    // --- Section 5: 按月细分 (12-Month Stacked Bar Chart) ---
+    // --- Section 5: 按月细分 (12 个月垂直 4 段堆叠柱状图) ---
     const monthlyYearBadge = h('span', { className: 'cons-badge text-mono', text: '2026' });
     const monthlyCols = Array.from({ length: 12 }, (_, idx) => {
       const costText = h('span', { className: 'month-cost text-mono', text: '' });
@@ -410,7 +257,7 @@ export const ConsumptionView = defineComponent({
 
     const monthlyPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
-        h('span', { className: 'panel-title', text: '按月细分' }),
+        h('span', { className: 'panel-title', text: '月度统计' }),
         monthlyYearBadge,
       ]),
       h(
@@ -457,6 +304,9 @@ export const ConsumptionView = defineComponent({
       className: 'view-pane',
     });
 
+    /**
+     * 创建热门模型或数据来源的通用单行 DOM 结构（含标题、占比胶囊、总量、费用、4 段条与底部分项脚标）。
+     */
     function createBreakdownItemRow() {
       const nameEl = h('strong', { className: 'cons-row-title' });
       const pctBadge = h('span', { className: 'cons-share-pill text-mono', text: '0%' });
@@ -514,6 +364,9 @@ export const ConsumptionView = defineComponent({
       };
     }
 
+    /**
+     * 增量更新热门模型或数据来源单行的指标文本与 4 段比例条宽度。
+     */
     function updateBreakdownItemRow(refs, item, grandTotalTokens, showTokensInHeader = true) {
       patchText(refs.nameEl, item.label || item.name || item.shortName || '—');
       const total = Number(item.totalTokens || 0);
@@ -546,6 +399,9 @@ export const ConsumptionView = defineComponent({
     let latestSlice = null;
     let isDirty = false;
 
+    /**
+     * 将遥测状态切片同步渲染至消费统计视图的 5 个子面板。
+     */
     function renderConsumptionData(slice) {
       if (!slice) return;
       timeFilterSwitch.setValue(slice.range);
@@ -561,7 +417,7 @@ export const ConsumptionView = defineComponent({
       const acct = preset?.account || cons.account || {};
       const rangeInfo = cons.selectedRange || {};
 
-      // 1. Overview
+      // 1. 同步用量概览矩阵与顶部 4 段比例条
       patchText(dateSpanBadge, formatDateSpanBadge(rangeInfo.startMs, rangeInfo.endMs));
       const totalTokens = Number(acct.totalTokens || 0);
       const inputTokens = Number(acct.inputTokens || 0);
@@ -572,7 +428,7 @@ export const ConsumptionView = defineComponent({
       const costUsd = Number(acct.costUsd || 0);
 
       patchText(heroTotalTokens, formatTokensPrecise(totalTokens));
-      patchText(heroTotalCalls, `${acct.calls || 0} 调用`);
+      patchText(heroTotalCalls, `${acct.calls || 0} 次`);
       patchText(heroCostUsd, formatUsd(costUsd, { unpricedCalls: acct.unpricedCalls }));
       patchText(heroCostCny, acct.unpricedCalls > 0 ? `${acct.unpricedCalls} 步费用待定` : formatCnyApprox(costUsd));
 
@@ -585,14 +441,14 @@ export const ConsumptionView = defineComponent({
       patchText(inputMainTokens, formatTokensPrecise(inputTokens));
       patchText(
         inputSubText,
-        `直接输入 ${formatTokensPrecise(inputTokens)} · 缓存读取 ${formatTokensPrecise(cacheTokens)}`
+        `新输入 ${formatTokensPrecise(inputTokens)} · 缓存 ${formatTokensPrecise(cacheTokens)}`
       );
 
       patchText(outputSharePct, `${outPct}%`);
       patchText(outputMainTokens, formatTokensPrecise(outputTokens));
       patchText(
         outputSubText,
-        `内容生成 ${formatTokensPrecise(responseTokens)} · 思考推理 ${formatTokensPrecise(thinkingTokens)}`
+        `回复 ${formatTokensPrecise(responseTokens)} · 思考 ${formatTokensPrecise(thinkingTokens)}`
       );
 
       overviewSegBar.update({
@@ -602,7 +458,7 @@ export const ConsumptionView = defineComponent({
         thinkingTokens,
       });
 
-      // 2. Historical Trend
+      // 2. 同步历史趋势 SVG 面积图与首/中/末三时间锚点
       patchText(trendRangeBadge, preset?.label || rangeInfo.label || '全部时间');
       const trendSeries = cons.trendSeries || [];
       trendChart.update(trendSeries);
@@ -618,7 +474,7 @@ export const ConsumptionView = defineComponent({
         patchText(anchorEndVal, formatTokensPrecise(last.tokens));
       }
 
-      // 3. Popular Models
+      // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账）
       const models = (slice.modelBreakdown || [])
         .slice()
         .sort((a, b) => (b.totalTokens || 0) - (a.totalTokens || 0));
@@ -632,7 +488,7 @@ export const ConsumptionView = defineComponent({
         updateRow: (refs, m) => updateBreakdownItemRow(refs, m, modelsTotalTok, true),
       });
 
-      // 4. Sources Breakdown
+      // 4. 同步数据来源列表
       const sources = cons.sourcesBreakdown || [];
       const sourcesTotalTok = sources.reduce((s, x) => s + Number(x.totalTokens || 0), 0);
       patchKeyedList(sourcesListEl, sources, {
@@ -642,7 +498,7 @@ export const ConsumptionView = defineComponent({
         updateRow: (refs, s) => updateBreakdownItemRow(refs, s, sourcesTotalTok, true),
       });
 
-      // 5. Monthly Breakdown
+      // 5. 同步 12 个月垂直堆叠柱状图（相对于年度峰值月缩放柱高，最低保留 8% 可视高度）
       const monthlyYear = cons.monthlyYear || new Date().getFullYear();
       const currentMonthIdx = new Date().getMonth();
       patchText(monthlyYearBadge, String(monthlyYear));

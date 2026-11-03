@@ -27,12 +27,36 @@ function isEquivalentTelemetry(prev, next) {
   if (!prev || !next) return false;
   if (prev === next) return true;
 
+  // 1. 比对系统设置项（模型显示策略、周预算模式与额度、插件自动更新开关）
   const pAct = prev.activeConversation;
   const nAct = next.activeConversation;
   if (prev.settings?.showUpstreamModel !== next.settings?.showUpstreamModel) return false;
   if (prev.settings?.weeklyLimitMode !== next.settings?.weeklyLimitMode) return false;
   if (prev.settings?.weeklyTokenBudget !== next.settings?.weeklyTokenBudget) return false;
   if (prev.settings?.weeklyCostBudget !== next.settings?.weeklyCostBudget) return false;
+  if (prev.settings?.autoUpdatePlugin !== next.settings?.autoUpdatePlugin) return false;
+
+  // 2. 比对云端状态（插件当前/最新版本、价格表版本与模型数量、同步/更新执行状态及错误信息）
+  const pCloud = prev.cloudStatus;
+  const nCloud = next.cloudStatus;
+  if (
+    pCloud?.currentPluginVersion !== nCloud?.currentPluginVersion ||
+    pCloud?.latestPluginVersion !== nCloud?.latestPluginVersion ||
+    pCloud?.updateAvailable !== nCloud?.updateAvailable ||
+    pCloud?.catalogVersion !== nCloud?.catalogVersion ||
+    pCloud?.source !== nCloud?.source ||
+    pCloud?.lastSyncedAtMs !== nCloud?.lastSyncedAtMs ||
+    pCloud?.modelCount !== nCloud?.modelCount ||
+    pCloud?.isSyncing !== nCloud?.isSyncing ||
+    pCloud?.isUpdating !== nCloud?.isUpdating ||
+    pCloud?.lastSyncError !== nCloud?.lastSyncError ||
+    pCloud?.lastUpdateError !== nCloud?.lastUpdateError ||
+    pCloud?.lastUpdateResult?.updatedAtMs !== nCloud?.lastUpdateResult?.updatedAtMs
+  ) {
+    return false;
+  }
+
+  // 3. 比对活跃会话的实时测速指标（会话 ID、步数、运行状态、TPS、TTFT、当前模型标识与单步费用）
   if (pAct?.cascadeId !== nAct?.cascadeId) return false;
   if (pAct?.stepCount !== nAct?.stepCount) return false;
   if (pAct?.isRunning !== nAct?.isRunning) return false;
@@ -40,6 +64,8 @@ function isEquivalentTelemetry(prev, next) {
   if (pAct?.latestTtftSec !== nAct?.latestTtftSec) return false;
   if (pAct?.activeModelShort !== nAct?.activeModelShort || pAct?.activeModelLabel !== nAct?.activeModelLabel) return false;
   if (pAct?.latestStepCostUsd !== nAct?.latestStepCostUsd || pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls) return false;
+
+  // 4. 比对 6 通道上下文窗口构成（总 Token 与消息/系统工具/MCP/Skill/系统提示词/用户规则）及近期步骤明细
   const pCtx = pAct?.context;
   const nCtx = nAct?.context;
   if (pCtx?.totalTokens !== nCtx?.totalTokens) return false;
@@ -57,6 +83,7 @@ function isEquivalentTelemetry(prev, next) {
         before.modelSource !== after.modelSource || before.costUsd !== after.costUsd) return false;
   }
 
+  // 5. 比对消费统计所选时间区间、当前会话累计消费与账号全局累计消费
   const pRange = prev.consumption?.selectedRange;
   const nRange = next.consumption?.selectedRange;
   if (pRange?.key !== nRange?.key) return false;
@@ -77,6 +104,7 @@ function isEquivalentTelemetry(prev, next) {
   if (pAcct?.costUsd !== nAcct?.costUsd) return false;
   if (pAcct?.unpricedCalls !== nAcct?.unpricedCalls) return false;
 
+  // 6. 比对历史趋势时间分桶序列
   const pTrend = prev.consumption?.trendSeries || [];
   const nTrend = next.consumption?.trendSeries || [];
   if (pTrend.length !== nTrend.length) return false;
@@ -86,6 +114,7 @@ function isEquivalentTelemetry(prev, next) {
     }
   }
 
+  // 7. 比对按模型汇总明细与数据来源汇总明细
   const pModels = prev.modelBreakdown || [];
   const nModels = next.modelBreakdown || [];
   if (pModels.length !== nModels.length) return false;
@@ -118,6 +147,7 @@ function isEquivalentTelemetry(prev, next) {
     }
   }
 
+  // 8. 比对账号订阅档位与动态多配额池（活跃池、周汇总及各配额池的 5h/周限额进度与重置时间）
   if (prev.account?.tierName !== next.account?.tierName || prev.account?.planName !== next.account?.planName) {
     return false;
   }
@@ -261,6 +291,25 @@ export async function saveSettingsPatch(patch) {
   }
   await callSidecarApi('/api/settings', { method: 'POST', body: patch });
   await fetchTelemetry({ force: true });
+}
+
+export async function triggerCloudSync() {
+  const res = await callSidecarApi('/api/cloud-sync', { method: 'POST', body: {} });
+  await fetchTelemetry({ force: true });
+  return res;
+}
+
+export async function triggerPluginUpdate() {
+  const res = await callSidecarApi('/api/plugin-update', { method: 'POST', body: {} });
+  if (res?.ok && res?.restarting) {
+    await new Promise((r) => setTimeout(r, 1100));
+    if (typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+      window.location.reload();
+      return res;
+    }
+  }
+  await fetchTelemetry({ force: true });
+  return res;
 }
 
 export function startAsyncTelemetryLoop(intervalMs = 2000) {

@@ -1,0 +1,220 @@
+/*
+ * 实时概览视图与通用面板卡片样式表 (views-overview.css).
+ * 包含：
+ * 1. 通用面板容器与标题头 (.panel, .panel-header, .panel-title, .panel-meta)
+ * 2. 4 格实时测速指标矩阵 (.telemetry-matrix, .matrix-cell, .cell-*)
+ * 3. 6 段上下文窗口进度条与配额填充条 (.progress-track, .progress-seg, .progress-fill)
+ * 4. 上下文双列图例网格与色块 (.ctx-legend-grid, .legend-*, .swatch)
+ * 5. 双栏布局网格与窄屏响应式断点 (.dual-grid)
+ */
+
+/* --- 1. 通用微边框面板卡片 (Architectural Precision Panels) --- */
+.panel {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.panel-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+/* --- 2. 4 格实时测速指标矩阵 (4-Cell Telemetry Matrix) --- */
+.telemetry-matrix {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  flex-shrink: 0;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-xs);
+  background: var(--border-hairline);
+  gap: 1px;
+  overflow: hidden;
+}
+
+.matrix-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px;
+  background: var(--surface-panel);
+  min-width: 0;
+}
+
+.cell-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.cell-value {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cell-value.accent-speed {
+  color: var(--metric-speed);
+}
+
+.cell-value.accent-ok {
+  color: var(--metric-ok);
+}
+
+.cell-sub {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- 3. 6 段上下文进度条与配额池填充条 (Context Segment Meter & Quota Progress Bars) --- */
+.progress-track {
+  width: 100%;
+  height: 6px;
+  background: var(--surface-track);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+  display: flex;
+}
+
+.progress-seg {
+  height: 100%;
+  width: var(--seg-w, 0%);
+  transition: width var(--dur-normal) var(--ease-fast);
+}
+
+.progress-seg.seg-messages {
+  background: var(--ctx-messages);
+}
+.progress-seg.seg-system-tools {
+  background: var(--ctx-system-tools);
+}
+.progress-seg.seg-mcp-tools {
+  background: var(--ctx-mcp-tools);
+}
+.progress-seg.seg-skills {
+  background: var(--ctx-skills);
+}
+.progress-seg.seg-system-prompt {
+  background: var(--ctx-system-prompt);
+}
+.progress-seg.seg-user-rules {
+  background: var(--ctx-user-rules);
+}
+.progress-seg.seg-cached {
+  background: var(--ctx-cached);
+}
+.progress-seg.seg-input {
+  background: var(--ctx-input);
+}
+.progress-seg.seg-thinking {
+  background: var(--ctx-thinking);
+}
+.progress-seg.seg-output {
+  background: var(--ctx-output);
+}
+
+.progress-fill {
+  height: 100%;
+  width: var(--fill-w, 0%);
+  background: var(--accent-primary);
+  transition: width var(--dur-normal) var(--ease-fast);
+}
+
+.progress-fill.tone-warn {
+  background: var(--metric-warn);
+}
+
+.progress-fill.tone-danger {
+  background: var(--metric-danger);
+}
+
+/* --- 4. 上下文双列图例网格 (Context 6-Channel Legend Grid) --- */
+.ctx-legend-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 5px var(--space-4);
+  padding: 2px 0 0 0;
+  background: transparent;
+  border: none;
+  font-size: 11.5px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.legend-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-secondary);
+}
+
+.swatch {
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+  display: inline-block;
+}
+
+.swatch.seg-messages { background: var(--ctx-messages); }
+.swatch.seg-system-tools { background: var(--ctx-system-tools); }
+.swatch.seg-mcp-tools { background: var(--ctx-mcp-tools); }
+.swatch.seg-skills { background: var(--ctx-skills); }
+.swatch.seg-system-prompt { background: var(--ctx-system-prompt); }
+.swatch.seg-user-rules { background: var(--ctx-user-rules); }
+.swatch.seg-cached { background: var(--ctx-cached); }
+.swatch.seg-input { background: var(--ctx-input); }
+.swatch.seg-thinking { background: var(--ctx-thinking); }
+.swatch.seg-output { background: var(--ctx-output); }
+
+/* --- 5. 双栏网格与窄视口响应式折叠 (Dual Grid & Responsive Breakpoints) --- */
+.dual-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+@media (max-width: 390px) {
+  .telemetry-matrix {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .dual-grid {
+    grid-template-columns: 1fr;
+  }
+}

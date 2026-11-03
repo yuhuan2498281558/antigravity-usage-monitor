@@ -1,0 +1,67 @@
+/*
+ * 步骤明细与模型汇总数据表样式表 (views-tables.css).
+ * 包含：
+ * 1. 表格专属自定义滚动容器修饰 (.table-scroll-host)
+ * 2. 表格滚动视口 (.table-viewport)
+ * 3. 粘性表头与紧凑高密度数据表 (.data-table)
+ */
+
+/* --- 1. 表格专属滚动容器与视口 (Table Scroll Host & Viewport) --- */
+.table-scroll-host {
+  flex: 1;
+  min-height: 0;
+  gap: 4px;
+  padding-top: 2px;
+  padding-right: 0;
+  border: none;
+  border-top: 1px solid var(--border-hairline);
+  border-radius: 0;
+  background: var(--surface-panel);
+}
+
+.table-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--surface-panel);
+}
+
+/* --- 2. 粘性表头数据表 (Sticky-Header Data Table) --- */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 5px 4px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-hairline);
+  white-space: nowrap;
+}
+
+.data-table th:first-child,
+.data-table td:first-child {
+  padding-left: 7px;
+}
+
+.data-table th:last-child,
+.data-table td:last-child {
+  text-align: right;
+  padding-right: 10px;
+}
+
+.data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.data-table tbody tr:hover {
+  background: var(--surface-hover);
+}

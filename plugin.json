@@ -1,12 +1,12 @@
 {
   "name": "usage-monitor",
   "displayName": "Usage & Speed Monitor",
-  "version": "1.3.1",
-  "description": "实时监控请求整体 TPS、原生首 Token 延迟(TTFT)、缓存命中率、上下文窗口占用、5h 限额以及今日/每周累计消耗。",
+  "version": "1.4.0",
+  "description": "实时查看生成速度、首字延迟、上下文占用、可用额度及历史用量。",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
-    "打开测速与额度监控面板查看当前会话性能",
-    "分析当前会话的 Token 消耗与缓存命中率",
-    "查看今日和本周各模型的累计 Token 与费用明细"
+    "打开用量监控面板",
+    "查看当前会话的 Token 消耗",
+    "查看今日和本周的模型用量明细"
   ]
 }

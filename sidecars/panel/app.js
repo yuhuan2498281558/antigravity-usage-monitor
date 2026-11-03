@@ -584,13 +584,13 @@ function formatUsd(amount, { precise = false, estimated = false, unpricedCalls =
 
 function speedReasonText(reason) {
   return ({
-    compaction: '上下文自动压缩，不纳入均速',
-    incomplete_or_invalid_timing: '未完成或计时缺失',
-    invalid_output_tokens: '输出 Token 数异常',
-    inconsistent_timing: '首字节响应与总耗时数据不一致',
-    short_timing: '计时过短，暂不测速',
-    short_sample: '样本太少，暂不计入均速',
-    legacy_cache: '缓存已过期，等待刷新',
+    compaction: '自动压缩步骤，不计入均速',
+    incomplete_or_invalid_timing: '生成未完成',
+    invalid_output_tokens: '无有效输出',
+    inconsistent_timing: '耗时数据异常',
+    short_timing: '耗时过短，不计入',
+    short_sample: '输出过短，不计入均速',
+    legacy_cache: '旧版缓存记录',
   })[reason] || '';
 }
 
@@ -709,9 +709,9 @@ async function callSidecarApi(path, { method = 'GET', body, abortKey = '' } = {}
 
 const VIEW_TABS = Object.freeze([
   { value: 'overview', label: '实时监控', icon: 'pulse' },
-  { value: 'consumption', label: '消耗统计', icon: 'chart-bar' },
-  { value: 'steps', label: '步骤明细', icon: 'table' },
-  { value: 'settings', label: '系统设置', icon: 'sliders' },
+  { value: 'consumption', label: '用量统计', icon: 'chart-bar' },
+  { value: 'steps', label: '调用明细', icon: 'table' },
+  { value: 'settings', label: '偏好设置', icon: 'sliders' },
 ]);
 
 const uiStore = createReactiveStore({
@@ -749,12 +749,36 @@ function isEquivalentTelemetry(prev, next) {
   if (!prev || !next) return false;
   if (prev === next) return true;
 
+  // 1. 比对系统设置项（模型显示策略、周预算模式与额度、插件自动更新开关）
   const pAct = prev.activeConversation;
   const nAct = next.activeConversation;
   if (prev.settings?.showUpstreamModel !== next.settings?.showUpstreamModel) return false;
   if (prev.settings?.weeklyLimitMode !== next.settings?.weeklyLimitMode) return false;
   if (prev.settings?.weeklyTokenBudget !== next.settings?.weeklyTokenBudget) return false;
   if (prev.settings?.weeklyCostBudget !== next.settings?.weeklyCostBudget) return false;
+  if (prev.settings?.autoUpdatePlugin !== next.settings?.autoUpdatePlugin) return false;
+
+  // 2. 比对云端状态（插件当前/最新版本、价格表版本与模型数量、同步/更新执行状态及错误信息）
+  const pCloud = prev.cloudStatus;
+  const nCloud = next.cloudStatus;
+  if (
+    pCloud?.currentPluginVersion !== nCloud?.currentPluginVersion ||
+    pCloud?.latestPluginVersion !== nCloud?.latestPluginVersion ||
+    pCloud?.updateAvailable !== nCloud?.updateAvailable ||
+    pCloud?.catalogVersion !== nCloud?.catalogVersion ||
+    pCloud?.source !== nCloud?.source ||
+    pCloud?.lastSyncedAtMs !== nCloud?.lastSyncedAtMs ||
+    pCloud?.modelCount !== nCloud?.modelCount ||
+    pCloud?.isSyncing !== nCloud?.isSyncing ||
+    pCloud?.isUpdating !== nCloud?.isUpdating ||
+    pCloud?.lastSyncError !== nCloud?.lastSyncError ||
+    pCloud?.lastUpdateError !== nCloud?.lastUpdateError ||
+    pCloud?.lastUpdateResult?.updatedAtMs !== nCloud?.lastUpdateResult?.updatedAtMs
+  ) {
+    return false;
+  }
+
+  // 3. 比对活跃会话的实时测速指标（会话 ID、步数、运行状态、TPS、TTFT、当前模型标识与单步费用）
   if (pAct?.cascadeId !== nAct?.cascadeId) return false;
   if (pAct?.stepCount !== nAct?.stepCount) return false;
   if (pAct?.isRunning !== nAct?.isRunning) return false;
@@ -762,6 +786,8 @@ function isEquivalentTelemetry(prev, next) {
   if (pAct?.latestTtftSec !== nAct?.latestTtftSec) return false;
   if (pAct?.activeModelShort !== nAct?.activeModelShort || pAct?.activeModelLabel !== nAct?.activeModelLabel) return false;
   if (pAct?.latestStepCostUsd !== nAct?.latestStepCostUsd || pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls) return false;
+
+  // 4. 比对 6 通道上下文窗口构成（总 Token 与消息/系统工具/MCP/Skill/系统提示词/用户规则）及近期步骤明细
   const pCtx = pAct?.context;
   const nCtx = nAct?.context;
   if (pCtx?.totalTokens !== nCtx?.totalTokens) return false;
@@ -779,6 +805,7 @@ function isEquivalentTelemetry(prev, next) {
         before.modelSource !== after.modelSource || before.costUsd !== after.costUsd) return false;
   }
 
+  // 5. 比对消费统计所选时间区间、当前会话累计消费与账号全局累计消费
   const pRange = prev.consumption?.selectedRange;
   const nRange = next.consumption?.selectedRange;
   if (pRange?.key !== nRange?.key) return false;
@@ -799,6 +826,7 @@ function isEquivalentTelemetry(prev, next) {
   if (pAcct?.costUsd !== nAcct?.costUsd) return false;
   if (pAcct?.unpricedCalls !== nAcct?.unpricedCalls) return false;
 
+  // 6. 比对历史趋势时间分桶序列
   const pTrend = prev.consumption?.trendSeries || [];
   const nTrend = next.consumption?.trendSeries || [];
   if (pTrend.length !== nTrend.length) return false;
@@ -808,6 +836,7 @@ function isEquivalentTelemetry(prev, next) {
     }
   }
 
+  // 7. 比对按模型汇总明细与数据来源汇总明细
   const pModels = prev.modelBreakdown || [];
   const nModels = next.modelBreakdown || [];
   if (pModels.length !== nModels.length) return false;
@@ -840,6 +869,7 @@ function isEquivalentTelemetry(prev, next) {
     }
   }
 
+  // 8. 比对账号订阅档位与动态多配额池（活跃池、周汇总及各配额池的 5h/周限额进度与重置时间）
   if (prev.account?.tierName !== next.account?.tierName || prev.account?.planName !== next.account?.planName) {
     return false;
   }
@@ -983,6 +1013,25 @@ async function saveSettingsPatch(patch) {
   }
   await callSidecarApi('/api/settings', { method: 'POST', body: patch });
   await fetchTelemetry({ force: true });
+}
+
+async function triggerCloudSync() {
+  const res = await callSidecarApi('/api/cloud-sync', { method: 'POST', body: {} });
+  await fetchTelemetry({ force: true });
+  return res;
+}
+
+async function triggerPluginUpdate() {
+  const res = await callSidecarApi('/api/plugin-update', { method: 'POST', body: {} });
+  if (res?.ok && res?.restarting) {
+    await new Promise((r) => setTimeout(r, 1100));
+    if (typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+      window.location.reload();
+      return res;
+    }
+  }
+  await fetchTelemetry({ force: true });
+  return res;
 }
 
 function startAsyncTelemetryLoop(intervalMs = 2000) {
@@ -1972,6 +2021,224 @@ const ContextSegmentMeter = defineComponent({
   },
 });
 
+// --- src/components/ui/FourSegmentBar.js ---
+/**
+ * @fileoverview 通用 4 段式 Token 构成比例条组件 (FourSegmentBar).
+ * 用于在消费概览、热门模型明细及数据来源明细中直观展示：
+ * 直接输入 (Input)、缓存读取 (Cached)、内容生成 (Output) 与思考推理 (Thinking) 的 Token 占比。
+ */
+
+
+/**
+ * 创建 4 段式水平比例进度条实例。
+ * 通过动态更新各分段节点的 `--seg-w` CSS 变量实现零重排平滑过渡。
+ *
+ * @returns {{
+ *   el: HTMLElement,
+ *   update: (metrics: {
+ *     inputTokens?: number,
+ *     cacheReadTokens?: number,
+ *     responseTokens?: number,
+ *     thinkingTokens?: number
+ *   }) => void
+ * }} 组件根元素与增量更新方法
+ */
+function createFourSegmentBar() {
+  const segInput = h('div', { className: 'progress-seg seg-input' });
+  const segCached = h('div', { className: 'progress-seg seg-cached' });
+  const segOutput = h('div', { className: 'progress-seg seg-output' });
+  const segThinking = h('div', { className: 'progress-seg seg-thinking' });
+  const el = h('div', { className: 'progress-track cons-seg-bar' }, [
+    segInput,
+    segCached,
+    segOutput,
+    segThinking,
+  ]);
+
+  /**
+   * 根据四类 Token 数量重新计算并写入各分段百分比宽度。
+   */
+  function update({ inputTokens = 0, cacheReadTokens = 0, responseTokens = 0, thinkingTokens = 0 }) {
+    const total = Math.max(1, inputTokens + cacheReadTokens + responseTokens + thinkingTokens);
+    patchStyleVar(segInput, '--seg-w', `${((inputTokens / total) * 100).toFixed(2)}%`);
+    patchStyleVar(segCached, '--seg-w', `${((cacheReadTokens / total) * 100).toFixed(2)}%`);
+    patchStyleVar(segOutput, '--seg-w', `${((responseTokens / total) * 100).toFixed(2)}%`);
+    patchStyleVar(segThinking, '--seg-w', `${((thinkingTokens / total) * 100).toFixed(2)}%`);
+  }
+
+  return { el, update };
+}
+
+// --- src/components/charts/TrendAreaChart.js ---
+/**
+ * @fileoverview 纯 SVG 三次贝塞尔平滑曲线趋势图组件 (TrendAreaChart).
+ * 负责将按时间分桶的 Token 消耗序列渲染为带垂直渐变填充、虚线参考网格、
+ * 峰值描点与自适应防溢出的顶部峰值胶囊标签的面积图。
+ */
+
+
+/**
+ * 将二维采样点序列转换为水平张力平滑的三次贝塞尔曲线 SVG 路径 (`M ... C ...`)。
+ * 控制点沿 X 轴取相邻点间距的 `0.45` 张力系数，Y 轴与各自端点齐平，
+ * 保证曲线在极值点处平缓过渡且不会产生上下过冲 (Overshoot)。
+ *
+ * @param {Array<{ x: number, y: number }>} points SVG 坐标系下的采样点数组
+ * @returns {string} SVG `<path>` 的 `d` 属性字符串
+ */
+function buildSmoothSplinePath(points) {
+  if (!points.length) return '';
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+  let d = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i];
+    const p1 = points[i + 1];
+    const cpx1 = p0.x + (p1.x - p0.x) * 0.45;
+    const cpx2 = p1.x - (p1.x - p0.x) * 0.45;
+    d += ` C ${cpx1.toFixed(1)} ${p0.y.toFixed(1)}, ${cpx2.toFixed(1)} ${p1.y.toFixed(1)}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
+  }
+  return d;
+}
+
+/**
+ * 创建 SVG 历史趋势平滑面积图组件。
+ *
+ * SVG 视口坐标系 (`viewBox="0 0 460 116"`) 布局约定：
+ * - 水平绘图区：`leftX = 12` 至 `rightX = 448`（总跨度 `spanX = 436`），左右预留边距容纳端点圆点描边；
+ * - 垂直绘图区：顶部峰值线 `topY = 26` 至底部零基线 `bottomY = 98`（总跨度 `spanY = 72`），
+ *   顶部预留 26px 空间给 HTML 峰值胶囊 (`.trend-peak-pill`)。
+ *
+ * @returns {{
+ *   el: HTMLElement,
+ *   update: (series?: Array<{ label: string, tokens: number }>) => void
+ * }} 图表容器节点与序列更新方法
+ */
+function createTrendAreaChart() {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 460 116');
+  svg.setAttribute('class', 'trend-svg');
+  svg.setAttribute('aria-hidden', 'true');
+
+  // 垂直线性渐变：由顶部 36% 不透明度的主题色平滑衰减至底部全透明
+  const defs = document.createElementNS(SVG_NS, 'defs');
+  const grad = document.createElementNS(SVG_NS, 'linearGradient');
+  grad.setAttribute('id', 'trend-area-grad');
+  grad.setAttribute('x1', '0');
+  grad.setAttribute('y1', '0');
+  grad.setAttribute('x2', '0');
+  grad.setAttribute('y2', '1');
+
+  const stop1 = document.createElementNS(SVG_NS, 'stop');
+  stop1.setAttribute('offset', '0%');
+  stop1.setAttribute('stop-color', 'var(--ctx-cached)');
+  stop1.setAttribute('stop-opacity', '0.36');
+
+  const stop2 = document.createElementNS(SVG_NS, 'stop');
+  stop2.setAttribute('offset', '100%');
+  stop2.setAttribute('stop-color', 'var(--ctx-cached)');
+  stop2.setAttribute('stop-opacity', '0.0');
+
+  grad.appendChild(stop1);
+  grad.appendChild(stop2);
+  defs.appendChild(grad);
+  svg.appendChild(defs);
+
+  // 背景辅助参考网格线：3 条水平分位线 + 3 条垂直时间锚点分割线
+  const gridGroup = document.createElementNS(SVG_NS, 'g');
+  gridGroup.setAttribute('class', 'trend-grid');
+  for (const y of [26, 62, 98]) {
+    const line = document.createElementNS(SVG_NS, 'line');
+    line.setAttribute('x1', '10');
+    line.setAttribute('y1', String(y));
+    line.setAttribute('x2', '450');
+    line.setAttribute('y2', String(y));
+    gridGroup.appendChild(line);
+  }
+  for (const x of [118, 230, 342]) {
+    const line = document.createElementNS(SVG_NS, 'line');
+    line.setAttribute('x1', String(x));
+    line.setAttribute('y1', '16');
+    line.setAttribute('x2', String(x));
+    line.setAttribute('y2', '98');
+    gridGroup.appendChild(line);
+  }
+  svg.appendChild(gridGroup);
+
+  const areaPath = document.createElementNS(SVG_NS, 'path');
+  areaPath.setAttribute('fill', 'url(#trend-area-grad)');
+  svg.appendChild(areaPath);
+
+  const linePath = document.createElementNS(SVG_NS, 'path');
+  linePath.setAttribute('class', 'trend-line');
+  linePath.setAttribute('fill', 'none');
+  svg.appendChild(linePath);
+
+  const peakDot = document.createElementNS(SVG_NS, 'circle');
+  peakDot.setAttribute('r', '3');
+  peakDot.setAttribute('class', 'trend-peak-dot');
+  svg.appendChild(peakDot);
+
+  const peakPill = h('span', { className: 'trend-peak-pill text-mono', text: '0' });
+  const chartWrap = h('div', { className: 'trend-chart-wrap' }, [peakPill, svg]);
+
+  let lastLineD = '';
+
+  /**
+   * 根据最新时间分桶序列重绘平滑曲线、闭合渐变区域以及最高峰标记位置。
+   */
+  function update(series = []) {
+    const slots = series.length >= 2 ? series : [
+      { label: '00:00', tokens: 0 },
+      { label: '06:00', tokens: 0 },
+      { label: '12:00', tokens: 0 },
+    ];
+    let maxTokens = 0;
+    let peakIdx = 0;
+    for (let i = 0; i < slots.length; i++) {
+      const t = Number(slots[i].tokens || 0);
+      if (t >= maxTokens) {
+        maxTokens = t;
+        peakIdx = i;
+      }
+    }
+
+    // SVG 绘图区边界与跨度参数（Y 轴向下递增，因此数值越大对应的 y 坐标越小）
+    const leftX = 12;
+    const rightX = 448;
+    const topY = 26;
+    const bottomY = 98;
+    const spanX = rightX - leftX;
+    const spanY = bottomY - topY;
+    const denom = Math.max(1, maxTokens);
+
+    const pts = slots.map((s, idx) => {
+      const x = leftX + (idx / Math.max(1, slots.length - 1)) * spanX;
+      const ratio = maxTokens > 0 ? Number(s.tokens || 0) / denom : 0;
+      const y = bottomY - ratio * spanY;
+      return { x, y };
+    });
+
+    // 仅在曲线路径发生变化时更新 DOM 属性，避免无意义的 SVG 重绘
+    const lineD = buildSmoothSplinePath(pts);
+    if (lineD !== lastLineD) {
+      lastLineD = lineD;
+      const areaD = `${lineD} L ${pts[pts.length - 1].x.toFixed(1)} ${bottomY} L ${pts[0].x.toFixed(1)} ${bottomY} Z`;
+      patchAttr(linePath, 'd', lineD);
+      patchAttr(areaPath, 'd', areaD);
+    }
+
+    // 定位峰值圆点，并将顶部峰值气泡水平位置钳制在 [8%, 92%] 区间内以防贴边裁切
+    const peakPt = pts[peakIdx] || { x: 230, y: bottomY };
+    patchAttr(peakDot, 'cx', peakPt.x.toFixed(1));
+    patchAttr(peakDot, 'cy', peakPt.y.toFixed(1));
+
+    patchText(peakPill, formatTokensPrecise(maxTokens));
+    const pctLeft = Math.max(8, Math.min(92, (peakPt.x / 460) * 100));
+    patchStyleVar(peakPill, '--peak-x', `${pctLeft.toFixed(1)}%`);
+  }
+
+  return { el: chartWrap, update };
+}
+
 // --- src/components/layout/TopSessionHeader.js ---
 /**
  * @fileoverview Row 1 of the compact top bar:
@@ -1986,13 +2253,49 @@ const TopSessionHeader = defineComponent({
     const convSelect = CustomSelect({
       modelValue: telemetryStore.getState().selectedConversationId,
       icon: 'bolt',
-      placeholder: '自动跟随最新会话',
-      options: [{ value: '', label: '自动跟随最新会话' }],
+      placeholder: '跟随最新会话',
+      options: [{ value: '', label: '跟随最新会话' }],
       onUpdateModelValue: (nextConvId) => {
         telemetryStore.setState({ selectedConversationId: nextConvId });
         fetchTelemetry({ force: false });
       },
     });
+
+    const updateBtnIcon = createSvgIcon('arrow-down', { size: 11 });
+    const updateBtnText = h('span', { text: '有新版本' });
+    let isHeaderUpdating = false;
+    const updateBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'update-badge-btn',
+        hidden: true,
+        'aria-label': '发现新版本，点击升级',
+        onClick: async () => {
+          if (isHeaderUpdating) return;
+          isHeaderUpdating = true;
+          patchText(updateBtnText, '升级中…');
+          patchAttr(updateBtn, 'disabled', true);
+          try {
+            const res = await triggerPluginUpdate();
+            if (!res?.ok) {
+              uiStore.setState({ activeView: 'settings' });
+            }
+          } catch {
+            uiStore.setState({ activeView: 'settings' });
+          } finally {
+            isHeaderUpdating = false;
+            patchAttr(updateBtn, 'disabled', false);
+            const cs = telemetryStore.getState().telemetry?.cloudStatus;
+            patchText(
+              updateBtnText,
+              cs?.latestPluginVersion ? `升级 v${cs.latestPluginVersion}` : '有新版本'
+            );
+          }
+        },
+      },
+      [updateBtnIcon, updateBtnText]
+    );
 
     const statusIcon = createSvgIcon('pulse', { size: 12 });
     const statusText = h('span', { text: '实时 2s' });
@@ -2003,7 +2306,7 @@ const TopSessionHeader = defineComponent({
       {
         type: 'button',
         className: 'icon-btn',
-        'aria-label': '立即刷新额度与测速数据',
+        'aria-label': '刷新数据',
         onClick: () => fetchTelemetry({ force: true }),
       },
       [createSvgIcon('refresh', { size: 13 })]
@@ -2011,7 +2314,7 @@ const TopSessionHeader = defineComponent({
 
     const headerEl = h('header', { className: 'session-header' }, [
       h('div', { className: 'session-left' }, [convSelect.el]),
-      h('div', { className: 'session-right' }, [statusTag, refreshBtn]),
+      h('div', { className: 'session-right' }, [updateBtn, statusTag, refreshBtn]),
     ]);
 
     const unsubTelemetry = telemetryStore.subscribe(
@@ -2021,10 +2324,11 @@ const TopSessionHeader = defineComponent({
         conversations: st.telemetry?.conversations,
         isRunning: st.telemetry?.activeConversation?.isRunning,
         quotaMeta: st.telemetry?.quotas?.meta,
+        cloudStatus: st.telemetry?.cloudStatus,
       }),
       (slice) => {
         const convs = slice.conversations || [];
-        const latestTitle = convs[0]?.title ? `自动跟随 (${convs[0].title})` : '自动跟随最新会话';
+        const latestTitle = convs[0]?.title ? `最新 (${convs[0].title})` : '跟随最新会话';
         const options = [
           { value: '', label: latestTitle, meta: convs[0] ? `${convs[0].stepCount}步` : '' },
           ...convs.map((c) => ({
@@ -2037,6 +2341,17 @@ const TopSessionHeader = defineComponent({
           modelValue: slice.selectedConversationId,
           options,
         });
+
+        const hasUpdate = Boolean(slice.cloudStatus?.updateAvailable);
+        patchAttr(updateBtn, 'hidden', !hasUpdate);
+        if (hasUpdate && !isHeaderUpdating) {
+          patchText(
+            updateBtnText,
+            slice.cloudStatus?.latestPluginVersion
+              ? `升级 v${slice.cloudStatus.latestPluginVersion}`
+              : '有新版本'
+          );
+        }
 
         const isSyncing = slice.syncState === 'syncing';
         const isSynced = slice.syncState === 'synced';
@@ -2114,16 +2429,19 @@ const TopSessionHeader = defineComponent({
 // --- src/views/LiveOverviewView.js ---
 /**
  * @fileoverview View 1: LiveOverviewView (实时监控视图).
- * Displays real-time TPS, TTFT, weighted mean speed, 4-channel Context Window
- * breakdown automatically anchored to the current model's compaction baseline,
- * and official 5h/weekly quota pools for both Gemini and Claude & GPT.
+ * 负责展示当前活跃会话的核心实时遥测指标：
+ * 1. 4 格实时测速矩阵：实时吞吐 (TPS)、首 Token 延迟 (TTFT)、会话有效加权均速与本步费用/缓存命中率；
+ * 2. 6 通道上下文窗口构成：自动锚定当前模型的上下文压缩基线 (`compactionLimitTokens`)，
+ *    通过 6 段进度条与双列图例展示消息、系统工具、MCP 工具、Skill、系统提示词与用户规则的 Token 占用；
+ * 3. 动态多配额池监控卡片：支持 Gemini、Pro 订阅专属独立 Argon 周配额池、Claude & GPT 等动态配额池，
+ *    自动适配 5h/每周双窗口或单窗口模式，并展示本机周累计消耗与 AI 积分脚标。
  */
 
 
 const LiveOverviewView = defineComponent({
   name: 'LiveOverviewView',
   setup({ onCleanup }) {
-    // 1. 4-Cell Real-time Telemetry Matrix
+    // --- 1. 4 格实时测速矩阵 (实时吞吐 / 首Token / 会话均速 / 本步消费) ---
     const tpsVal = h('strong', { className: 'cell-value accent-speed', text: '—' });
     const tpsSub = h('span', { className: 'cell-sub', text: '模型未知' });
     const pulseDot = createSvgIcon('dot', { size: 10 });
@@ -2137,15 +2455,15 @@ const LiveOverviewView = defineComponent({
     const costVal = h('strong', { className: 'cell-value', text: '$0.000' });
     const cacheSub = h('span', { className: 'cell-sub accent-ok', text: '缓存 0% · 累计 $0.00' });
 
-    const matrixEl = h('section', { className: 'telemetry-matrix', 'aria-label': '核心测速指标' }, [
+    const matrixEl = h('section', { className: 'telemetry-matrix', 'aria-label': '实时指标' }, [
       h('div', { className: 'matrix-cell' }, [
-        h('div', { className: 'cell-label' }, [h('span', { text: '实时吞吐' }), pulseDot]),
+        h('div', { className: 'cell-label' }, [h('span', { text: '输出速度' }), pulseDot]),
         tpsVal,
         tpsSub,
       ]),
       h('div', { className: 'matrix-cell' }, [
         h('div', { className: 'cell-label' }, [
-          h('span', { text: '首Token' }),
+          h('span', { text: '首字延迟' }),
           createSvgIcon('clock', { size: 11 }),
         ]),
         ttftVal,
@@ -2153,7 +2471,7 @@ const LiveOverviewView = defineComponent({
       ]),
       h('div', { className: 'matrix-cell' }, [
         h('div', { className: 'cell-label' }, [
-          h('span', { text: '会话均速' }),
+          h('span', { text: '平均速度' }),
           createSvgIcon('pulse', { size: 11 }),
         ]),
         avgVal,
@@ -2161,7 +2479,7 @@ const LiveOverviewView = defineComponent({
       ]),
       h('div', { className: 'matrix-cell' }, [
         h('div', { className: 'cell-label' }, [
-          h('span', { text: '本步消费' }),
+          h('span', { text: '本次费用' }),
           createSvgIcon('bolt', { size: 11 }),
         ]),
         costVal,
@@ -2169,7 +2487,7 @@ const LiveOverviewView = defineComponent({
       ]),
     ]);
 
-    // 2. Context Window 6-Segment Panel (Auto Compaction Baseline)
+    // --- 2. 6 段上下文窗口构成面板（自动锚定模型上下文压缩基线） ---
     const ctxSummaryText = h('span', { className: 'text-mono', text: '0 / 256.0k (0%)' });
     const ctxSegmentBar = ContextSegmentMeter({ context: {} });
 
@@ -2184,7 +2502,7 @@ const LiveOverviewView = defineComponent({
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
           createSvgIcon('layers', { size: 13 }),
-          h('span', { text: '上下文窗口构成' }),
+          h('span', { text: '上下文占用' }),
         ]),
         h('span', { className: 'panel-meta' }, [ctxSummaryText]),
       ]),
@@ -2235,10 +2553,13 @@ const LiveOverviewView = defineComponent({
       ]),
     ]);
 
-    // 3. Official 5h & Weekly Quotas Panel (Dynamic Pools: Gemini, Argon on Pro, Claude & GPT, etc.)
+    // --- 3. 官方动态多配额池监控面板 (Gemini / Pro 独立 Argon 池 / Claude & GPT) ---
     const tierBadge = h('span', { className: 'panel-meta', text: 'Google AI · Pro' });
     const poolsListEl = h('div', { style: 'display: flex; flex-direction: column; gap: 0;' });
 
+    /**
+     * 创建单个配额池的 DOM 行结构，内含 5h 限额与每周限额两个可独立显隐的子窗口进度条。
+     */
     function createPoolQuotaRow() {
       const title5h = h('span', { text: '5h 限额' });
       const meta5h = h('span', { className: 'panel-meta text-mono', text: '--' });
@@ -2267,14 +2588,14 @@ const LiveOverviewView = defineComponent({
       };
     }
 
-    const wkFootLeft = h('span', { className: 'text-muted', text: '本周本机: 0 ($0.00)' });
+    const wkFootLeft = h('span', { className: 'text-muted', text: '本周累计: 0 ($0.00)' });
     const wkFootRight = h('span', { className: 'text-muted', text: '' });
 
     const quotaPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
           createSvgIcon('pulse', { size: 13 }),
-          h('span', { text: '官方配额与周期监控' }),
+          h('span', { text: '可用额度' }),
         ]),
         tierBadge,
       ]),
@@ -2297,6 +2618,12 @@ const LiveOverviewView = defineComponent({
       className: 'view-pane',
     });
 
+    /**
+     * 同步单个配额池行的 5h 与每周窗口状态：
+     * - 对于仅有周限额的独立配额池（例如 Google AI Pro 账号下的 Argon 池或 Plus 档位）自动隐藏 5h 行；
+     * - 对于仅有 5h 限额的配额池自动隐藏每周行；
+     * - 若两个窗口均无数据（如首次拉取失败），则同时保留两行并显示“获取失败 (--%)”占位提示。
+     */
     function syncPoolQuotaRow(refs, item, idx, rowEl) {
       const { poolData, poolLabel, fallbackWeekly, isActivePool } = item;
       patchAttr(
@@ -2321,8 +2648,7 @@ const LiveOverviewView = defineComponent({
       const usedWkVal = hasWk ? Number(wkUsedRaw) : 0;
       const remWkVal = hasWk ? Number(wkRemRaw) : 0;
 
-      // Hide non-applicable window on weekly-only pools (e.g. Pro Argon pool or Plus tier)
-      // or 5h-only pools, while still showing both rows with error state if both failed.
+      // 在单窗口配额池（如 Pro 账号独立 Argon 周配额池或仅 5h 池）中隐藏不适用的另一窗口
       const hide5h = !has5h && hasWk;
       const hideWk = !hasWk && has5h;
       refs.row5h.hidden = hide5h;
@@ -2364,13 +2690,16 @@ const LiveOverviewView = defineComponent({
     let latestData = null;
     let isDirty = false;
 
+    /**
+     * 将最新遥测载荷渲染至 4 格测速矩阵、6 段上下文进度条与动态配额池列表。
+     */
     function renderData(data) {
       if (!data) return;
       const active = data.activeConversation || {};
       const ctx = active.context || {};
       const quotas = data.quotas || {};
 
-      // 1. Matrix
+      // 1. 更新 4 格实时测速矩阵
       patchClasses(pulseDot, { 'is-pulsing': Boolean(active.isRunning) });
       patchText(tpsVal, formatMetric(active.latestTokPerSec, ' tok/s'));
       const reason = speedReasonText(active.latestSpeedReason);
@@ -2392,7 +2721,7 @@ const LiveOverviewView = defineComponent({
         `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
       );
 
-      // 2. Context (Auto Compaction Baseline)
+      // 2. 更新 6 段上下文窗口构成（优先使用模型自动压缩基线 compactionLimitTokens）
       const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000);
       const totalTokens = Number(ctx.totalTokens || 0);
       const usedPct =
@@ -2409,7 +2738,7 @@ const LiveOverviewView = defineComponent({
       patchText(bdSystemPrompt, formatTokens(ctx.systemPromptTokens || 0));
       patchText(bdUserRules, formatTokens(ctx.userRulesTokens || 0));
 
-      // 3. Quotas (Dynamic Pools: Gemini, Argon on Pro, Claude & GPT, etc.)
+      // 3. 更新动态配额池列表（支持 Gemini、Pro 独立 Argon 池、Claude & GPT 等）
       patchText(
         tierBadge,
         `${data.account?.tierName || 'Google AI'} · ${data.account?.planName || 'Pro'}`
@@ -2451,13 +2780,13 @@ const LiveOverviewView = defineComponent({
 
       patchText(
         wkFootLeft,
-        `本周本机: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0, { unpricedCalls: weekly.unpricedCalls })})`
+        `本周累计: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0, { unpricedCalls: weekly.unpricedCalls })})`
       );
       patchText(
         wkFootRight,
         data.account?.aiCredits > 0
           ? `AI 积分: ${data.account.aiCredits}`
-          : `本机调用: ${weekly.calls || 0} 步`
+          : `本周调用: ${weekly.calls || 0} 次`
       );
 
       viewScrollbar.refresh();
@@ -2505,15 +2834,17 @@ const LiveOverviewView = defineComponent({
 // --- src/views/ConsumptionView.js ---
 /**
  * @fileoverview View 2: ConsumptionView (全景消耗统计视图).
- * Implements the 5-part analytics layout:
- * 1. 用量概览 (Total Tokens k/M/B, USD + CNY approx, Input/Output split, Cache Hit % + Saved Cost badge, 4-color bar)
- * 2. 历史趋势 (Pure SVG smooth cubic-bezier spline area chart with peak callout and 3 time anchors)
- * 3. 热门模型 (Per-model share badge, 4-segment bar, and Input/Cache/Output/Thinking breakdown)
- * 4. 数据来源 (SOURCES breakdown with 4-segment bar)
- * 5. 按月细分 (12-month stacked vertical bar chart with cost, stacked bars, and k/M/B totals)
+ * 采用 5 段式分析布局展示指定时间窗口内的全量 Token 与费用消耗：
+ * 1. 用量概览：支持预设时间段与自定义区间筛选，通过 3+2 组合矩阵展示总 Token/调用次数、
+ *    USD/CNY 预估费用、缓存命中率与命中量、输入/输出细分占比，以及底部 4 段比例条 (`FourSegmentBar`)。
+ * 2. 历史趋势：基于 `TrendAreaChart` 渲染纯 SVG 三次贝塞尔平滑曲线面积图、峰值气泡与首/中/末三时间锚点。
+ * 3. 热门模型：按 Token 总量降序展示各模型的消耗占比徽章、4 段构成条及输入/缓存/输出/思考/调用明细。
+ * 4. 数据来源：按调用来源聚合展示 Token 构成、占比与费用明细。
+ * 5. 按月细分：12 个月垂直 4 段堆叠柱状图，直观对比全年各月费用、Token 总量与缓存/思考结构。
  */
 
 
+/** 消耗统计顶栏支持的时间范围预设项 */
 const TIME_RANGE_OPTIONS = [
   { value: 'today', label: '今天' },
   { value: '24h', label: '1天' },
@@ -2524,167 +2855,10 @@ const TIME_RANGE_OPTIONS = [
   { value: 'custom', label: '自定义' },
 ];
 
-function createFourSegmentBar() {
-  const segInput = h('div', { className: 'progress-seg seg-input' });
-  const segCached = h('div', { className: 'progress-seg seg-cached' });
-  const segOutput = h('div', { className: 'progress-seg seg-output' });
-  const segThinking = h('div', { className: 'progress-seg seg-thinking' });
-  const el = h('div', { className: 'progress-track cons-seg-bar' }, [
-    segInput,
-    segCached,
-    segOutput,
-    segThinking,
-  ]);
-
-  function update({ inputTokens = 0, cacheReadTokens = 0, responseTokens = 0, thinkingTokens = 0 }) {
-    const total = Math.max(1, inputTokens + cacheReadTokens + responseTokens + thinkingTokens);
-    patchStyleVar(segInput, '--seg-w', `${((inputTokens / total) * 100).toFixed(2)}%`);
-    patchStyleVar(segCached, '--seg-w', `${((cacheReadTokens / total) * 100).toFixed(2)}%`);
-    patchStyleVar(segOutput, '--seg-w', `${((responseTokens / total) * 100).toFixed(2)}%`);
-    patchStyleVar(segThinking, '--seg-w', `${((thinkingTokens / total) * 100).toFixed(2)}%`);
-  }
-
-  return { el, update };
-}
-
-function buildSmoothSplinePath(points) {
-  if (!points.length) return '';
-  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
-  let d = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[i];
-    const p1 = points[i + 1];
-    const cpx1 = p0.x + (p1.x - p0.x) * 0.45;
-    const cpx2 = p1.x - (p1.x - p0.x) * 0.45;
-    d += ` C ${cpx1.toFixed(1)} ${p0.y.toFixed(1)}, ${cpx2.toFixed(1)} ${p1.y.toFixed(1)}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
-  }
-  return d;
-}
-
-function createTrendAreaChart() {
-  const svg = document.createElementNS(SVG_NS, 'svg');
-  svg.setAttribute('viewBox', '0 0 460 116');
-  svg.setAttribute('class', 'trend-svg');
-  svg.setAttribute('aria-hidden', 'true');
-
-  const defs = document.createElementNS(SVG_NS, 'defs');
-  const grad = document.createElementNS(SVG_NS, 'linearGradient');
-  grad.setAttribute('id', 'trend-area-grad');
-  grad.setAttribute('x1', '0');
-  grad.setAttribute('y1', '0');
-  grad.setAttribute('x2', '0');
-  grad.setAttribute('y2', '1');
-
-  const stop1 = document.createElementNS(SVG_NS, 'stop');
-  stop1.setAttribute('offset', '0%');
-  stop1.setAttribute('stop-color', 'var(--ctx-cached)');
-  stop1.setAttribute('stop-opacity', '0.36');
-
-  const stop2 = document.createElementNS(SVG_NS, 'stop');
-  stop2.setAttribute('offset', '100%');
-  stop2.setAttribute('stop-color', 'var(--ctx-cached)');
-  stop2.setAttribute('stop-opacity', '0.0');
-
-  grad.appendChild(stop1);
-  grad.appendChild(stop2);
-  defs.appendChild(grad);
-  svg.appendChild(defs);
-
-  // Subtle grid lines
-  const gridGroup = document.createElementNS(SVG_NS, 'g');
-  gridGroup.setAttribute('class', 'trend-grid');
-  for (const y of [26, 62, 98]) {
-    const line = document.createElementNS(SVG_NS, 'line');
-    line.setAttribute('x1', '10');
-    line.setAttribute('y1', String(y));
-    line.setAttribute('x2', '450');
-    line.setAttribute('y2', String(y));
-    gridGroup.appendChild(line);
-  }
-  for (const x of [118, 230, 342]) {
-    const line = document.createElementNS(SVG_NS, 'line');
-    line.setAttribute('x1', String(x));
-    line.setAttribute('y1', '16');
-    line.setAttribute('x2', String(x));
-    line.setAttribute('y2', '98');
-    gridGroup.appendChild(line);
-  }
-  svg.appendChild(gridGroup);
-
-  const areaPath = document.createElementNS(SVG_NS, 'path');
-  areaPath.setAttribute('fill', 'url(#trend-area-grad)');
-  svg.appendChild(areaPath);
-
-  const linePath = document.createElementNS(SVG_NS, 'path');
-  linePath.setAttribute('class', 'trend-line');
-  linePath.setAttribute('fill', 'none');
-  svg.appendChild(linePath);
-
-  const peakDot = document.createElementNS(SVG_NS, 'circle');
-  peakDot.setAttribute('r', '3');
-  peakDot.setAttribute('class', 'trend-peak-dot');
-  svg.appendChild(peakDot);
-
-  const peakPill = h('span', { className: 'trend-peak-pill text-mono', text: '0' });
-  const chartWrap = h('div', { className: 'trend-chart-wrap' }, [peakPill, svg]);
-
-  let lastLineD = '';
-
-  function update(series = []) {
-    const slots = series.length >= 2 ? series : [
-      { label: '00:00', tokens: 0 },
-      { label: '06:00', tokens: 0 },
-      { label: '12:00', tokens: 0 },
-    ];
-    let maxTokens = 0;
-    let peakIdx = 0;
-    for (let i = 0; i < slots.length; i++) {
-      const t = Number(slots[i].tokens || 0);
-      if (t >= maxTokens) {
-        maxTokens = t;
-        peakIdx = i;
-      }
-    }
-
-    const leftX = 12;
-    const rightX = 448;
-    const topY = 26;
-    const bottomY = 98;
-    const spanX = rightX - leftX;
-    const spanY = bottomY - topY;
-    const denom = Math.max(1, maxTokens);
-
-    const pts = slots.map((s, idx) => {
-      const x = leftX + (idx / Math.max(1, slots.length - 1)) * spanX;
-      const ratio = maxTokens > 0 ? Number(s.tokens || 0) / denom : 0;
-      const y = bottomY - ratio * spanY;
-      return { x, y };
-    });
-
-    const lineD = buildSmoothSplinePath(pts);
-    if (lineD !== lastLineD) {
-      lastLineD = lineD;
-      const areaD = `${lineD} L ${pts[pts.length - 1].x.toFixed(1)} ${bottomY} L ${pts[0].x.toFixed(1)} ${bottomY} Z`;
-      patchAttr(linePath, 'd', lineD);
-      patchAttr(areaPath, 'd', areaD);
-    }
-
-    const peakPt = pts[peakIdx] || { x: 230, y: bottomY };
-    patchAttr(peakDot, 'cx', peakPt.x.toFixed(1));
-    patchAttr(peakDot, 'cy', peakPt.y.toFixed(1));
-
-    patchText(peakPill, formatTokensPrecise(maxTokens));
-    const pctLeft = Math.max(8, Math.min(92, (peakPt.x / 460) * 100));
-    patchStyleVar(peakPill, '--peak-x', `${pctLeft.toFixed(1)}%`);
-  }
-
-  return { el: chartWrap, update };
-}
-
 const ConsumptionView = defineComponent({
   name: 'ConsumptionView',
   setup({ onCleanup }) {
-    // Default to 'today' if store is on initial 'all' or keep user's selection
+    // --- 时间筛选栏：快速时间段分段控制器与自定义起止时间选择条 ---
     const timeFilterSwitch = SegmentedControl({
       ariaLabel: '消耗统计时间范围',
       modelValue: telemetryStore.getState().selectedTimeRange,
@@ -2738,10 +2912,10 @@ const ConsumptionView = defineComponent({
       ]
     );
 
-    // --- Section 1: 用量概览 (Compact Integrated Overview) ---
+    // --- Section 1: 用量概览矩阵 (上层 3 列核心总量 + 下层 2 列输入/输出拆分 + 底部 4 段比例条) ---
     const dateSpanBadge = h('span', { className: 'cons-badge text-mono', text: '-- ~ --' });
     const heroTotalTokens = h('strong', { className: 'cons-hero-num text-mono', text: '0' });
-    const heroTotalCalls = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '0 调用' });
+    const heroTotalCalls = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '0 次' });
     const heroCostUsd = h('strong', { className: 'cons-hero-cost text-mono', text: '$0.00' });
     const heroCostCny = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '≈ ¥0' });
 
@@ -2750,18 +2924,18 @@ const ConsumptionView = defineComponent({
 
     const inputSharePct = h('span', { className: 'text-mono', style: 'color: var(--ctx-input); font-weight: 600; font-size: 11.5px;', text: '0%' });
     const inputMainTokens = h('strong', { className: 'cons-mid-num text-mono', text: '0' });
-    const inputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '直接输入 0 · 缓存读取 0' });
+    const inputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '新输入 0 · 缓存 0' });
 
     const outputSharePct = h('span', { className: 'text-mono', style: 'color: var(--ctx-output); font-weight: 600; font-size: 11.5px;', text: '0%' });
     const outputMainTokens = h('strong', { className: 'cons-mid-num text-mono', text: '0' });
-    const outputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '内容生成 0 · 思考推理 0' });
+    const outputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '回复 0 · 思考 0' });
 
     const overviewSegBar = createFourSegmentBar();
 
     const overviewPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header cons-overview-head' }, [
         h('span', { className: 'panel-title' }, [
-          h('span', { text: '用量概览' }),
+          h('span', { text: '用量总览' }),
           dateSpanBadge,
         ]),
         timeFilterSwitch.el,
@@ -2770,7 +2944,7 @@ const ConsumptionView = defineComponent({
       h('div', { className: 'cons-box cons-unified-matrix' }, [
         h('div', { className: 'cons-split-3' }, [
           h('div', { className: 'cons-col' }, [
-            h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '总 Token 数' }),
+            h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '总 Token' }),
             h('div', { className: 'cons-baseline' }, [heroTotalTokens, heroTotalCalls]),
           ]),
           h('div', { className: 'cons-col is-bordered-col' }, [
@@ -2813,7 +2987,7 @@ const ConsumptionView = defineComponent({
       overviewSegBar.el,
     ]);
 
-    // --- Section 2: 历史趋势 (Historical Trend SVG Spline Area Chart) ---
+    // --- Section 2: 历史趋势 (SVG 三次贝塞尔平滑曲线图 + 首/中/末三时间锚点) ---
     const trendRangeBadge = h('span', { className: 'cons-badge', text: '全部时间' });
     const trendChart = createTrendAreaChart();
     const anchorStartTime = h('span', { className: 'text-muted text-mono', text: '00:00' });
@@ -2825,7 +2999,7 @@ const ConsumptionView = defineComponent({
 
     const trendPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
-        h('span', { className: 'panel-title', text: '历史趋势' }),
+        h('span', { className: 'panel-title', text: '用量趋势' }),
         trendRangeBadge,
       ]),
       trendChart.el,
@@ -2836,25 +3010,25 @@ const ConsumptionView = defineComponent({
       ]),
     ]);
 
-    // --- Section 3: 热门模型 (Popular Models Breakdown) ---
+    // --- Section 3: 模型排行列表 ---
     const modelsListEl = h('div', { className: 'cons-item-list' });
     const modelsPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
-        h('span', { className: 'panel-title', text: '热门模型' }),
+        h('span', { className: 'panel-title', text: '模型排行' }),
       ]),
       modelsListEl,
     ]);
 
-    // --- Section 4: 数据来源 ---
+    // --- Section 4: 客户端来源列表 ---
     const sourcesListEl = h('div', { className: 'cons-item-list' });
     const sourcesPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
-        h('span', { className: 'panel-title', text: '数据来源' }),
+        h('span', { className: 'panel-title', text: '客户端来源' }),
       ]),
       sourcesListEl,
     ]);
 
-    // --- Section 5: 按月细分 (12-Month Stacked Bar Chart) ---
+    // --- Section 5: 按月细分 (12 个月垂直 4 段堆叠柱状图) ---
     const monthlyYearBadge = h('span', { className: 'cons-badge text-mono', text: '2026' });
     const monthlyCols = Array.from({ length: 12 }, (_, idx) => {
       const costText = h('span', { className: 'month-cost text-mono', text: '' });
@@ -2894,7 +3068,7 @@ const ConsumptionView = defineComponent({
 
     const monthlyPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
-        h('span', { className: 'panel-title', text: '按月细分' }),
+        h('span', { className: 'panel-title', text: '月度统计' }),
         monthlyYearBadge,
       ]),
       h(
@@ -2941,6 +3115,9 @@ const ConsumptionView = defineComponent({
       className: 'view-pane',
     });
 
+    /**
+     * 创建热门模型或数据来源的通用单行 DOM 结构（含标题、占比胶囊、总量、费用、4 段条与底部分项脚标）。
+     */
     function createBreakdownItemRow() {
       const nameEl = h('strong', { className: 'cons-row-title' });
       const pctBadge = h('span', { className: 'cons-share-pill text-mono', text: '0%' });
@@ -2998,6 +3175,9 @@ const ConsumptionView = defineComponent({
       };
     }
 
+    /**
+     * 增量更新热门模型或数据来源单行的指标文本与 4 段比例条宽度。
+     */
     function updateBreakdownItemRow(refs, item, grandTotalTokens, showTokensInHeader = true) {
       patchText(refs.nameEl, item.label || item.name || item.shortName || '—');
       const total = Number(item.totalTokens || 0);
@@ -3030,6 +3210,9 @@ const ConsumptionView = defineComponent({
     let latestSlice = null;
     let isDirty = false;
 
+    /**
+     * 将遥测状态切片同步渲染至消费统计视图的 5 个子面板。
+     */
     function renderConsumptionData(slice) {
       if (!slice) return;
       timeFilterSwitch.setValue(slice.range);
@@ -3045,7 +3228,7 @@ const ConsumptionView = defineComponent({
       const acct = preset?.account || cons.account || {};
       const rangeInfo = cons.selectedRange || {};
 
-      // 1. Overview
+      // 1. 同步用量概览矩阵与顶部 4 段比例条
       patchText(dateSpanBadge, formatDateSpanBadge(rangeInfo.startMs, rangeInfo.endMs));
       const totalTokens = Number(acct.totalTokens || 0);
       const inputTokens = Number(acct.inputTokens || 0);
@@ -3056,7 +3239,7 @@ const ConsumptionView = defineComponent({
       const costUsd = Number(acct.costUsd || 0);
 
       patchText(heroTotalTokens, formatTokensPrecise(totalTokens));
-      patchText(heroTotalCalls, `${acct.calls || 0} 调用`);
+      patchText(heroTotalCalls, `${acct.calls || 0} 次`);
       patchText(heroCostUsd, formatUsd(costUsd, { unpricedCalls: acct.unpricedCalls }));
       patchText(heroCostCny, acct.unpricedCalls > 0 ? `${acct.unpricedCalls} 步费用待定` : formatCnyApprox(costUsd));
 
@@ -3069,14 +3252,14 @@ const ConsumptionView = defineComponent({
       patchText(inputMainTokens, formatTokensPrecise(inputTokens));
       patchText(
         inputSubText,
-        `直接输入 ${formatTokensPrecise(inputTokens)} · 缓存读取 ${formatTokensPrecise(cacheTokens)}`
+        `新输入 ${formatTokensPrecise(inputTokens)} · 缓存 ${formatTokensPrecise(cacheTokens)}`
       );
 
       patchText(outputSharePct, `${outPct}%`);
       patchText(outputMainTokens, formatTokensPrecise(outputTokens));
       patchText(
         outputSubText,
-        `内容生成 ${formatTokensPrecise(responseTokens)} · 思考推理 ${formatTokensPrecise(thinkingTokens)}`
+        `回复 ${formatTokensPrecise(responseTokens)} · 思考 ${formatTokensPrecise(thinkingTokens)}`
       );
 
       overviewSegBar.update({
@@ -3086,7 +3269,7 @@ const ConsumptionView = defineComponent({
         thinkingTokens,
       });
 
-      // 2. Historical Trend
+      // 2. 同步历史趋势 SVG 面积图与首/中/末三时间锚点
       patchText(trendRangeBadge, preset?.label || rangeInfo.label || '全部时间');
       const trendSeries = cons.trendSeries || [];
       trendChart.update(trendSeries);
@@ -3102,7 +3285,7 @@ const ConsumptionView = defineComponent({
         patchText(anchorEndVal, formatTokensPrecise(last.tokens));
       }
 
-      // 3. Popular Models
+      // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账）
       const models = (slice.modelBreakdown || [])
         .slice()
         .sort((a, b) => (b.totalTokens || 0) - (a.totalTokens || 0));
@@ -3116,7 +3299,7 @@ const ConsumptionView = defineComponent({
         updateRow: (refs, m) => updateBreakdownItemRow(refs, m, modelsTotalTok, true),
       });
 
-      // 4. Sources Breakdown
+      // 4. 同步数据来源列表
       const sources = cons.sourcesBreakdown || [];
       const sourcesTotalTok = sources.reduce((s, x) => s + Number(x.totalTokens || 0), 0);
       patchKeyedList(sourcesListEl, sources, {
@@ -3126,7 +3309,7 @@ const ConsumptionView = defineComponent({
         updateRow: (refs, s) => updateBreakdownItemRow(refs, s, sourcesTotalTok, true),
       });
 
-      // 5. Monthly Breakdown
+      // 5. 同步 12 个月垂直堆叠柱状图（相对于年度峰值月缩放柱高，最低保留 8% 可视高度）
       const monthlyYear = cons.monthlyYear || new Date().getFullYear();
       const currentMonthIdx = new Date().getMonth();
       patchText(monthlyYearBadge, String(monthlyYear));
@@ -3223,20 +3406,22 @@ const ConsumptionView = defineComponent({
 // --- src/views/StepsDetailView.js ---
 /**
  * @fileoverview View 3: StepsDetailView (步骤明细与按模型汇总视图).
- * Uses patchKeyedList for incremental row reconciliation without innerHTML resets,
- * wraps tables in bespoke CustomScrollbar (zero native OS scrollbars), and provides
- * a live row inspector bar replacing native browser title tooltips.
+ * 提供“单步测速”与“按模型汇总”双子表切换：
+ * - 采用 `patchKeyedList` 实现行级 DOM 增量对账与就地复用，彻底避免全表 `innerHTML` 重建引发的闪烁；
+ * - 两个表格各自包裹在独立的 `CustomScrollbar` 容器中，兼具粘性表头与零原生滚动条体验；
+ * - 支持在内部代号 (`modelShort`) 与实际响应模型名 (`modelUpstream`) 之间无缝切换显示。
  */
 
 
 const StepsDetailView = defineComponent({
   name: 'StepsDetailView',
   setup({ onCleanup }) {
+    // 顶部子表分段切换器：在“按步查看”与“按模型汇总”之间切换
     const subTabSwitch = SegmentedControl({
       ariaLabel: '明细表视图切换',
       modelValue: uiStore.getState().stepsSubTab,
       options: [
-        { value: 'steps', label: '单步测速 (0步)' },
+        { value: 'steps', label: '按步查看 (0)' },
         { value: 'models', label: '按模型汇总' },
       ],
       onUpdateModelValue: (nextTab) => {
@@ -3244,18 +3429,19 @@ const StepsDetailView = defineComponent({
       },
     });
 
+    // --- 子表 1：单步明细表（列定义：步序、模型、吞吐速度、首字延迟、上下文/输出、缓存命中率、单步费用） ---
     const stepsTbody = h('tbody');
     const stepsTablePane = h('div', { className: 'table-viewport' }, [
       h('table', { className: 'data-table' }, [
         h('thead', {}, [
           h('tr', {}, [
-            h('th', { text: '步' }),
+            h('th', { text: '步序' }),
             h('th', { text: '模型' }),
             h('th', { text: '速度' }),
-            h('th', { text: '首Token' }),
-            h('th', { text: '上下文/输出' }),
+            h('th', { text: '首字' }),
+            h('th', { text: '上下文 / 输出' }),
             h('th', { text: '缓存' }),
-            h('th', { text: '消费' }),
+            h('th', { text: '费用' }),
           ]),
         ]),
         stepsTbody,
@@ -3266,6 +3452,7 @@ const StepsDetailView = defineComponent({
       className: 'table-scroll-host',
     });
 
+    // --- 子表 2：按模型汇总表（列定义：模型名称、调用次数、有效均速、总 Token、费用） ---
     const modelsTbody = h('tbody');
     const modelsTablePane = h('div', { className: 'table-viewport' }, [
       h('table', { className: 'data-table' }, [
@@ -3275,7 +3462,7 @@ const StepsDetailView = defineComponent({
             h('th', { text: '次数' }),
             h('th', { text: '均速' }),
             h('th', { text: '总 Token' }),
-            h('th', { text: '预估费用' }),
+            h('th', { text: '费用' }),
           ]),
         ]),
         modelsTbody,
@@ -3297,7 +3484,7 @@ const StepsDetailView = defineComponent({
         h('div', { className: 'panel-header' }, [
           h('span', { className: 'panel-title' }, [
             createSvgIcon('table', { size: 13 }),
-            h('span', { text: '速度与费用明细' }),
+            h('span', { text: '调用记录' }),
           ]),
           subTabSwitch.el,
         ]),
@@ -3322,6 +3509,9 @@ const StepsDetailView = defineComponent({
     let latestSlice = null;
     let isDirty = false;
 
+    /**
+     * 对单步测速表和按模型汇总表执行基于 `patchKeyedList` 的键值增量对账与行更新。
+     */
     function renderStepsData(slice) {
       if (!slice) return;
       const steps = slice.recentSteps || [];
@@ -3330,11 +3520,12 @@ const StepsDetailView = defineComponent({
 
       subTabSwitch.setProps({
         options: [
-          { value: 'steps', label: `单步测速 (${steps.length}步)` },
+          { value: 'steps', label: `按步查看 (${steps.length})` },
           { value: 'models', label: `按模型汇总 (${slice.rangeLabel})` },
         ],
       });
 
+      // 1. 单步测速表增量对账：以 `<cascadeId>-<stepIndex>` 为稳定行键，仅在签名变化时刷新单元格
       patchKeyedList(stepsTbody, steps, {
         keyFn: (st) => `${slice.cascadeId || 'conv'}-${st.stepIndex}`,
         sigFn: (st) =>
@@ -3406,6 +3597,7 @@ const StepsDetailView = defineComponent({
         },
       });
 
+      // 2. 按模型汇总表增量对账：以模型标识为稳定行键，展示调用次数、加权均速、有效样本比与总费用
       patchKeyedList(modelsTbody, models, {
         keyFn: (m) => m.label || m.shortName,
         sigFn: (m) =>
@@ -3498,45 +3690,89 @@ const StepsDetailView = defineComponent({
 // --- src/views/SettingsView.js ---
 /**
  * @fileoverview View 4: SettingsView (系统设置视图).
- * Replaces all native form controls (<select>, <input type="number">) with
- * bespoke CustomSelect and CustomNumberInput components.
+ * 采用定制的 `CustomSelect` 与 `CustomNumberInput` 替代所有原生表单控件，分为两个设置面板：
+ * 1. 本地配额监控与预算表单：配置模型名称显示方式（内部代号/实际模型名）、周用量计算模式及自定义 Token/USD 预算；
+ * 2. 云端价格同步与插件更新面板：配置插件自动更新策略、手动同步云端模型价格表，以及检查并执行 Git/ZIP 双模式插件升级。
  */
 
 
+/** 每周配额计算模式可选项 */
 const WEEKLY_MODE_OPTIONS = [
-  { value: 'official', label: '官方周限额 (自动同步)' },
-  { value: 'custom_tokens', label: '自定义 Token 预算' },
-  { value: 'custom_cost', label: '自定义费用预算 (USD)' },
+  { value: 'official', label: '跟随官方额度' },
+  { value: 'custom_tokens', label: '自定义 Token 上限' },
+  { value: 'custom_cost', label: '自定义费用上限 (USD)' },
 ];
 
+/** 步骤明细表中的模型名称显示方式可选项 */
 const STEP_MODEL_DISPLAY_OPTIONS = [
-  { value: 'short', label: 'Antigravity 内部代号 (如 argon-4-high / flash-3.8-high)' },
-  { value: 'upstream', label: '模型实际名称 (如 gemini-4-argon / gemini-3.8-flash-n)' },
+  { value: 'short', label: '精简代号 (如 argon-4-high)' },
+  { value: 'upstream', label: '原始模型 ID (如 gemini-3.8-flash-n)' },
 ];
+
+/** 插件版本更新策略可选项 */
+const AUTO_UPDATE_OPTIONS = [
+  { value: 'manual', label: '仅提示新版本，手动更新 (推荐)' },
+  { value: 'auto', label: '后台自动安装新版本' },
+];
+
+/**
+ * 格式化云端价格目录的最近同步时间或版本日期文本。
+ */
+function formatSyncTimeText(tsMs, updatedAt) {
+  if (Number(tsMs) > 0) {
+    const d = new Date(Number(tsMs));
+    const pad = (n) => String(n).padStart(2, '0');
+    return `更新于 ${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  if (updatedAt) {
+    return `发布于 ${String(updatedAt).slice(0, 10)}`;
+  }
+  return '默认价格';
+}
 
 const SettingsView = defineComponent({
   name: 'SettingsView',
   setup({ onCleanup }) {
+    // --- 面板 1：本地配额监控与预算表单状态与控件 ---
     let draftMode = 'official';
     let draftTokens = 150000000;
     let draftCost = 100;
     let draftShowUpstreamModel = false;
+    let draftAutoUpdatePlugin = false;
     let statusTimer = null;
+    let cloudTimer = null;
     let lastSyncedSettingsSig = '';
 
     const saveStatusText = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
+    const cloudStatusMsg = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
 
+    /** 在本地预算面板右上角展示短暂的保存状态提示 */
     function showSaveFeedback(text) {
       if (statusTimer) {
         clearTimeout(statusTimer);
         statusTimer = null;
       }
       patchText(saveStatusText, text);
-      if (text === '设置已生效') {
+      if (text === '已保存') {
         statusTimer = setTimeout(() => {
           statusTimer = null;
           patchText(saveStatusText, '');
         }, 1500);
+      }
+    }
+
+    /** 在云端同步面板右上角展示同步或更新进度提示 */
+    function showCloudFeedback(text, autoClearMs = 3500) {
+      if (cloudTimer) {
+        clearTimeout(cloudTimer);
+        cloudTimer = null;
+      }
+      patchText(cloudStatusMsg, text);
+      if (autoClearMs > 0) {
+        cloudTimer = setTimeout(() => {
+          cloudTimer = null;
+          patchText(cloudStatusMsg, '');
+        }, autoClearMs);
       }
     }
 
@@ -3549,6 +3785,7 @@ const SettingsView = defineComponent({
       },
     });
 
+    // 模型名显示方式切换后立即持久化并刷新遥测数据
     const stepModelSelect = CustomSelect({
       modelValue: 'short',
       icon: 'table',
@@ -3561,11 +3798,32 @@ const SettingsView = defineComponent({
             showUpstreamModel: draftShowUpstreamModel,
           });
         }
-        showSaveFeedback('正在保存…');
+        showSaveFeedback('保存中…');
         await saveSettingsPatch({
           showUpstreamModel: draftShowUpstreamModel,
         });
-        showSaveFeedback('设置已生效');
+        showSaveFeedback('已保存');
+      },
+    });
+
+    // 插件自动更新策略切换后立即保存至后端
+    const autoUpdateSelect = CustomSelect({
+      modelValue: 'manual',
+      icon: 'refresh',
+      options: AUTO_UPDATE_OPTIONS,
+      onUpdateModelValue: async (val) => {
+        draftAutoUpdatePlugin = val === 'auto';
+        if (latestSettings) {
+          lastSyncedSettingsSig = settingsSig({
+            ...latestSettings,
+            autoUpdatePlugin: draftAutoUpdatePlugin,
+          });
+        }
+        showCloudFeedback('保存中…', 0);
+        await saveSettingsPatch({
+          autoUpdatePlugin: draftAutoUpdatePlugin,
+        });
+        showCloudFeedback('已保存', 1800);
       },
     });
 
@@ -3595,58 +3853,174 @@ const SettingsView = defineComponent({
         type: 'button',
         className: 'btn-primary',
         onClick: async () => {
-          showSaveFeedback('正在保存…');
+          showSaveFeedback('保存中…');
           await saveSettingsPatch({
             weeklyLimitMode: draftMode,
             weeklyTokenBudget: draftTokens,
             weeklyCostBudget: draftCost,
             showUpstreamModel: draftShowUpstreamModel,
+            autoUpdatePlugin: draftAutoUpdatePlugin,
           });
-          showSaveFeedback('设置已生效');
+          showSaveFeedback('已保存');
         },
       },
-      [createSvgIcon('check', { size: 13 }), h('span', { text: '保存参数设置' })]
+      [createSvgIcon('check', { size: 13 }), h('span', { text: '保存设置' })]
     );
 
     const budgetPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
           createSvgIcon('sliders', { size: 13 }),
-          h('span', { text: '配额监控与预算设置' }),
+          h('span', { text: '常规设置' }),
         ]),
         saveStatusText,
       ]),
       h('div', { className: 'form-row' }, [
-        h('span', { className: 'form-label', text: '步骤表中的模型名显示方式' }),
+        h('span', { className: 'form-label', text: '模型名称格式' }),
         stepModelSelect.el,
       ]),
       h('div', { className: 'form-row' }, [
-        h('span', { className: 'form-label', text: '每周用量的计算方式' }),
+        h('span', { className: 'form-label', text: '周额度基准' }),
         modeSelect.el,
       ]),
       h('div', { className: 'dual-grid' }, [
         h('div', { className: 'form-row' }, [
-          h('span', { className: 'form-label', text: '每周 Token 预算 (每次调整 1M)' }),
+          h('span', { className: 'form-label', text: '每周 Token 上限' }),
           tokenBudgetInput.el,
         ]),
         h('div', { className: 'form-row' }, [
-          h('span', { className: 'form-label', text: '每周费用预算 (每次调整 $5)' }),
+          h('span', { className: 'form-label', text: '每周费用上限 ($)' }),
           costBudgetInput.el,
         ]),
       ]),
       h('div', { style: 'display: flex; justify-content: flex-end;' }, [saveBtn]),
     ]);
 
-    const rootEl = h('div', { className: 'view-pane' }, [budgetPanel]);
+    // --- 面板 2：版本更新面板 ---
+    const pricingCountVal = h('strong', { className: 'cell-value', text: '—' });
+    const pricingSyncSub = h('span', { className: 'cell-sub', text: '读取中…' });
+    const versionVal = h('strong', { className: 'cell-value', text: 'v1.4.0' });
+    const versionSub = h('span', { className: 'cell-sub', text: '检查中…' });
+
+    const syncPricingBtnText = h('span', { text: '更新价格表' });
+    const syncPricingBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'btn-secondary',
+        onClick: async () => {
+          patchAttr(syncPricingBtn, 'disabled', true);
+          patchText(syncPricingBtnText, '更新中…');
+          showCloudFeedback('正在同步价格表…', 0);
+          try {
+            const res = await triggerCloudSync();
+            const cs = res?.cloudStatus;
+            if (res?.ok && cs) {
+              showCloudFeedback(`价格表已更新 (${cs.modelCount} 个模型)`, 3500);
+            } else {
+              showCloudFeedback(cs?.lastSyncError || '连接超时，使用本地价格表', 4500);
+            }
+          } catch (err) {
+            showCloudFeedback(err?.message || '同步失败，使用本地价格表', 4500);
+          } finally {
+            patchAttr(syncPricingBtn, 'disabled', false);
+            patchText(syncPricingBtnText, '更新价格表');
+          }
+        },
+      },
+      [createSvgIcon('refresh', { size: 12 }), syncPricingBtnText]
+    );
+
+    const updatePluginBtnText = h('span', { text: '检查更新' });
+    const updatePluginBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'btn-secondary',
+        onClick: async () => {
+          patchAttr(updatePluginBtn, 'disabled', true);
+          try {
+            if (!latestCloudStatus?.updateAvailable) {
+              patchText(updatePluginBtnText, '检查中…');
+              showCloudFeedback('正在检查新版本…', 0);
+              const syncRes = await triggerCloudSync();
+              const cs = syncRes?.cloudStatus || latestCloudStatus;
+              if (cs) {
+                latestCloudStatus = cs;
+                renderCloudStatus(cs);
+              }
+              if (!syncRes?.ok && cs?.lastSyncError) {
+                showCloudFeedback(`检查失败：${cs.lastSyncError}`, 5000);
+                return;
+              }
+              if (!cs?.updateAvailable) {
+                const curVer = cs?.currentPluginVersion || '1.4.0';
+                showCloudFeedback(`当前已是最新版本 (v${curVer})`, 4500);
+                return;
+              }
+            }
+            patchText(updatePluginBtnText, '更新中…');
+            showCloudFeedback('正在下载更新…', 0);
+            const res = await triggerPluginUpdate();
+            if (res?.cloudStatus) {
+              latestCloudStatus = res.cloudStatus;
+            }
+            if (res?.ok) {
+              showCloudFeedback(res.message || '更新完成，正在重启面板…', 5000);
+            } else {
+              showCloudFeedback(res?.message || '未执行更新', 5500);
+            }
+          } catch (err) {
+            showCloudFeedback(err?.message || '更新失败', 5000);
+          } finally {
+            patchAttr(updatePluginBtn, 'disabled', false);
+            renderCloudStatus(latestCloudStatus);
+          }
+        },
+      },
+      [createSvgIcon('arrow-down', { size: 12 }), updatePluginBtnText]
+    );
+
+    const cloudPanel = h('section', { className: 'panel' }, [
+      h('div', { className: 'panel-header' }, [
+        h('span', { className: 'panel-title' }, [
+          createSvgIcon('bolt', { size: 13 }),
+          h('span', { text: '版本更新' }),
+        ]),
+        cloudStatusMsg,
+      ]),
+      h('div', { className: 'form-row' }, [
+        h('span', { className: 'form-label', text: '自动更新' }),
+        autoUpdateSelect.el,
+      ]),
+      h('div', { className: 'dual-grid' }, [
+        h('div', { className: 'matrix-cell' }, [
+          h('span', { className: 'cell-label', text: '价格表' }),
+          pricingCountVal,
+          pricingSyncSub,
+        ]),
+        h('div', { className: 'matrix-cell' }, [
+          h('span', { className: 'cell-label', text: '当前版本' }),
+          versionVal,
+          versionSub,
+        ]),
+      ]),
+      h('div', { className: 'cloud-actions-row' }, [syncPricingBtn, updatePluginBtn]),
+    ]);
+
+    const rootEl = h('div', { className: 'view-pane' }, [budgetPanel, cloudPanel]);
 
     let latestSettings = null;
+    let latestCloudStatus = null;
     let isDirty = false;
 
+    /** 生成设置项签名，避免轮询返回相同配置时覆盖用户正在编辑的草稿值 */
     function settingsSig(s) {
       if (!s) return '';
-      return `${s.weeklyLimitMode}:${s.weeklyTokenBudget}:${s.weeklyCostBudget}:${Boolean(s.showUpstreamModel)}`;
+      return `${s.weeklyLimitMode}:${s.weeklyTokenBudget}:${s.weeklyCostBudget}:${Boolean(s.showUpstreamModel)}:${Boolean(s.autoUpdatePlugin)}`;
     }
 
+    /** 将后端返回的最新设置同步至表单控件 */
     function renderSettings(settings) {
       if (!settings) return;
       const nextSig = settingsSig(settings);
@@ -3660,22 +4034,65 @@ const SettingsView = defineComponent({
       draftTokens = Number(settings.weeklyTokenBudget || 150000000);
       draftCost = Number(settings.weeklyCostBudget || 100);
       draftShowUpstreamModel = Boolean(settings.showUpstreamModel);
+      draftAutoUpdatePlugin = Boolean(settings.autoUpdatePlugin);
       modeSelect.setValue(draftMode);
       stepModelSelect.setValue(draftShowUpstreamModel ? 'upstream' : 'short');
+      autoUpdateSelect.setValue(draftAutoUpdatePlugin ? 'auto' : 'manual');
       tokenBudgetInput.setValue(draftTokens);
       costBudgetInput.setValue(draftCost);
     }
 
+    /** 将云端价格表统计与插件版本对比状态同步至云端面板 */
+    function renderCloudStatus(cs) {
+      if (!cs) return;
+      const srcLabel =
+        cs.source === 'remote'
+          ? '云端同步'
+          : cs.source === 'local'
+            ? '本地文件'
+            : '内置默认';
+      patchText(pricingCountVal, `${cs.modelCount || 0} 个模型`);
+      patchText(
+        pricingSyncSub,
+        `${srcLabel} · ${formatSyncTimeText(cs.lastSyncedAtMs, cs.catalogUpdatedAt)}`
+      );
+
+      const curVer = cs.currentPluginVersion || '1.4.0';
+      const latVer = cs.latestPluginVersion || curVer;
+      const modeTag = cs.installMode === 'git' ? 'Git' : 'ZIP';
+      patchText(versionVal, `v${curVer}`);
+      if (cs.updateAvailable) {
+        patchText(versionSub, `可升级至 v${latVer} (${modeTag})`);
+        patchClasses(versionSub, { 'accent-ok': true });
+        patchText(updatePluginBtnText, `升级至 v${latVer}`);
+        patchClasses(updatePluginBtn, { 'btn-primary': true, 'btn-secondary': false });
+      } else {
+        patchText(versionSub, `已是最新 (${modeTag})`);
+        patchClasses(versionSub, { 'accent-ok': false });
+        patchText(updatePluginBtnText, '检查更新');
+        patchClasses(updatePluginBtn, { 'btn-primary': false, 'btn-secondary': true });
+      }
+
+      if (!cloudTimer && (cs.lastUpdateError || (cs.lastUpdateResult?.ok === false && cs.lastUpdateResult?.message))) {
+        showCloudFeedback(cs.lastUpdateError || cs.lastUpdateResult.message, 5500);
+      }
+    }
+
     const unsub = telemetryStore.subscribe(
-      (st) => st.telemetry?.settings,
-      (settings) => {
-        latestSettings = settings;
+      (st) => ({
+        settings: st.telemetry?.settings,
+        cloudStatus: st.telemetry?.cloudStatus,
+      }),
+      (slice) => {
+        latestSettings = slice.settings;
+        latestCloudStatus = slice.cloudStatus;
         if (uiStore.getState().activeView !== 'settings') {
           isDirty = true;
           return;
         }
         isDirty = false;
-        renderSettings(settings);
+        renderSettings(slice.settings);
+        renderCloudStatus(slice.cloudStatus);
       }
     );
 
@@ -3684,26 +4101,27 @@ const SettingsView = defineComponent({
       (activeView) => {
         if (activeView === 'settings' && isDirty) {
           isDirty = false;
-          if (latestSettings) {
-            renderSettings(latestSettings);
-          }
+          if (latestSettings) renderSettings(latestSettings);
+          if (latestCloudStatus) renderCloudStatus(latestCloudStatus);
         }
       }
     );
 
     onCleanup(() => {
       if (statusTimer) clearTimeout(statusTimer);
+      if (cloudTimer) clearTimeout(cloudTimer);
       unsub();
       unsubView();
       modeSelect.destroy();
       stepModelSelect.destroy();
+      autoUpdateSelect.destroy();
       tokenBudgetInput.destroy();
       costBudgetInput.destroy();
     });
 
     return {
       el: rootEl,
-      refs: { modeSelect, stepModelSelect, tokenBudgetInput, costBudgetInput },
+      refs: { modeSelect, stepModelSelect, autoUpdateSelect, tokenBudgetInput, costBudgetInput },
     };
   },
 });
