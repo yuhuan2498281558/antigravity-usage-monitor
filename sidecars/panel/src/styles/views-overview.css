@@ -34,6 +34,13 @@
   font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+}
+
+.panel-title > span:not(.agent-badge) {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .panel-meta {
@@ -42,6 +49,8 @@
   gap: 6px;
   font-size: 11.5px;
   color: var(--text-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 /* --- 2. 4 格实时测速指标矩阵 (4-Cell Telemetry Matrix) --- */
@@ -116,6 +125,21 @@
 
 .progress-seg.seg-messages {
   background: var(--ctx-messages);
+}
+.progress-seg.seg-assistant {
+  background: var(--ctx-assistant);
+}
+.progress-seg.seg-tool-results {
+  background: var(--ctx-tool-results);
+}
+.progress-seg.seg-user-input {
+  background: var(--ctx-user-input);
+}
+.progress-seg.seg-subagent-msg {
+  background: var(--ctx-subagent-msg);
+}
+.progress-seg.seg-checkpoint {
+  background: var(--ctx-checkpoint);
 }
 .progress-seg.seg-system-tools {
   background: var(--ctx-system-tools);
@@ -193,6 +217,11 @@
 }
 
 .swatch.seg-messages { background: var(--ctx-messages); }
+.swatch.seg-assistant { background: var(--ctx-assistant); }
+.swatch.seg-tool-results { background: var(--ctx-tool-results); }
+.swatch.seg-user-input { background: var(--ctx-user-input); }
+.swatch.seg-subagent-msg { background: var(--ctx-subagent-msg); }
+.swatch.seg-checkpoint { background: var(--ctx-checkpoint); }
 .swatch.seg-system-tools { background: var(--ctx-system-tools); }
 .swatch.seg-mcp-tools { background: var(--ctx-mcp-tools); }
 .swatch.seg-skills { background: var(--ctx-skills); }
@@ -208,6 +237,121 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--space-3);
+}
+
+/* --- 6. 上下文窗口内联代理切换器与代理徽章 (Scheme B Context Inspector & Agent Badges) --- */
+.ctx-inspector-bar {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+
+.ctx-pill-group {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.ctx-agent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+  font-size: 11px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-instant) var(--ease-fast),
+    color var(--dur-instant) var(--ease-fast),
+    border-color var(--dur-instant) var(--ease-fast);
+}
+
+.ctx-agent-pill:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.ctx-agent-pill.is-active {
+  background: var(--accent-primary-soft);
+  color: var(--accent-primary);
+  border-color: var(--accent-primary-border);
+  font-weight: 600;
+}
+
+.ctx-agent-pill.is-more-toggle {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
+.ctx-agent-pill.is-more-toggle:hover {
+  border-style: solid;
+  color: var(--text-primary);
+}
+
+.panel-title .agent-badge {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.agent-badge.is-clickable {
+  cursor: pointer;
+}
+
+.agent-badge.is-clickable:hover {
+  border-color: var(--border-strong);
+}
+
+.agent-badge.badge-main {
+  color: var(--accent-primary);
+  background: var(--accent-primary-soft);
+  border-color: var(--accent-primary-border);
+}
+
+.agent-badge.badge-sub-1 {
+  color: var(--ctx-mcp-tools);
+  background: color-mix(in srgb, var(--ctx-mcp-tools) 13%, transparent);
+  border-color: color-mix(in srgb, var(--ctx-mcp-tools) 35%, var(--border-hairline));
+}
+
+.agent-badge.badge-sub-2 {
+  color: var(--metric-speed);
+  background: var(--metric-speed-soft);
+  border-color: color-mix(in srgb, var(--metric-speed) 35%, var(--border-hairline));
+}
+
+.agent-badge.badge-sub-3 {
+  color: var(--metric-ok);
+  background: var(--metric-ok-soft);
+  border-color: color-mix(in srgb, var(--metric-ok) 35%, var(--border-hairline));
 }
 
 @media (max-width: 390px) {

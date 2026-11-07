@@ -14,6 +14,8 @@ export const VIEW_TABS = Object.freeze([
 export const uiStore = createReactiveStore({
   activeView: 'overview',
   stepsSubTab: 'steps', // 'steps' | 'models'
+  selectedAgentScope: 'all', // 'all' | 'main' | <subagent cascadeId>
+  ctxInspectorAgentId: 'auto', // 'auto' | 'main' | <subagent cascadeId>
   showAllPools: true,
   ctxBreakdownOpen: true,
 });

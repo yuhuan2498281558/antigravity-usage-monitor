@@ -22,14 +22,38 @@ import {
   speedReasonText,
 } from '../core/formatters.js';
 import { createSvgIcon } from '../icons/SvgIcon.js';
-import { telemetryStore } from '../store/telemetryStore.js';
+import {
+  formatAgentLabel,
+  getAgentBadgeClass,
+  resolveScopedConversation,
+  telemetryStore,
+} from '../store/telemetryStore.js';
 import { uiStore } from '../store/uiStore.js';
 import { CustomScrollbar } from '../components/ui/CustomScrollbar.js';
+import { CustomSelect } from '../components/ui/CustomSelect.js';
 import { SegmentedControl } from '../components/ui/SegmentedControl.js';
 
 export const StepsDetailView = defineComponent({
   name: 'StepsDetailView',
   setup({ onCleanup }) {
+    // 方案 B：明细面板标题栏内嵌代理筛选下拉框（与顶栏代理切换条双向同步）
+    const inlineScopeSelect = CustomSelect({
+      modelValue: uiStore.getState().selectedAgentScope,
+      icon: 'layers',
+      placeholder: '全部代理',
+      className: 'steps-inline-scope-select',
+      options: [{ value: 'all', label: '全部代理' }],
+      onUpdateModelValue: (nextScope) => {
+        if (nextScope) {
+          uiStore.setState({
+            selectedAgentScope: nextScope,
+            ...(nextScope === 'all' ? { ctxInspectorAgentId: 'auto' } : {}),
+          });
+        }
+      },
+    });
+    inlineScopeSelect.el.setAttribute('hidden', '');
+
     // 顶部子表分段切换器：在“按步查看”与“按模型汇总”之间切换
     const subTabSwitch = SegmentedControl({
       ariaLabel: '明细表视图切换',
@@ -100,7 +124,10 @@ export const StepsDetailView = defineComponent({
             createSvgIcon('table', { size: 13 }),
             h('span', { text: '调用记录' }),
           ]),
-          subTabSwitch.el,
+          h('div', { className: 'steps-header-controls' }, [
+            inlineScopeSelect.el,
+            subTabSwitch.el,
+          ]),
         ]),
         stepsScroll.el,
         modelsScroll.el,
@@ -128,26 +155,82 @@ export const StepsDetailView = defineComponent({
      */
     function renderStepsData(slice) {
       if (!slice) return;
-      const steps = slice.recentSteps || [];
-      const models = slice.modelBreakdown || [];
+      const uiSt = uiStore.getState();
+      const {
+        hasSubagents,
+        effectiveScope,
+        subagents,
+        mainAgent,
+        aggregated,
+        scopedConv,
+      } = resolveScopedConversation(
+        { activeConversation: slice.activeConversation },
+        uiSt.selectedAgentScope,
+        uiSt.ctxInspectorAgentId
+      );
+
+      patchAttr(inlineScopeSelect.el, 'hidden', !hasSubagents);
+      if (hasSubagents) {
+        const scopeOpts = [
+          {
+            value: 'all',
+            label: '全部汇总',
+            meta: `${aggregated?.stepCount ?? 0}步`,
+          },
+          {
+            value: 'main',
+            label: '主代理',
+            meta: `${mainAgent?.stepCount ?? 0}步`,
+          },
+          ...subagents.map((s) => ({
+            value: s.agentId,
+            label: formatAgentLabel(s),
+            meta: `${s.stepCount || 0}步`,
+          })),
+        ];
+        inlineScopeSelect.setProps({
+          modelValue: effectiveScope,
+          options: scopeOpts,
+        });
+      } else {
+        inlineScopeSelect.close();
+      }
+
+      const steps =
+        (hasSubagents ? scopedConv?.recentSteps : slice.recentSteps) ||
+        slice.recentSteps ||
+        [];
+      const models =
+        hasSubagents && Array.isArray(scopedConv?.modelBreakdown)
+          ? scopedConv.modelBreakdown
+          : slice.modelBreakdown || [];
       const showUpstream = Boolean(slice.showUpstreamModel);
+      const modelsTabBadge = hasSubagents
+        ? effectiveScope === 'all'
+          ? '本会话汇总'
+          : scopedConv?.shortLabel || '当前代理'
+        : slice.rangeLabel;
 
       subTabSwitch.setProps({
         options: [
           { value: 'steps', label: `按步查看 (${steps.length})` },
-          { value: 'models', label: `按模型汇总 (${slice.rangeLabel})` },
+          { value: 'models', label: `按模型汇总 (${modelsTabBadge})` },
         ],
       });
 
-      // 1. 单步测速表增量对账：以 `<cascadeId>-<stepIndex>` 为稳定行键，仅在签名变化时刷新单元格
+      // 1. 单步测速表增量对账：以 `<agentCascadeId>-<stepIndex>` 为稳定行键，仅在签名变化时刷新单元格
       patchKeyedList(stepsTbody, steps, {
-        keyFn: (st) => `${slice.cascadeId || 'conv'}-${st.stepIndex}`,
+        keyFn: (st) => `${st.agentCascadeId || slice.cascadeId || 'conv'}-${st.stepIndex}`,
         sigFn: (st) =>
-          `${st.stepIndex}:${showUpstream ? st.modelUpstream || st.responseModel || st.modelShort : st.modelShort}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}`,
+          `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${showUpstream ? st.modelUpstream || st.responseModel || st.modelShort : st.modelShort}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}`,
         createRow: () => {
+          const agentBadgeEl = h('span', {
+            className: 'agent-badge is-clickable',
+            hidden: true,
+            style: 'margin-right: 4px;',
+          });
           const stepNumText = h('span');
-          const compIcon = createSvgIcon('bolt', { size: 11, className: 'text-muted' });
-          const tdStep = h('td', {}, [stepNumText, compIcon]);
+          const tdStep = h('td', {}, [agentBadgeEl, stepNumText]);
 
           const tdModel = h('td', {
             style: 'max-width: 140px; overflow: hidden; text-overflow: ellipsis;',
@@ -171,8 +254,8 @@ export const StepsDetailView = defineComponent({
           return {
             el: tr,
             refs: {
+              agentBadgeEl,
               stepNumText,
-              compIcon,
               tdModel,
               speedMain,
               speedReason,
@@ -184,8 +267,28 @@ export const StepsDetailView = defineComponent({
           };
         },
         updateRow: (refs, st) => {
-          patchText(refs.stepNumText, `#${Number(st.stepIndex)} `);
-          patchAttr(refs.compIcon, 'hidden', !st.isCompactionStep);
+          patchAttr(refs.agentBadgeEl, 'hidden', !hasSubagents);
+          if (hasSubagents) {
+            const badgeCls = getAgentBadgeClass(st.agentIndex || 0, !st.isSubagent);
+            patchAttr(refs.agentBadgeEl, 'class', `agent-badge is-clickable ${badgeCls}`);
+            patchText(refs.agentBadgeEl, st.agentBadge || (st.isSubagent ? '子' : '主'));
+            patchAttr(
+              refs.agentBadgeEl,
+              'title',
+              effectiveScope === 'all'
+                ? `点击仅过滤查看 ${st.agentLabel || '该代理'}`
+                : '点击切回全部汇总'
+            );
+            refs.agentBadgeEl.onclick = () => {
+              const targetScope = st.agentId || 'main';
+              const nextScope = effectiveScope === targetScope ? 'all' : targetScope;
+              uiStore.setState({
+                selectedAgentScope: nextScope,
+                ...(nextScope === 'all' ? { ctxInspectorAgentId: 'auto' } : {}),
+              });
+            };
+          }
+          patchText(refs.stepNumText, `#${Number(st.stepIndex)}`);
           const modelText =
             (showUpstream ? st.modelUpstream || st.responseModel : st.modelShort) ||
             st.modelShort ||
@@ -250,12 +353,16 @@ export const StepsDetailView = defineComponent({
         },
       });
 
-      stepsScroll.refresh();
-      modelsScroll.refresh();
+      if (uiSt.stepsSubTab === 'models') {
+        modelsScroll.refresh();
+      } else {
+        stepsScroll.refresh();
+      }
     }
 
     const unsubTelemetry = telemetryStore.subscribe(
       (st) => ({
+        activeConversation: st.telemetry?.activeConversation,
         cascadeId: st.telemetry?.activeConversation?.cascadeId,
         recentSteps: st.telemetry?.activeConversation?.recentSteps,
         modelBreakdown: st.telemetry?.modelBreakdown,
@@ -273,14 +380,23 @@ export const StepsDetailView = defineComponent({
       }
     );
 
+    let prevScope = uiStore.getState().selectedAgentScope;
+
     const unsubView = uiStore.subscribe(
-      (st) => st.activeView,
-      (activeView) => {
-        if (activeView === 'steps' && isDirty) {
+      (st) => ({
+        activeView: st.activeView,
+        selectedAgentScope: st.selectedAgentScope,
+      }),
+      (uiSlice) => {
+        const scopeChanged = uiSlice.selectedAgentScope !== prevScope;
+        prevScope = uiSlice.selectedAgentScope;
+        if (uiSlice.activeView !== 'steps') {
+          if (scopeChanged) isDirty = true;
+          return;
+        }
+        if ((isDirty || scopeChanged) && latestSlice) {
           isDirty = false;
-          if (latestSlice) {
-            renderStepsData(latestSlice);
-          }
+          renderStepsData(latestSlice);
         }
       }
     );
@@ -289,6 +405,7 @@ export const StepsDetailView = defineComponent({
       unsubUi();
       unsubTelemetry();
       unsubView();
+      inlineScopeSelect.destroy();
       subTabSwitch.destroy();
       stepsScroll.destroy();
       modelsScroll.destroy();
@@ -296,7 +413,14 @@ export const StepsDetailView = defineComponent({
 
     return {
       el: rootEl,
-      refs: { stepsTbody, modelsTbody, subTabSwitch, stepsScroll, modelsScroll },
+      refs: {
+        stepsTbody,
+        modelsTbody,
+        inlineScopeSelect,
+        subTabSwitch,
+        stepsScroll,
+        modelsScroll,
+      },
     };
   },
 });

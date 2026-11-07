@@ -49,13 +49,18 @@
   --metric-danger: var(--destructive, hsl(0 74% 50%));
   --metric-danger-soft: color-mix(in srgb, var(--metric-danger) 15%, transparent);
 
-  /* Context Window 6-Channel Palette */
+  /* Context Window 10-Channel Palette */
   --ctx-messages: hsl(217 82% 51%);
+  --ctx-assistant: hsl(217 82% 54%);
+  --ctx-tool-results: hsl(192 82% 43%);
+  --ctx-user-input: hsl(245 72% 62%);
+  --ctx-subagent-msg: hsl(280 70% 58%);
+  --ctx-checkpoint: hsl(38 90% 50%);
   --ctx-system-tools: hsl(22 86% 50%);
-  --ctx-mcp-tools: hsl(268 72% 56%);
+  --ctx-mcp-tools: hsl(316 72% 54%);
   --ctx-skills: hsl(145 64% 38%);
-  --ctx-system-prompt: hsl(190 80% 38%);
-  --ctx-user-rules: hsl(340 76% 52%);
+  --ctx-system-prompt: hsl(168 72% 40%);
+  --ctx-user-rules: hsl(346 78% 54%);
 
   /* Legacy 4-Channel Palette (retained for compatibility) */
   --ctx-cached: hsl(217 82% 51%);
@@ -257,7 +262,13 @@ input {
  * 8. 设置表单行与主次操作按钮 (.form-row, .btn-primary, .btn-secondary, .cloud-actions-row)
  */
 
-/* --- 1. 顶部会话控制栏 (Top Session Control Header) --- */
+/* --- 1. 顶部会话控制栏与二级代理切换条 (Top Session Control Header & Agent Scope Bar) --- */
+.top-session-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
 .session-header {
   display: flex;
   align-items: center;
@@ -267,6 +278,93 @@ input {
   background: var(--surface-panel);
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-sm);
+}
+
+.agent-scope-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 4px var(--space-3);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+}
+
+.agent-scope-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.scope-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    background-color var(--dur-instant) var(--ease-fast),
+    color var(--dur-instant) var(--ease-fast),
+    border-color var(--dur-instant) var(--ease-fast);
+}
+
+.scope-pill-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.scope-pill-btn.is-active {
+  background: var(--accent-primary-soft);
+  color: var(--accent-primary);
+  border-color: var(--accent-primary-border);
+  font-weight: 600;
+}
+
+.scope-subagent-select {
+  flex: 1 1 115px;
+  min-width: 105px;
+}
+
+.scope-subagent-select .select-trigger {
+  height: 22px;
+  padding: 0 6px;
+  font-size: 11.5px;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-subtle);
+}
+
+.scope-subagent-select.is-active-sub .select-trigger {
+  background: var(--accent-primary-soft);
+  color: var(--accent-primary);
+  border-color: var(--accent-primary-border);
+  font-weight: 600;
+}
+
+.scope-subagent-select .select-menu,
+.steps-inline-scope-select .select-menu {
+  left: auto;
+  right: 0;
+}
+
+.agent-scope-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .session-left {
@@ -968,6 +1066,13 @@ input {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+}
+
+.panel-title > span:not(.agent-badge) {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .panel-meta {
@@ -976,6 +1081,8 @@ input {
   gap: 6px;
   font-size: 11.5px;
   color: var(--text-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 /* --- 2. 4 格实时测速指标矩阵 (4-Cell Telemetry Matrix) --- */
@@ -1050,6 +1157,21 @@ input {
 
 .progress-seg.seg-messages {
   background: var(--ctx-messages);
+}
+.progress-seg.seg-assistant {
+  background: var(--ctx-assistant);
+}
+.progress-seg.seg-tool-results {
+  background: var(--ctx-tool-results);
+}
+.progress-seg.seg-user-input {
+  background: var(--ctx-user-input);
+}
+.progress-seg.seg-subagent-msg {
+  background: var(--ctx-subagent-msg);
+}
+.progress-seg.seg-checkpoint {
+  background: var(--ctx-checkpoint);
 }
 .progress-seg.seg-system-tools {
   background: var(--ctx-system-tools);
@@ -1127,6 +1249,11 @@ input {
 }
 
 .swatch.seg-messages { background: var(--ctx-messages); }
+.swatch.seg-assistant { background: var(--ctx-assistant); }
+.swatch.seg-tool-results { background: var(--ctx-tool-results); }
+.swatch.seg-user-input { background: var(--ctx-user-input); }
+.swatch.seg-subagent-msg { background: var(--ctx-subagent-msg); }
+.swatch.seg-checkpoint { background: var(--ctx-checkpoint); }
 .swatch.seg-system-tools { background: var(--ctx-system-tools); }
 .swatch.seg-mcp-tools { background: var(--ctx-mcp-tools); }
 .swatch.seg-skills { background: var(--ctx-skills); }
@@ -1142,6 +1269,121 @@ input {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--space-3);
+}
+
+/* --- 6. 上下文窗口内联代理切换器与代理徽章 (Scheme B Context Inspector & Agent Badges) --- */
+.ctx-inspector-bar {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+
+.ctx-pill-group {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.ctx-agent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+  font-size: 11px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-instant) var(--ease-fast),
+    color var(--dur-instant) var(--ease-fast),
+    border-color var(--dur-instant) var(--ease-fast);
+}
+
+.ctx-agent-pill:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.ctx-agent-pill.is-active {
+  background: var(--accent-primary-soft);
+  color: var(--accent-primary);
+  border-color: var(--accent-primary-border);
+  font-weight: 600;
+}
+
+.ctx-agent-pill.is-more-toggle {
+  border-style: dashed;
+  color: var(--text-muted);
+}
+
+.ctx-agent-pill.is-more-toggle:hover {
+  border-style: solid;
+  color: var(--text-primary);
+}
+
+.panel-title .agent-badge {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.agent-badge.is-clickable {
+  cursor: pointer;
+}
+
+.agent-badge.is-clickable:hover {
+  border-color: var(--border-strong);
+}
+
+.agent-badge.badge-main {
+  color: var(--accent-primary);
+  background: var(--accent-primary-soft);
+  border-color: var(--accent-primary-border);
+}
+
+.agent-badge.badge-sub-1 {
+  color: var(--ctx-mcp-tools);
+  background: color-mix(in srgb, var(--ctx-mcp-tools) 13%, transparent);
+  border-color: color-mix(in srgb, var(--ctx-mcp-tools) 35%, var(--border-hairline));
+}
+
+.agent-badge.badge-sub-2 {
+  color: var(--metric-speed);
+  background: var(--metric-speed-soft);
+  border-color: color-mix(in srgb, var(--metric-speed) 35%, var(--border-hairline));
+}
+
+.agent-badge.badge-sub-3 {
+  color: var(--metric-ok);
+  background: var(--metric-ok-soft);
+  border-color: color-mix(in srgb, var(--metric-ok) 35%, var(--border-hairline));
 }
 
 @media (max-width: 390px) {
@@ -1595,4 +1837,24 @@ input {
 
 .data-table tbody tr:hover {
   background: var(--surface-hover);
+}
+
+.steps-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.steps-inline-scope-select {
+  flex: 1 1 120px;
+  min-width: 120px;
+}
+
+.steps-inline-scope-select .select-trigger {
+  height: 22px;
+  padding: 0 6px;
+  font-size: 11px;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-subtle);
 }

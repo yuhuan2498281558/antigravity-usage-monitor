@@ -6,7 +6,7 @@
 
 import { defineComponent } from './core/component.js';
 import { h, patchAttr } from './core/domPatch.js';
-import { telemetryStore } from './store/telemetryStore.js';
+import { resolveScopedConversation, telemetryStore } from './store/telemetryStore.js';
 import { uiStore, VIEW_TABS } from './store/uiStore.js';
 import { TopSessionHeader } from './components/layout/TopSessionHeader.js';
 import { TopLongPillNav } from './components/ui/TopLongPillNav.js';
@@ -69,20 +69,38 @@ export const App = defineComponent({
       }
     );
 
+    function syncStepsBadge() {
+      const { scopedConv } = resolveScopedConversation(
+        telemetryStore.getState().telemetry,
+        uiStore.getState().selectedAgentScope,
+        uiStore.getState().ctxInspectorAgentId
+      );
+      const stepCount = scopedConv?.stepCount ?? 0;
+      topPillNav.setProps({
+        items: VIEW_TABS.map((t) =>
+          t.value === 'steps' ? { ...t, badge: stepCount > 0 ? stepCount : '' } : t
+        ),
+      });
+    }
+
     const unsubStepCount = telemetryStore.subscribe(
-      (st) => st.telemetry?.activeConversation?.stepCount ?? 0,
-      (stepCount) => {
-        topPillNav.setProps({
-          items: VIEW_TABS.map((t) =>
-            t.value === 'steps' ? { ...t, badge: stepCount > 0 ? stepCount : '' } : t
-          ),
-        });
-      }
+      (st) => ({
+        stepCount: st.telemetry?.activeConversation?.stepCount ?? 0,
+        totalStepsAllAgents: st.telemetry?.activeConversation?.totalStepsAllAgents ?? 0,
+        subagentCount: st.telemetry?.activeConversation?.subagentCount ?? 0,
+      }),
+      () => syncStepsBadge()
+    );
+
+    const unsubScopeBadge = uiStore.subscribe(
+      (st) => st.selectedAgentScope,
+      () => syncStepsBadge()
     );
 
     onCleanup(() => {
       unsubUi();
       unsubStepCount();
+      unsubScopeBadge();
       sessionHeader.destroy();
       topPillNav.destroy();
       overviewView.destroy();

@@ -11,7 +11,13 @@
  * 8. 设置表单行与主次操作按钮 (.form-row, .btn-primary, .btn-secondary, .cloud-actions-row)
  */
 
-/* --- 1. 顶部会话控制栏 (Top Session Control Header) --- */
+/* --- 1. 顶部会话控制栏与二级代理切换条 (Top Session Control Header & Agent Scope Bar) --- */
+.top-session-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
 .session-header {
   display: flex;
   align-items: center;
@@ -21,6 +27,93 @@
   background: var(--surface-panel);
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-sm);
+}
+
+.agent-scope-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 4px var(--space-3);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+}
+
+.agent-scope-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.scope-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    background-color var(--dur-instant) var(--ease-fast),
+    color var(--dur-instant) var(--ease-fast),
+    border-color var(--dur-instant) var(--ease-fast);
+}
+
+.scope-pill-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.scope-pill-btn.is-active {
+  background: var(--accent-primary-soft);
+  color: var(--accent-primary);
+  border-color: var(--accent-primary-border);
+  font-weight: 600;
+}
+
+.scope-subagent-select {
+  flex: 1 1 115px;
+  min-width: 105px;
+}
+
+.scope-subagent-select .select-trigger {
+  height: 22px;
+  padding: 0 6px;
+  font-size: 11.5px;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-subtle);
+}
+
+.scope-subagent-select.is-active-sub .select-trigger {
+  background: var(--accent-primary-soft);
+  color: var(--accent-primary);
+  border-color: var(--accent-primary-border);
+  font-weight: 600;
+}
+
+.scope-subagent-select .select-menu,
+.steps-inline-scope-select .select-menu {
+  left: auto;
+  right: 0;
+}
+
+.agent-scope-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .session-left {

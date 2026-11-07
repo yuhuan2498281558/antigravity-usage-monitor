@@ -50,12 +50,9 @@ export function formatUsd(amount, { precise = false, estimated = false, unpriced
 
 export function speedReasonText(reason) {
   return ({
-    compaction: '自动压缩步骤，不计入均速',
     incomplete_or_invalid_timing: '生成未完成',
     invalid_output_tokens: '无有效输出',
     inconsistent_timing: '耗时数据异常',
-    short_timing: '耗时过短，不计入',
-    short_sample: '输出过短，不计入均速',
     legacy_cache: '旧版缓存记录',
   })[reason] || '';
 }

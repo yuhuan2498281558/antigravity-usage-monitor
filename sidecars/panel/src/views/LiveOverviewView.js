@@ -26,10 +26,29 @@ import {
   speedReasonText,
 } from '../core/formatters.js';
 import { createSvgIcon } from '../icons/SvgIcon.js';
-import { telemetryStore } from '../store/telemetryStore.js';
+import {
+  formatAgentLabel,
+  getAgentBadgeClass,
+  resolveScopedConversation,
+  telemetryStore,
+} from '../store/telemetryStore.js';
 import { uiStore } from '../store/uiStore.js';
 import { ContextSegmentMeter } from '../components/ui/ContextSegmentMeter.js';
 import { CustomScrollbar } from '../components/ui/CustomScrollbar.js';
+
+const PILL_BASE_PAD_PX = 14;
+const CJK_CHAR_PX = 11;
+const ASCII_CHAR_PX = 6.1;
+const PILL_GAP_PX = 4;
+const DEFAULT_BAR_WIDTH_PX = 310;
+
+function estPillWidth(text) {
+  let w = PILL_BASE_PAD_PX;
+  for (const ch of String(text || '')) {
+    w += ch.charCodeAt(0) > 255 ? CJK_CHAR_PX : ASCII_CHAR_PX;
+  }
+  return Math.ceil(w);
+}
 
 export const LiveOverviewView = defineComponent({
   name: 'LiveOverviewView',
@@ -80,70 +99,124 @@ export const LiveOverviewView = defineComponent({
       ]),
     ]);
 
-    // --- 2. 6 段上下文窗口构成面板（自动锚定模型上下文压缩基线） ---
+    // --- 2. 6 段上下文窗口构成面板（自动锚定模型上下文压缩基线 + 方案 B 内嵌独立 256k 窗口检视条） ---
+    const ctxAgentBadge = h('span', {
+      className: 'agent-badge badge-main',
+      hidden: true,
+      text: '主代理',
+    });
     const ctxSummaryText = h('span', { className: 'text-mono', text: '0 / 256.0k (0%)' });
     const ctxSegmentBar = ContextSegmentMeter({ context: {} });
 
-    const bdMessages = h('strong', { className: 'text-mono', text: '0' });
-    const bdSystemTools = h('strong', { className: 'text-mono', text: '0' });
-    const bdMcpTools = h('strong', { className: 'text-mono', text: '0' });
-    const bdSkills = h('strong', { className: 'text-mono', text: '0' });
-    const bdSystemPrompt = h('strong', { className: 'text-mono', text: '0' });
-    const bdUserRules = h('strong', { className: 'text-mono', text: '0' });
+    const ctxPillGroup = h('div', { className: 'ctx-pill-group' });
+    const ctxInspectorBar = h(
+      'div',
+      { className: 'ctx-inspector-bar', hidden: true },
+      [ctxPillGroup]
+    );
+
+    const ctxChannels = [
+      {
+        key: 'assistant',
+        label: '模型回复',
+        segClass: 'seg-assistant',
+        title: '模型推理思考、回复正文与工具调用入参',
+        getValue: (c) => Number(c.assistantTokens || 0),
+      },
+      {
+        key: 'toolResults',
+        label: '工具结果',
+        segClass: 'seg-tool-results',
+        title: '文件读取、终端输出与工具执行返回内容',
+        getValue: (c) => Number(c.toolResultsTokens || 0),
+      },
+      {
+        key: 'userInput',
+        label: '用户消息',
+        segClass: 'seg-user-input',
+        title: '用户提问文本与上传附件',
+        getValue: (c) => Number(c.userInputTokens ?? c.messagesTokens ?? 0),
+      },
+      {
+        key: 'subagent',
+        label: '子代理通知',
+        segClass: 'seg-subagent-msg',
+        title: '子代理完成汇报与后台任务系统通知',
+        getValue: (c) => Number(c.subagentTokens || 0),
+      },
+      {
+        key: 'checkpoint',
+        label: '压缩摘要',
+        segClass: 'seg-checkpoint',
+        title: '自动上下文压缩生成的历史摘要检查点',
+        getValue: (c) => Number(c.checkpointTokens || 0),
+      },
+      {
+        key: 'systemPrompt',
+        label: '系统提示词',
+        segClass: 'seg-system-prompt',
+        title: '核心身份、终端沙箱、制品与环境提示词',
+        getValue: (c) => Number(c.systemPromptTokens || 0),
+      },
+      {
+        key: 'systemTools',
+        label: '系统工具',
+        segClass: 'seg-system-tools',
+        title: '内置系统工具 Schema 定义',
+        getValue: (c) => Number(c.systemToolsTokens || 0),
+      },
+      {
+        key: 'mcpTools',
+        label: 'MCP 工具',
+        segClass: 'seg-mcp-tools',
+        title: 'MCP 外部服务工具与资源定义',
+        getValue: (c) => Number(c.mcpToolsTokens || 0),
+      },
+      {
+        key: 'skills',
+        label: 'Skill',
+        segClass: 'seg-skills',
+        title: '已挂载的 Skills 技能索引与说明',
+        getValue: (c) => Number(c.skillsTokens || 0),
+      },
+      {
+        key: 'userRules',
+        label: '用户规则',
+        segClass: 'seg-user-rules',
+        title: '全局与工作区自定义规则 (user_rules)',
+        getValue: (c) => Number(c.userRulesTokens || 0),
+      },
+    ].map((ch, idx) => {
+      const valEl = h('strong', { className: 'text-mono', text: '0' });
+      const itemEl = h('div', { className: 'legend-item', title: ch.title }, [
+        h('span', { className: 'legend-left' }, [
+          h('span', { className: `swatch ${ch.segClass}` }),
+          h('span', { text: ch.label }),
+        ]),
+        valEl,
+      ]);
+      return { ...ch, defaultOrder: idx, valEl, itemEl };
+    });
+
+    const ctxLegendGrid = h(
+      'div',
+      { className: 'ctx-legend-grid' },
+      ctxChannels.map((ch) => ch.itemEl)
+    );
+    let lastLegendOrderSig = ctxChannels.map((ch) => ch.key).join(',');
 
     const ctxPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
           createSvgIcon('layers', { size: 13 }),
-          h('span', { text: '上下文占用' }),
+          h('span', { text: '上下文窗口' }),
+          ctxAgentBadge,
         ]),
         h('span', { className: 'panel-meta' }, [ctxSummaryText]),
       ]),
+      ctxInspectorBar,
       ctxSegmentBar.el,
-      h('div', { className: 'ctx-legend-grid' }, [
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-messages' }),
-            h('span', { text: '消息' }),
-          ]),
-          bdMessages,
-        ]),
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-system-tools' }),
-            h('span', { text: '系统工具' }),
-          ]),
-          bdSystemTools,
-        ]),
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-mcp-tools' }),
-            h('span', { text: 'MCP 工具' }),
-          ]),
-          bdMcpTools,
-        ]),
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-skills' }),
-            h('span', { text: 'Skill' }),
-          ]),
-          bdSkills,
-        ]),
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-system-prompt' }),
-            h('span', { text: '系统提示词' }),
-          ]),
-          bdSystemPrompt,
-        ]),
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-user-rules' }),
-            h('span', { text: '用户规则' }),
-          ]),
-          bdUserRules,
-        ]),
-      ]),
+      ctxLegendGrid,
     ]);
 
     // --- 3. 官方动态多配额池监控面板 (Gemini / Pro 独立 Argon 池 / Claude & GPT) ---
@@ -282,24 +355,55 @@ export const LiveOverviewView = defineComponent({
 
     let latestData = null;
     let isDirty = false;
+    let ctxPillsExpanded = false;
+    let lastCascadeId = '';
+    let cachedBarWidth = 0;
 
     /**
-     * 将最新遥测载荷渲染至 4 格测速矩阵、6 段上下文进度条与动态配额池列表。
+     * 将最新遥测载荷渲染至 4 格测速矩阵、6 段上下文进度条（支持主/子代理切换检视）与动态配额池列表。
      */
     function renderData(data) {
       if (!data) return;
-      const active = data.activeConversation || {};
-      const ctx = active.context || {};
+      // 在本帧任何 DOM 写入前先读取容器宽度，避免写后读触发浏览器强制同步重排 (Forced Reflow)
+      const measuredWidth =
+        ctxInspectorBar.clientWidth || (ctxPanel.clientWidth ? ctxPanel.clientWidth - 24 : 0);
+      if (measuredWidth > 160) {
+        cachedBarWidth = measuredWidth;
+      }
+      const availRowWidth = cachedBarWidth > 160 ? cachedBarWidth : DEFAULT_BAR_WIDTH_PX;
+
+      const currentCascadeId = data.activeConversation?.cascadeId || '';
+      if (currentCascadeId && currentCascadeId !== lastCascadeId) {
+        if (lastCascadeId) {
+          ctxPillsExpanded = false;
+        }
+        lastCascadeId = currentCascadeId;
+      }
+
+      const uiSt = uiStore.getState();
+      const {
+        hasSubagents,
+        effectiveScope,
+        effectiveCtxScope,
+        agents,
+        aggregated,
+        scopedConv,
+        ctxAgent,
+      } = resolveScopedConversation(data, uiSt.selectedAgentScope, uiSt.ctxInspectorAgentId);
+
+      const active = scopedConv || data.activeConversation || {};
+      const ctx = ctxAgent?.context || active.context || {};
       const quotas = data.quotas || {};
 
-      // 1. 更新 4 格实时测速矩阵
+      // 1. 更新 4 格实时测速矩阵（根据当前代理作用域动态展示全部汇总或单代理指标）
       patchClasses(pulseDot, { 'is-pulsing': Boolean(active.isRunning) });
       patchText(tpsVal, formatMetric(active.latestTokPerSec, ' tok/s'));
       const reason = speedReasonText(active.latestSpeedReason);
-      patchText(
-        tpsSub,
-        reason ? `${active.activeModelShort || '模型未知'} · ${reason}` : active.activeModelShort || '模型未知'
-      );
+      const modelAndAgent =
+        hasSubagents && effectiveScope === 'all' && active.activeAgentBadge
+          ? `[${active.activeAgentBadge}] ${active.activeModelShort || '模型未知'}`
+          : active.activeModelShort || '模型未知';
+      patchText(tpsSub, reason ? `${modelAndAgent} · ${reason}` : modelAndAgent);
 
       patchText(ttftVal, formatMetric(active.latestTtftSec, 's'));
       patchText(ttftSub, `均值 ${formatMetric(active.ttftSummary?.avgSec, 's')}`);
@@ -314,7 +418,138 @@ export const LiveOverviewView = defineComponent({
         `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
       );
 
-      // 2. 更新 6 段上下文窗口构成（优先使用模型自动压缩基线 compactionLimitTokens）
+      // 2. 更新 6 段上下文窗口构成与方案 B 内嵌上下文窗口检视胶囊条
+      patchAttr(ctxAgentBadge, 'hidden', !hasSubagents);
+      patchAttr(ctxInspectorBar, 'hidden', !hasSubagents);
+      if (hasSubagents && ctxAgent) {
+        const badgeCls = getAgentBadgeClass(ctxAgent.index || 0, Boolean(ctxAgent.isMain));
+        patchAttr(ctxAgentBadge, 'class', `agent-badge ${badgeCls}`);
+        const badgeFullText = formatAgentLabel(ctxAgent);
+        patchText(ctxAgentBadge, badgeFullText);
+        patchAttr(ctxAgentBadge, 'title', badgeFullText);
+
+        const pillItems = [];
+        if (effectiveScope === 'all') {
+          pillItems.push({
+            key: 'auto',
+            label: `跟随活跃 (${aggregated?.activeAgentBadge || '主'})`,
+            title: '自动展示当前正在运行或最新活跃的代理上下文窗口',
+            isActive: effectiveCtxScope === 'auto',
+            mode: 'ctx-only',
+          });
+        } else {
+          pillItems.push({
+            key: 'all',
+            label: `全部汇总 (${aggregated?.stepCount ?? 0}步)`,
+            title: '切回全部代理汇总视图',
+            isActive: false,
+            mode: 'scope',
+          });
+        }
+
+        const allAgentPills = agents.map((ag) => {
+          const agPct = ag.context?.usedPct ?? 0;
+          const isAct =
+            effectiveScope === 'all'
+              ? effectiveCtxScope === ag.agentId
+              : effectiveScope === ag.agentId;
+          return {
+            key: ag.agentId,
+            label: `${ag.badgeText || ag.shortLabel} ${agPct}%`,
+            title: `${formatAgentLabel(ag)} (${ag.activeModelShort || '模型未知'} · ${ag.stepCount || 0}步)`,
+            isActive: isAct,
+            mode: effectiveScope === 'all' ? 'ctx-only' : 'scope',
+          };
+        });
+
+        // 根据当前卡片的实际像素宽度估算单行可容纳的胶囊数量，尽可能塞满整行右侧空间
+        const firstPillWidth = pillItems.length > 0 ? estPillWidth(pillItems[0].label) : 0;
+        const totalAllWidth = allAgentPills.reduce(
+          (sum, p) => sum + PILL_GAP_PX + estPillWidth(p.label),
+          firstPillWidth
+        );
+        const needsCollapse = totalAllWidth > availRowWidth && allAgentPills.length > 2;
+
+        if (needsCollapse && !ctxPillsExpanded) {
+          const toggleReservePx = PILL_GAP_PX + estPillWidth(`+${allAgentPills.length} 展开 ▾`);
+          let usedW = firstPillWidth;
+          let fitCount = 0;
+          for (let i = 0; i < allAgentPills.length; i++) {
+            const pw = PILL_GAP_PX + estPillWidth(allAgentPills[i].label);
+            if (fitCount >= 1 && usedW + pw + toggleReservePx > availRowWidth) {
+              break;
+            }
+            usedW += pw;
+            fitCount++;
+          }
+          // 至少折叠 2 个胶囊（避免出现比胶囊本身还宽的 "+1 展开 ▾"）
+          const maxKeep = Math.max(1, allAgentPills.length - 2);
+          const maxCollapsedCount = Math.max(1, Math.min(maxKeep, fitCount));
+          const visibleAgentPills = allAgentPills.slice(0, maxCollapsedCount);
+          const activeHiddenPill = allAgentPills
+            .slice(maxCollapsedCount)
+            .find((p) => p.isActive);
+          if (activeHiddenPill) {
+            if (visibleAgentPills.length >= 2) {
+              visibleAgentPills[visibleAgentPills.length - 1] = activeHiddenPill;
+            } else {
+              visibleAgentPills.push(activeHiddenPill);
+            }
+          }
+          const hiddenCount = allAgentPills.length - visibleAgentPills.length;
+          pillItems.push(...visibleAgentPills, {
+            key: '__toggle_more__',
+            label: `+${hiddenCount} 展开 ▾`,
+            title: `展开全部 ${allAgentPills.length - 1} 个子代理的上下文窗口胶囊`,
+            isActive: false,
+            isMoreToggle: true,
+            mode: 'toggle-expand',
+          });
+        } else {
+          pillItems.push(...allAgentPills);
+          if (needsCollapse) {
+            pillItems.push({
+              key: '__toggle_more__',
+              label: '收起 ▴',
+              title: '折叠多余子代理胶囊',
+              isActive: false,
+              isMoreToggle: true,
+              mode: 'toggle-expand',
+            });
+          }
+        }
+
+        patchKeyedList(ctxPillGroup, pillItems, {
+          keyFn: (item) => item.key,
+          sigFn: (item) =>
+            `${item.key}:${item.label}:${item.isActive}:${item.isMoreToggle}:${item.mode}:${item.title}`,
+          createRow: () => {
+            const btn = h('button', { type: 'button', className: 'ctx-agent-pill' });
+            return { el: btn, refs: { btn } };
+          },
+          updateRow: (refs, item) => {
+            patchText(refs.btn, item.label);
+            patchAttr(refs.btn, 'title', item.title);
+            patchClasses(refs.btn, {
+              'is-active': item.isActive,
+              'is-more-toggle': Boolean(item.isMoreToggle),
+            });
+            refs.btn.onclick = () => {
+              if (item.mode === 'toggle-expand') {
+                ctxPillsExpanded = !ctxPillsExpanded;
+                renderData(latestData);
+              } else if (item.mode === 'ctx-only') {
+                uiStore.setState({ ctxInspectorAgentId: item.key });
+              } else if (item.key === 'all') {
+                uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' });
+              } else {
+                uiStore.setState({ selectedAgentScope: item.key });
+              }
+            };
+          },
+        });
+      }
+
       const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000);
       const totalTokens = Number(ctx.totalTokens || 0);
       const usedPct =
@@ -324,12 +559,19 @@ export const LiveOverviewView = defineComponent({
         `${formatTokens(totalTokens)} / ${formatTokens(limitTokens)} (${usedPct}%)`
       );
       ctxSegmentBar.setProps({ context: { ...ctx, limitTokens, usedPct } });
-      patchText(bdMessages, formatTokens(ctx.messagesTokens || 0));
-      patchText(bdSystemTools, formatTokens(ctx.systemToolsTokens || 0));
-      patchText(bdMcpTools, formatTokens(ctx.mcpToolsTokens || 0));
-      patchText(bdSkills, formatTokens(ctx.skillsTokens || 0));
-      patchText(bdSystemPrompt, formatTokens(ctx.systemPromptTokens || 0));
-      patchText(bdUserRules, formatTokens(ctx.userRulesTokens || 0));
+      const scoredChannels = ctxChannels.map((ch) => {
+        const val = ch.getValue(ctx);
+        patchText(ch.valEl, formatTokens(val));
+        return { ch, val };
+      });
+      scoredChannels.sort((a, b) => b.val - a.val || a.ch.defaultOrder - b.ch.defaultOrder);
+      const nextLegendOrderSig = scoredChannels.map((x) => x.ch.key).join(',');
+      if (nextLegendOrderSig !== lastLegendOrderSig) {
+        lastLegendOrderSig = nextLegendOrderSig;
+        for (const { ch } of scoredChannels) {
+          ctxLegendGrid.appendChild(ch.itemEl);
+        }
+      }
 
       // 3. 更新动态配额池列表（支持 Gemini、Pro 独立 Argon 池、Claude & GPT 等）
       patchText(
@@ -398,21 +640,52 @@ export const LiveOverviewView = defineComponent({
       }
     );
 
+    let prevScope = uiStore.getState().selectedAgentScope;
+    let prevCtxTarget = uiStore.getState().ctxInspectorAgentId;
+
     const unsubView = uiStore.subscribe(
-      (st) => st.activeView,
-      (activeView) => {
-        if (activeView === 'overview' && isDirty) {
+      (st) => ({
+        activeView: st.activeView,
+        selectedAgentScope: st.selectedAgentScope,
+        ctxInspectorAgentId: st.ctxInspectorAgentId,
+      }),
+      (slice) => {
+        const scopeChanged =
+          slice.selectedAgentScope !== prevScope || slice.ctxInspectorAgentId !== prevCtxTarget;
+        prevScope = slice.selectedAgentScope;
+        prevCtxTarget = slice.ctxInspectorAgentId;
+
+        if (slice.activeView !== 'overview') {
+          if (scopeChanged) isDirty = true;
+          return;
+        }
+        if ((isDirty || scopeChanged) && latestData) {
           isDirty = false;
-          if (latestData) {
-            renderData(latestData);
-          }
+          renderData(latestData);
         }
       }
     );
 
+    let ro = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => {
+        if (uiStore.getState().activeView !== 'overview') return;
+        const nextW =
+          ctxInspectorBar.clientWidth || (ctxPanel.clientWidth ? ctxPanel.clientWidth - 24 : 0);
+        if (nextW > 160 && Math.abs(nextW - cachedBarWidth) >= 6) {
+          cachedBarWidth = nextW;
+          if (latestData?.activeConversation?.hasSubagents) {
+            renderData(latestData);
+          }
+        }
+      });
+      ro.observe(ctxPanel);
+    }
+
     onCleanup(() => {
       unsub();
       unsubView();
+      if (ro) ro.disconnect();
       ctxSegmentBar.destroy();
       viewScrollbar.destroy();
     });

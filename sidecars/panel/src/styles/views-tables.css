@@ -65,3 +65,23 @@
 .data-table tbody tr:hover {
   background: var(--surface-hover);
 }
+
+.steps-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.steps-inline-scope-select {
+  flex: 1 1 120px;
+  min-width: 120px;
+}
+
+.steps-inline-scope-select .select-trigger {
+  height: 22px;
+  padding: 0 6px;
+  font-size: 11px;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-subtle);
+}

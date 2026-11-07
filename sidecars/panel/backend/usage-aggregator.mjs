@@ -228,6 +228,108 @@ export function finalizeUsageBucket(bucket) {
 }
 
 /**
+ * 将单步统计数据累加至按模型分组的映射表中（供单代理、主+子汇总与全局时间范围共用）。
+ *
+ * @param {Map<string, object>} perModelStats
+ * @param {object} st
+ * @param {object} mInfo
+ * @param {number|null} stepCost
+ */
+function accumulateStepIntoModelMap(perModelStats, st, mInfo, stepCost) {
+  const stepTotalTokens =
+    (st.inputTokens || 0) + (st.cacheReadTokens || 0) + (st.outputTokens || 0);
+  const unpriced = stepCost === null ? 1 : 0;
+  const modelGroupKey = mInfo.baseLabel || mInfo.label;
+
+  if (!perModelStats.has(modelGroupKey)) {
+    perModelStats.set(modelGroupKey, {
+      label: modelGroupKey,
+      shortName: mInfo.shortName,
+      fallbackModelId: mInfo.modelId && mInfo.modelId !== 'unknown' ? mInfo.modelId : '',
+      upstreamModelCounts: new Map(),
+      family: mInfo.family,
+      calls: 0,
+      inputTokens: 0,
+      cacheReadTokens: 0,
+      outputTokens: 0,
+      thinkingTokens: 0,
+      responseTokens: 0,
+      totalTokens: 0,
+      costUsd: 0,
+      speedAccumulator: createSpeedAccumulator(),
+    });
+  }
+  const agg = perModelStats.get(modelGroupKey);
+  if (st.responseModel) {
+    agg.upstreamModelCounts.set(
+      st.responseModel,
+      (agg.upstreamModelCounts.get(st.responseModel) || 0) + 1
+    );
+  }
+  accumulateSpeed(agg.speedAccumulator, st);
+
+  agg.calls += 1;
+  agg.inputTokens += st.inputTokens || 0;
+  agg.cacheReadTokens += st.cacheReadTokens || 0;
+  agg.outputTokens += st.outputTokens || 0;
+  agg.thinkingTokens += st.thinkingTokens || 0;
+  agg.responseTokens += st.responseTokens || 0;
+  agg.totalTokens += stepTotalTokens;
+  agg.costUsd += stepCost ?? 0;
+  agg.unpricedCalls = (agg.unpricedCalls || 0) + unpriced;
+}
+
+/**
+ * 将按模型分组的统计映射表定型并排序为前端可渲染数组。
+ *
+ * @param {Map<string, object>} perModelStats
+ * @returns {object[]}
+ */
+function finalizeModelBreakdownMap(perModelStats) {
+  return Array.from(perModelStats.values())
+    .sort((a, b) => b.calls - a.calls || String(a.label).localeCompare(String(b.label)))
+    .map(({ speedAccumulator, upstreamModelCounts, fallbackModelId, ...m }) => {
+      const sortedUpstream = Array.from((upstreamModelCounts || new Map()).entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([name]) => name);
+      const primaryUpstream =
+        sortedUpstream.length > 0 ? sortedUpstream[0] : fallbackModelId || m.shortName || m.label;
+      const finishedSpeed = finishSpeed(speedAccumulator);
+      return {
+        ...m,
+        upstreamName: primaryUpstream,
+        upstreamModels: sortedUpstream,
+        costUsd: +m.costUsd.toFixed(3),
+        avgTokPerSec: roundMetric(finishedSpeed.avgTokPerSec),
+        speedSummary: finishedSpeed,
+      };
+    });
+}
+
+/**
+ * 针对给定步骤数组构建按模型聚合的统计列表（供单代理、主+子汇总及全局时间范围复用）。
+ *
+ * @param {object[]} steps
+ * @param {Map<string, object>} dynamicModelMap
+ * @returns {object[]}
+ */
+export function buildScopedModelBreakdown(steps = [], dynamicModelMap) {
+  const perModelStats = new Map();
+  for (const st of steps) {
+    const mInfo = resolveModelInfo(
+      st.modelKey,
+      dynamicModelMap,
+      st.apiProvider,
+      st.modelDisplayName,
+      st.responseModel
+    );
+    const stepCost = computeStepCost(st, mInfo.pricing);
+    accumulateStepIntoModelMap(perModelStats, st, mInfo, stepCost);
+  }
+  return finalizeModelBreakdownMap(perModelStats);
+}
+
+/**
  * 聚合所有预设时间窗口、当前选定窗口、12 段趋势图、年度月序列、来源占比与分模型统计。
  *
  * @param {{
@@ -235,6 +337,7 @@ export function finalizeUsageBucket(bucket) {
  *   cycleAnchors?: { fiveHourResetMs?: number, weeklyResetMs?: number },
  *   currentAccountName?: string,
  *   activeCascadeId?: string|null,
+ *   activeFamilyCascadeIds?: Set<string>|null,
  *   dynamicModelMap: Map<string, object>
  * }} params
  */
@@ -243,8 +346,16 @@ export function aggregateMultiWindowUsage({
   cycleAnchors = {},
   currentAccountName = '',
   activeCascadeId = null,
+  activeFamilyCascadeIds = null,
   dynamicModelMap,
 }) {
+  const rawFamilyIds =
+    activeFamilyCascadeIds instanceof Set
+      ? Array.from(activeFamilyCascadeIds)
+      : activeCascadeId
+        ? [activeCascadeId]
+        : [];
+  const familySet = new Set(rawFamilyIds.map((id) => String(id || '').toLowerCase()));
   const nowMs = Date.now();
   const selectedWindow = resolveTimeWindow(
     filterOpts.range || 'all',
@@ -293,24 +404,29 @@ export function aggregateMultiWindowUsage({
   const allEntriesToAggregate = [];
 
   for (const [cascadeId, entry] of Object.entries(trajectoryCache)) {
+    const cidLower = String(cascadeId || '').toLowerCase();
     if (
       entry?.accountName &&
       currentAccountName &&
       entry.accountName !== currentAccountName &&
-      cascadeId !== activeCascadeId
+      !familySet.has(cidLower)
     ) {
       continue;
     }
+    const groupCascadeId = String(
+      entry?.rootConversationId || entry?.parentConversationId || cascadeId
+    ).toLowerCase();
     allEntriesToAggregate.push({
-      cascadeId,
+      cascadeId: groupCascadeId,
       appSource: entry?.appSource || 'standalone',
       steps: entry?.steps || [],
-      isCurrentConv: cascadeId === activeCascadeId,
+      isCurrentConv: familySet.has(cidLower),
     });
   }
 
   for (const ext of externalConvos.values()) {
-    const liveEntry = trajectoryCache[ext.cascadeId];
+    const extCidLower = String(ext.cascadeId || '').toLowerCase();
+    const liveEntry = trajectoryCache[ext.cascadeId] || trajectoryCache[extCidLower];
     if (
       ext.appSource === 'standalone' &&
       liveEntry &&
@@ -319,10 +435,10 @@ export function aggregateMultiWindowUsage({
       continue;
     }
     allEntriesToAggregate.push({
-      cascadeId: `${ext.appSource}:${ext.cascadeId}`,
+      cascadeId: `${ext.appSource}:${extCidLower}`,
       appSource: ext.appSource || 'ide',
       steps: ext.steps || [],
-      isCurrentConv: ext.cascadeId === activeCascadeId && !liveEntry,
+      isCurrentConv: familySet.has(extCidLower) && !liveEntry,
     });
   }
 
@@ -412,43 +528,7 @@ export function aggregateMultiWindowUsage({
         sAgg.costUsd += stepCost ?? 0;
         sAgg.unpricedCalls = (sAgg.unpricedCalls || 0) + unpriced;
 
-        const modelGroupKey = mInfo.baseLabel || mInfo.label;
-        if (!perModelStats.has(modelGroupKey)) {
-          perModelStats.set(modelGroupKey, {
-            label: modelGroupKey,
-            shortName: mInfo.shortName,
-            fallbackModelId: mInfo.modelId && mInfo.modelId !== 'unknown' ? mInfo.modelId : '',
-            upstreamModelCounts: new Map(),
-            family: mInfo.family,
-            calls: 0,
-            inputTokens: 0,
-            cacheReadTokens: 0,
-            outputTokens: 0,
-            thinkingTokens: 0,
-            responseTokens: 0,
-            totalTokens: 0,
-            costUsd: 0,
-            speedAccumulator: createSpeedAccumulator(),
-          });
-        }
-        const agg = perModelStats.get(modelGroupKey);
-        if (st.responseModel) {
-          agg.upstreamModelCounts.set(
-            st.responseModel,
-            (agg.upstreamModelCounts.get(st.responseModel) || 0) + 1
-          );
-        }
-        accumulateSpeed(agg.speedAccumulator, st);
-
-        agg.calls += 1;
-        agg.inputTokens += st.inputTokens;
-        agg.cacheReadTokens += st.cacheReadTokens;
-        agg.outputTokens += st.outputTokens;
-        agg.thinkingTokens += st.thinkingTokens || 0;
-        agg.responseTokens += st.responseTokens || 0;
-        agg.totalTokens += stepTotalTokens;
-        agg.costUsd += stepCost ?? 0;
-        agg.unpricedCalls = (agg.unpricedCalls || 0) + unpriced;
+        accumulateStepIntoModelMap(perModelStats, st, mInfo, stepCost);
       }
     }
   }
@@ -517,24 +597,7 @@ export function aggregateMultiWindowUsage({
 
   const todayBucket = finalizedPresets.today.account;
   const weekBucket = finalizedPresets.week.account;
-
-  const modelBreakdown = Array.from(perModelStats.values())
-    .sort((a, b) => b.calls - a.calls || String(a.label).localeCompare(String(b.label)))
-    .map(({ speedAccumulator, upstreamModelCounts, fallbackModelId, ...m }) => {
-      const sortedUpstream = Array.from((upstreamModelCounts || new Map()).entries())
-        .sort((a, b) => b[1] - a[1])
-        .map(([name]) => name);
-      const primaryUpstream =
-        sortedUpstream.length > 0 ? sortedUpstream[0] : fallbackModelId || m.shortName || m.label;
-      return {
-        ...m,
-        upstreamName: primaryUpstream,
-        upstreamModels: sortedUpstream,
-        costUsd: +m.costUsd.toFixed(3),
-        avgTokPerSec: roundMetric(finishSpeed(speedAccumulator).avgTokPerSec),
-        speedSummary: finishSpeed(speedAccumulator),
-      };
-    });
+  const modelBreakdown = finalizeModelBreakdownMap(perModelStats);
 
   return {
     selectedWindow,
