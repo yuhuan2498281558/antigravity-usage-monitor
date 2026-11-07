@@ -36,24 +36,18 @@ import { getCloudStatus } from './pricing-catalog.mjs';
 import { buildOfficialQuotaPools } from './quota-pools.mjs';
 import {
   aggregateMultiWindowUsage,
+  buildScopedModelBreakdown,
   getNextMondayResetIso,
 } from './usage-aggregator.mjs';
 
-/**
- * 为当前活跃会话的步骤补充模型标签、上游响应模型、单步费用、缓存命中率与生成速率指标。
- *
- * @param {object[]} activeSteps 当前会话的原始缓存步骤
- * @param {Map<string, object>} dynamicModelMap 动态模型字典
- */
-export function enrichActiveConversationSteps(activeSteps, dynamicModelMap) {
-  const sessionSpeed = summarizeSpeed(activeSteps);
-  const sessionTtft = summarizeTtft(activeSteps);
-  let sessionCostUsd = 0;
-  let sessionUnpricedCalls = 0;
-  let sessionInputTokens = 0;
-  let sessionCacheReadTokens = 0;
+const MAX_RECENT_CONVERSATIONS = 30;
 
-  // 记录已知的 modelKey -> 最近观测到的上游 responseModel，避免正在生成的步骤因尚未收到 generatorMetadata 而闪烁
+/**
+ * 构建全局 `modelKey -> responseModel` 已知映射表（单次轮询仅扫描一次 `trajectoryCache`）。
+ *
+ * @returns {Map<string, string>}
+ */
+function buildKnownUpstreamModelMap() {
   const knownUpstreamByModelKey = new Map();
   for (const entry of Object.values(trajectoryCache)) {
     for (const s of entry?.steps || []) {
@@ -62,6 +56,30 @@ export function enrichActiveConversationSteps(activeSteps, dynamicModelMap) {
       }
     }
   }
+  return knownUpstreamByModelKey;
+}
+
+/**
+ * 为当前活跃会话的步骤补充模型标签、上游响应模型、单步费用、缓存命中率与生成速率指标。
+ *
+ * @param {object[]} activeSteps 当前会话的原始缓存步骤
+ * @param {Map<string, object>} dynamicModelMap 动态模型字典
+ * @param {Map<string, string>} [sharedUpstreamMap=null] 预先构建的已知上游模型映射表
+ */
+export function enrichActiveConversationSteps(
+  activeSteps,
+  dynamicModelMap,
+  sharedUpstreamMap = null
+) {
+  const sessionSpeed = summarizeSpeed(activeSteps);
+  const sessionTtft = summarizeTtft(activeSteps);
+  let sessionCostUsd = 0;
+  let sessionUnpricedCalls = 0;
+  let sessionInputTokens = 0;
+  let sessionCacheReadTokens = 0;
+
+  // 记录已知的 modelKey -> 最近观测到的上游 responseModel，避免正在生成的步骤因尚未收到 generatorMetadata 而闪烁
+  const knownUpstreamByModelKey = sharedUpstreamMap || buildKnownUpstreamModelMap();
   for (const s of activeSteps) {
     if (s?.modelKey && s.modelKey !== 'unknown' && s.responseModel) {
       knownUpstreamByModelKey.set(s.modelKey, s.responseModel);
@@ -163,6 +181,16 @@ export function extractActiveContextTelemetry(
     }
   }
   const ctxMessages = Number(latestBreakdown?.messagesTokens || 0);
+  const hasGranularMsgBreakdown =
+    Boolean(latestBreakdown) &&
+    Object.prototype.hasOwnProperty.call(latestBreakdown, 'toolResultsTokens');
+  const ctxUserInput = hasGranularMsgBreakdown
+    ? Number(latestBreakdown?.userInputTokens || 0)
+    : ctxMessages;
+  const ctxAssistant = Number(latestBreakdown?.assistantTokens || 0);
+  const ctxToolResults = Number(latestBreakdown?.toolResultsTokens || 0);
+  const ctxSubagent = Number(latestBreakdown?.subagentTokens || 0);
+  const ctxCheckpoint = Number(latestBreakdown?.checkpointTokens || 0);
   const ctxSystemTools = Number(latestBreakdown?.systemToolsTokens || 0);
   const ctxMcpTools = Number(latestBreakdown?.mcpToolsTokens || 0);
   const ctxSkills = Number(latestBreakdown?.skillsTokens || 0);
@@ -207,6 +235,11 @@ export function extractActiveContextTelemetry(
       compactionLimitTokens,
       compactionUsedPct,
       messagesTokens: ctxMessages,
+      userInputTokens: ctxUserInput,
+      assistantTokens: ctxAssistant,
+      toolResultsTokens: ctxToolResults,
+      subagentTokens: ctxSubagent,
+      checkpointTokens: ctxCheckpoint,
       systemToolsTokens: ctxSystemTools,
       mcpToolsTokens: ctxMcpTools,
       skillsTokens: ctxSkills,
@@ -216,6 +249,88 @@ export function extractActiveContextTelemetry(
       freshInputTokens: ctxFreshInput,
       thinkingTokens: ctxThinking,
       responseTokens: ctxResponse,
+    },
+  };
+}
+
+/**
+ * 构建单个代理（主代理或子代理）的标准遥测单元对象，消除主/子代理 25 字段重复组装。
+ */
+function buildAgentUnitTelemetry({
+  agentId,
+  cascadeId,
+  isMain,
+  index,
+  shortLabel,
+  badgeText,
+  role,
+  typeName,
+  agentLabel,
+  status,
+  rawSteps,
+  fallbackLastModMs,
+  dynamicModelMap,
+  knownUpstreamByModelKey,
+  includeRecentSteps = true,
+}) {
+  const enrichedRes = enrichActiveConversationSteps(
+    rawSteps,
+    dynamicModelMap,
+    knownUpstreamByModelKey
+  );
+  const taggedSteps = enrichedRes.enrichedActiveSteps.map((st) => ({
+    ...st,
+    agentId,
+    agentCascadeId: cascadeId,
+    agentLabel,
+    agentBadge: badgeText,
+    agentRole: role,
+    agentIndex: index,
+    isSubagent: !isMain,
+  }));
+  const ctxRes = extractActiveContextTelemetry(
+    taggedSteps,
+    enrichedRes.latestEnriched,
+    enrichedRes.sessionInputTokens,
+    enrichedRes.sessionCacheReadTokens
+  );
+  const modelBreakdown = buildScopedModelBreakdown(taggedSteps, dynamicModelMap);
+  const lastModifiedMs =
+    enrichedRes.latestEnriched?.createdAtMs || fallbackLastModMs || 0;
+
+  return {
+    enrichedRes,
+    taggedSteps,
+    ctxRes,
+    telemetryUnit: {
+      agentId,
+      cascadeId,
+      isMain,
+      index,
+      shortLabel,
+      badgeText,
+      role,
+      typeName,
+      isRunning: status === 'CASCADE_RUN_STATUS_RUNNING',
+      status: status || 'IDLE',
+      stepCount: taggedSteps.length,
+      latestTokPerSec: enrichedRes.latestEnriched?.tokPerSec ?? null,
+      latestTtftSec: enrichedRes.latestEnriched?.ttftSec ?? null,
+      latestSpeedReason: enrichedRes.latestEnriched?.selectedSpeedReason ?? null,
+      avgTokPerSec: enrichedRes.sessionAvgTokPerSec,
+      speedSummary: enrichedRes.sessionSpeed,
+      ttftSummary: enrichedRes.sessionTtft,
+      latestStepCostUsd: enrichedRes.latestEnriched?.costUsd ?? null,
+      sessionCostUsd: +enrichedRes.sessionCostUsd.toFixed(2),
+      sessionUnpricedCalls: enrichedRes.sessionUnpricedCalls,
+      latestCacheHitPct: ctxRes.latestCacheHitPct,
+      sessionCacheHitPct: ctxRes.sessionCacheHitPct,
+      activeModelShort: enrichedRes.latestEnriched?.modelShort || '模型未知',
+      activeModelLabel: enrichedRes.latestEnriched?.modelLabel || '模型未知',
+      context: ctxRes.context,
+      ...(includeRecentSteps ? { recentSteps: taggedSteps.slice().reverse() } : {}),
+      modelBreakdown,
+      lastModifiedMs,
     },
   };
 }
@@ -273,11 +388,31 @@ export async function buildTelemetryPayloadInternal(
       requestedConvId,
     });
 
-  // 3. 计算当前活跃会话的步骤指标与上下文拆解
+  // 3. 计算当前活跃根会话及其子代理的步骤指标、6 通道上下文拆解与按模型汇总
+  const knownUpstreamByModelKey = buildKnownUpstreamModelMap();
   const activeEntry = activeCascadeId ? trajectoryCache[activeCascadeId] : null;
   const activeSteps = activeEntry?.steps || [];
+  const mainUnit = buildAgentUnitTelemetry({
+    agentId: 'main',
+    cascadeId: activeCascadeId,
+    isMain: true,
+    index: 0,
+    shortLabel: '主代理',
+    badgeText: '主',
+    role: '主代理',
+    typeName: 'root',
+    agentLabel: '主代理',
+    status: activeConvSummary?.status || 'IDLE',
+    rawSteps: activeSteps,
+    fallbackLastModMs: activeConvSummary?.lastModifiedMs || activeEntry?.lastModifiedMs || 0,
+    dynamicModelMap,
+    knownUpstreamByModelKey,
+    // 主代理步骤通过 activeConversation.recentSteps 下发一次，避免 JSON 重复序列化
+    includeRecentSteps: false,
+  });
+
+  const enrichedActiveSteps = mainUnit.taggedSteps;
   const {
-    enrichedActiveSteps,
     latestEnriched,
     sessionSpeed,
     sessionTtft,
@@ -286,25 +421,162 @@ export async function buildTelemetryPayloadInternal(
     sessionUnpricedCalls,
     sessionInputTokens,
     sessionCacheReadTokens,
-  } = enrichActiveConversationSteps(activeSteps, dynamicModelMap);
+  } = mainUnit.enrichedRes;
+  const { latestCacheHitPct, sessionCacheHitPct, context } = mainUnit.ctxRes;
+  const mainAgentTelemetry = mainUnit.telemetryUnit;
+  const mainModelBreakdown = mainAgentTelemetry.modelBreakdown;
 
-  const { latestCacheHitPct, sessionCacheHitPct, context } = extractActiveContextTelemetry(
-    enrichedActiveSteps,
-    latestEnriched,
-    sessionInputTokens,
-    sessionCacheReadTokens
-  );
+  const subagentSummaries = activeConvSummary?.subagents || [];
+  const activeFamilyCascadeIds = new Set(activeCascadeId ? [activeCascadeId.toLowerCase()] : []);
+  const subAgentTelemetries = [];
+  const allCombinedRawSteps = [...activeSteps];
+  const allCombinedEnrichedSteps = [...enrichedActiveSteps];
+  let totalRawSessionCostUsd = sessionCostUsd;
+  let totalFamilyInputTokens = sessionInputTokens;
+  let totalFamilyCacheReadTokens = sessionCacheReadTokens;
 
-  // 4. 识别当前活跃会话绑定的模型池及其官方 5h / 周限重置锚点
-  const latestIsArgon = latestEnriched
+  for (let idx = 0; idx < subagentSummaries.length; idx++) {
+    const subSum = subagentSummaries[idx];
+    const subCid = subSum.cascadeId;
+    activeFamilyCascadeIds.add(String(subCid || '').toLowerCase());
+    const subEntry = trajectoryCache[subCid] || null;
+    const subRawSteps = subEntry?.steps || [];
+    allCombinedRawSteps.push(...subRawSteps);
+
+    const subSpec = subSum.subagentSpec || subEntry?.subagentSpec || null;
+    const rawRole =
+      subSpec?.role || subSum.agentScriptName || subEntry?.agentScriptName || subSpec?.typeName || '';
+    const subIndex = idx + 1;
+    const shortLabel = `子代理 #${subIndex}`;
+    const badgeText = `子${subIndex}`;
+    const roleLabel = rawRole || '子代理';
+    const typeName = subSpec?.typeName || '';
+
+    const subUnit = buildAgentUnitTelemetry({
+      agentId: subCid,
+      cascadeId: subCid,
+      isMain: false,
+      index: subIndex,
+      shortLabel,
+      badgeText,
+      role: roleLabel,
+      typeName,
+      agentLabel: rawRole ? `${shortLabel} · ${rawRole}` : shortLabel,
+      status: subSum.status || 'IDLE',
+      rawSteps: subRawSteps,
+      fallbackLastModMs: subSum.lastModifiedMs || subEntry?.lastModifiedMs || 0,
+      dynamicModelMap,
+      knownUpstreamByModelKey,
+      includeRecentSteps: true,
+    });
+
+    allCombinedEnrichedSteps.push(...subUnit.taggedSteps);
+    totalRawSessionCostUsd += subUnit.enrichedRes.sessionCostUsd;
+    totalFamilyInputTokens += subUnit.enrichedRes.sessionInputTokens;
+    totalFamilyCacheReadTokens += subUnit.enrichedRes.sessionCacheReadTokens;
+    subAgentTelemetries.push(subUnit.telemetryUnit);
+  }
+
+  const allAgents = [mainAgentTelemetry, ...subAgentTelemetries];
+  let aggregatedTelemetry = mainAgentTelemetry;
+
+  if (subAgentTelemetries.length > 0) {
+    allCombinedRawSteps.sort(
+      (a, b) => (a.createdAtMs || 0) - (b.createdAtMs || 0) || (a.stepIndex || 0) - (b.stepIndex || 0)
+    );
+    allCombinedEnrichedSteps.sort(
+      (a, b) =>
+        (a.createdAtMs || 0) - (b.createdAtMs || 0) ||
+        (a.agentIndex || 0) - (b.agentIndex || 0) ||
+        (a.stepIndex || 0) - (b.stepIndex || 0)
+    );
+    const combinedSpeed = summarizeSpeed(allCombinedRawSteps);
+    const combinedTtft = summarizeTtft(allCombinedRawSteps);
+    const combinedAvgTokPerSec = roundMetric(combinedSpeed.avgTokPerSec);
+    const combinedModelBreakdown = buildScopedModelBreakdown(
+      allCombinedEnrichedSteps,
+      dynamicModelMap
+    );
+
+    const runningAgent = allAgents.find((a) => a.isRunning);
+    const latestActiveAgent =
+      runningAgent ||
+      allAgents
+        .slice()
+        .sort((a, b) => (b.lastModifiedMs || 0) - (a.lastModifiedMs || 0))[0] ||
+      mainAgentTelemetry;
+
+    // 若刚启动的子代理尚无已完成步骤 (stepCount === 0)，实时速率与上下文回退取最近有步骤的代理，避免闪现空白
+    const agentsWithSteps = allAgents.filter((a) => a.stepCount > 0);
+    const latestMetricAgent =
+      latestActiveAgent.stepCount > 0
+        ? latestActiveAgent
+        : agentsWithSteps.find((a) => a.isRunning) ||
+          agentsWithSteps
+            .slice()
+            .sort((a, b) => (b.lastModifiedMs || 0) - (a.lastModifiedMs || 0))[0] ||
+          latestActiveAgent;
+
+    const totalCostUsd = +totalRawSessionCostUsd.toFixed(2);
+    const totalUnpricedCalls = allAgents.reduce(
+      (sum, a) => sum + (a.sessionUnpricedCalls || 0),
+      0
+    );
+    const totalFamilyPromptTokens = totalFamilyInputTokens + totalFamilyCacheReadTokens;
+    const combinedSessionCacheHitPct =
+      totalFamilyPromptTokens > 0
+        ? Math.round((totalFamilyCacheReadTokens / totalFamilyPromptTokens) * 100)
+        : 0;
+
+    aggregatedTelemetry = {
+      agentId: 'all',
+      cascadeId: activeCascadeId,
+      isMain: false,
+      index: -1,
+      shortLabel: '全部汇总',
+      badgeText: '全部',
+      role: `主代理 + ${subAgentTelemetries.length} 子代理`,
+      typeName: 'all',
+      activeAgentId: latestActiveAgent.agentId,
+      activeAgentShortLabel: latestActiveAgent.shortLabel,
+      activeAgentBadge: latestActiveAgent.badgeText,
+      activeAgentRole: latestActiveAgent.role,
+      isRunning: allAgents.some((a) => a.isRunning),
+      status: allAgents.some((a) => a.isRunning) ? 'CASCADE_RUN_STATUS_RUNNING' : 'IDLE',
+      stepCount: allCombinedEnrichedSteps.length,
+      latestTokPerSec: latestMetricAgent.latestTokPerSec,
+      latestTtftSec: latestMetricAgent.latestTtftSec,
+      latestSpeedReason: latestMetricAgent.latestSpeedReason,
+      avgTokPerSec: combinedAvgTokPerSec,
+      speedSummary: combinedSpeed,
+      ttftSummary: combinedTtft,
+      latestStepCostUsd: latestMetricAgent.latestStepCostUsd,
+      sessionCostUsd: totalCostUsd,
+      sessionUnpricedCalls: totalUnpricedCalls,
+      latestCacheHitPct: latestMetricAgent.latestCacheHitPct,
+      sessionCacheHitPct: combinedSessionCacheHitPct,
+      activeModelShort: latestMetricAgent.activeModelShort,
+      activeModelLabel: latestMetricAgent.activeModelLabel,
+      context: latestMetricAgent.context,
+      modelBreakdown: combinedModelBreakdown,
+      lastModifiedMs: latestActiveAgent.lastModifiedMs,
+    };
+  }
+
+  // 4. 识别当前活跃会话家族绑定的模型池及其官方 5h / 周限重置锚点
+  const latestFamilyStep =
+    allCombinedEnrichedSteps.length > 0
+      ? allCombinedEnrichedSteps[allCombinedEnrichedSteps.length - 1]
+      : latestEnriched;
+  const latestIsArgon = latestFamilyStep
     ? isArgonModelIdentifier(
-        latestEnriched.modelKey,
-        latestEnriched.responseModel,
-        latestEnriched.modelUpstream,
-        latestEnriched.modelLabel
+        latestFamilyStep.modelKey,
+        latestFamilyStep.responseModel,
+        latestFamilyStep.modelUpstream,
+        latestFamilyStep.modelLabel
       )
     : false;
-  const rawActiveFamily = latestEnriched?.family || 'Other';
+  const rawActiveFamily = latestFamilyStep?.family || 'Other';
   const activePoolKey =
     latestIsArgon && quotaPoolsMap.has('Argon')
       ? 'Argon'
@@ -355,6 +627,7 @@ export async function buildTelemetryPayloadInternal(
     cycleAnchors,
     currentAccountName,
     activeCascadeId,
+    activeFamilyCascadeIds,
     dynamicModelMap,
   });
 
@@ -446,13 +719,25 @@ export async function buildTelemetryPayloadInternal(
       aiCredits: realAiCredits > 0 ? realAiCredits : null,
       totalConversations: conversations.length,
     },
-    conversations: conversations.slice(0, 30),
+    conversations: conversations.slice(0, MAX_RECENT_CONVERSATIONS).map((c) => ({
+      cascadeId: c.cascadeId,
+      title: c.title,
+      stepCount: c.stepCount,
+      subagentCount: c.subagentCount || 0,
+      totalStepCount: c.totalStepCount || c.stepCount || 0,
+      status: c.status,
+      lastModifiedTime: c.lastModifiedTime,
+      lastModifiedMs: c.lastModifiedMs,
+    })),
     activeConversation: {
       cascadeId: activeCascadeId,
       title: activeConvSummary?.title || '当前会话',
       isRunning: activeConvSummary?.status === 'CASCADE_RUN_STATUS_RUNNING',
       status: activeConvSummary?.status || 'IDLE',
       stepCount: enrichedActiveSteps.length,
+      hasSubagents: subAgentTelemetries.length > 0,
+      subagentCount: subAgentTelemetries.length,
+      totalStepsAllAgents: allCombinedEnrichedSteps.length,
       latestTokPerSec: latestEnriched?.tokPerSec ?? null,
       latestTtftSec: latestEnriched?.ttftSec ?? null,
       latestSpeedReason: latestEnriched?.selectedSpeedReason ?? null,
@@ -468,6 +753,9 @@ export async function buildTelemetryPayloadInternal(
       activeModelLabel: latestEnriched?.modelLabel || '模型未知',
       context,
       recentSteps: enrichedActiveSteps.slice().reverse(),
+      modelBreakdown: mainModelBreakdown,
+      agents: allAgents,
+      aggregated: aggregatedTelemetry,
     },
     consumption: {
       selectedRange: {

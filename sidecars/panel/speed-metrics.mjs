@@ -217,6 +217,35 @@ function isMcpToolItem(name, source = '', type = '') {
  *   totalTokens: number
  * } | null} 上下文 Token 构成明细，无任何可用元数据时返回 null
  */
+/**
+ * 识别 `TOKEN_TYPE_CHAT_MESSAGES` 子项（如 `"391: CHECKPOINT"`、`"404: GENERIC"`）所属的对话细分类型。
+ *
+ * @param {object} child
+ * @returns {'checkpoint'|'assistant'|'subagent'|'userInput'|'toolResults'}
+ */
+function classifyChatMessageChild(child) {
+  const rawName = String(child?.name || child?.type || '').trim().toUpperCase();
+  const stepType = rawName.replace(/^\d+:\s*/, '');
+  if (stepType.includes('CHECKPOINT') || stepType.includes('SUMMARY')) {
+    return 'checkpoint';
+  }
+  if (
+    stepType.includes('PLANNER_RESPONSE') ||
+    stepType.includes('ASSISTANT') ||
+    stepType.includes('MODEL')
+  ) {
+    return 'assistant';
+  }
+  if (stepType.includes('SYSTEM_MESSAGE') || stepType.includes('SUBAGENT')) {
+    return 'subagent';
+  }
+  if (stepType.includes('USER_INPUT') || stepType === 'USER') {
+    return 'userInput';
+  }
+  // GENERIC, VIEW_FILE, RUN_COMMAND, CODE_ACTION 等均为工具调用返回结果
+  return 'toolResults';
+}
+
 export function extractContextBreakdown(chat) {
   if (!chat || typeof chat !== 'object') {
     return null;
@@ -240,7 +269,11 @@ export function extractContextBreakdown(chat) {
     return null;
   }
 
-  let messagesTokens = 0;
+  let userInputTokens = 0;
+  let assistantTokens = 0;
+  let toolResultsTokens = 0;
+  let subagentTokens = 0;
+  let checkpointTokens = 0;
   let systemToolsTokens = 0;
   let mcpToolsTokens = 0;
   let skillsTokens = 0;
@@ -251,7 +284,7 @@ export function extractContextBreakdown(chat) {
   let hasToolsGroup = false;
   let hasMessagesGroup = false;
 
-  // 第一阶段：从原生 tokenBreakdown.groups 树状结构中提取并拆分 6 大上下文分类
+  // 第一阶段：从原生 tokenBreakdown.groups 树状结构中提取并拆分 10 大上下文分类
   for (const g of groups) {
     const gType = String(g?.type || '').toUpperCase();
     const gName = String(g?.name || '').trim().toLowerCase();
@@ -321,12 +354,29 @@ export function extractContextBreakdown(chat) {
       gName === 'messages'
     ) {
       hasMessagesGroup = true;
-      if (gTokens > 0) {
-        messagesTokens += gTokens;
-      } else {
+      if (children.length > 0) {
+        let childSum = 0;
         for (const c of children) {
-          messagesTokens += Math.max(0, Number(c?.numTokens || 0));
+          const tok = Math.max(0, Number(c?.numTokens || 0));
+          childSum += tok;
+          const msgBucket = classifyChatMessageChild(c);
+          if (msgBucket === 'checkpoint') {
+            checkpointTokens += tok;
+          } else if (msgBucket === 'assistant') {
+            assistantTokens += tok;
+          } else if (msgBucket === 'subagent') {
+            subagentTokens += tok;
+          } else if (msgBucket === 'userInput') {
+            userInputTokens += tok;
+          } else {
+            toolResultsTokens += tok;
+          }
         }
+        if (gTokens > childSum) {
+          userInputTokens += gTokens - childSum;
+        }
+      } else if (gTokens > 0) {
+        userInputTokens += gTokens;
       }
     }
   }
@@ -367,16 +417,35 @@ export function extractContextBreakdown(chat) {
     }
   }
 
-  // 第二阶段（C）：当 groups 缺失对话消息分组时，回退到 messagePrompts 列表按文本字节数估算
+  // 第二阶段（C）：当 groups 缺失对话消息分组时，回退到 messagePrompts 列表按来源与内容特征分类估算
   if (!hasMessagesGroup && messagePrompts.length > 0) {
     for (const m of messagePrompts) {
+      const text = String(m?.prompt ?? m?.content ?? '');
       const tok =
         Number.isFinite(Number(m?.numTokens)) && Number(m?.numTokens) >= 0
           ? Number(m.numTokens)
-          : estimateUtf8Tokens(m?.prompt ?? m?.content ?? '');
-      messagesTokens += tok;
+          : estimateUtf8Tokens(text);
+      const src = String(m?.source || '').toUpperCase();
+      if (src.includes('TOOL')) {
+        toolResultsTokens += tok;
+      } else if (src.includes('SYSTEM') || src.includes('ASSISTANT') || src.includes('MODEL')) {
+        assistantTokens += tok;
+      } else if (text.startsWith('<CONTEXT_SUMMARY>')) {
+        checkpointTokens += tok;
+      } else if (text.includes('<SYSTEM_MESSAGE>')) {
+        subagentTokens += tok;
+      } else {
+        userInputTokens += tok;
+      }
     }
   }
+
+  const messagesTokens =
+    userInputTokens +
+    assistantTokens +
+    toolResultsTokens +
+    subagentTokens +
+    checkpointTokens;
 
   const totalTokens =
     messagesTokens +
@@ -388,6 +457,11 @@ export function extractContextBreakdown(chat) {
 
   return {
     messagesTokens,
+    userInputTokens,
+    assistantTokens,
+    toolResultsTokens,
+    subagentTokens,
+    checkpointTokens,
     systemToolsTokens,
     mcpToolsTokens,
     skillsTokens,

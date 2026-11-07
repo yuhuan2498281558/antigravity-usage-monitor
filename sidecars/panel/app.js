@@ -584,12 +584,9 @@ function formatUsd(amount, { precise = false, estimated = false, unpricedCalls =
 
 function speedReasonText(reason) {
   return ({
-    compaction: '自动压缩步骤，不计入均速',
     incomplete_or_invalid_timing: '生成未完成',
     invalid_output_tokens: '无有效输出',
     inconsistent_timing: '耗时数据异常',
-    short_timing: '耗时过短，不计入',
-    short_sample: '输出过短，不计入均速',
     legacy_cache: '旧版缓存记录',
   })[reason] || '';
 }
@@ -717,6 +714,8 @@ const VIEW_TABS = Object.freeze([
 const uiStore = createReactiveStore({
   activeView: 'overview',
   stepsSubTab: 'steps', // 'steps' | 'models'
+  selectedAgentScope: 'all', // 'all' | 'main' | <subagent cascadeId>
+  ctxInspectorAgentId: 'auto', // 'auto' | 'main' | <subagent cascadeId>
   showAllPools: true,
   ctxBreakdownOpen: true,
 });
@@ -778,20 +777,69 @@ function isEquivalentTelemetry(prev, next) {
     return false;
   }
 
-  // 3. 比对活跃会话的实时测速指标（会话 ID、步数、运行状态、TPS、TTFT、当前模型标识与单步费用）
+  // 3. 比对活跃会话的实时测速指标（会话 ID、步数、子代理拓扑、运行状态、TPS、TTFT、当前模型标识与单步费用）
   if (pAct?.cascadeId !== nAct?.cascadeId) return false;
   if (pAct?.stepCount !== nAct?.stepCount) return false;
+  if (pAct?.subagentCount !== nAct?.subagentCount) return false;
+  if (pAct?.totalStepsAllAgents !== nAct?.totalStepsAllAgents) return false;
   if (pAct?.isRunning !== nAct?.isRunning) return false;
+  if (pAct?.aggregated?.isRunning !== nAct?.aggregated?.isRunning) return false;
+  if (pAct?.aggregated?.activeAgentId !== nAct?.aggregated?.activeAgentId) return false;
+  if (pAct?.aggregated?.activeAgentBadge !== nAct?.aggregated?.activeAgentBadge) return false;
+  if (pAct?.aggregated?.latestTokPerSec !== nAct?.aggregated?.latestTokPerSec) return false;
+  if (pAct?.aggregated?.latestTtftSec !== nAct?.aggregated?.latestTtftSec) return false;
+  if (pAct?.aggregated?.avgTokPerSec !== nAct?.aggregated?.avgTokPerSec) return false;
+  if (pAct?.aggregated?.latestStepCostUsd !== nAct?.aggregated?.latestStepCostUsd) return false;
+  if (pAct?.aggregated?.sessionCostUsd !== nAct?.aggregated?.sessionCostUsd) return false;
+  if (pAct?.aggregated?.activeModelShort !== nAct?.aggregated?.activeModelShort) return false;
   if (pAct?.latestTokPerSec !== nAct?.latestTokPerSec) return false;
   if (pAct?.latestTtftSec !== nAct?.latestTtftSec) return false;
   if (pAct?.activeModelShort !== nAct?.activeModelShort || pAct?.activeModelLabel !== nAct?.activeModelLabel) return false;
   if (pAct?.latestStepCostUsd !== nAct?.latestStepCostUsd || pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls) return false;
+
+  const pAgents = pAct?.agents || [];
+  const nAgents = nAct?.agents || [];
+  if (pAgents.length !== nAgents.length) return false;
+  for (let i = 0; i < pAgents.length; i++) {
+    const pa = pAgents[i];
+    const na = nAgents[i];
+    const pLastStep = pa?.recentSteps?.[0];
+    const nLastStep = na?.recentSteps?.[0];
+    if (
+      pa?.agentId !== na?.agentId ||
+      pa?.role !== na?.role ||
+      pa?.stepCount !== na?.stepCount ||
+      pa?.isRunning !== na?.isRunning ||
+      pa?.latestTokPerSec !== na?.latestTokPerSec ||
+      pa?.latestTtftSec !== na?.latestTtftSec ||
+      pa?.avgTokPerSec !== na?.avgTokPerSec ||
+      pa?.latestStepCostUsd !== na?.latestStepCostUsd ||
+      pa?.sessionCostUsd !== na?.sessionCostUsd ||
+      pa?.activeModelShort !== na?.activeModelShort ||
+      pa?.context?.totalTokens !== na?.context?.totalTokens ||
+      pa?.context?.messagesTokens !== na?.context?.messagesTokens ||
+      pa?.context?.toolResultsTokens !== na?.context?.toolResultsTokens ||
+      pa?.context?.assistantTokens !== na?.context?.assistantTokens ||
+      pLastStep?.tokPerSec !== nLastStep?.tokPerSec ||
+      pLastStep?.ttftSec !== nLastStep?.ttftSec ||
+      pLastStep?.outputTokens !== nLastStep?.outputTokens ||
+      pLastStep?.modelUpstream !== nLastStep?.modelUpstream ||
+      pLastStep?.costUsd !== nLastStep?.costUsd
+    ) {
+      return false;
+    }
+  }
 
   // 4. 比对 6 通道上下文窗口构成（总 Token 与消息/系统工具/MCP/Skill/系统提示词/用户规则）及近期步骤明细
   const pCtx = pAct?.context;
   const nCtx = nAct?.context;
   if (pCtx?.totalTokens !== nCtx?.totalTokens) return false;
   if (pCtx?.messagesTokens !== nCtx?.messagesTokens) return false;
+  if (pCtx?.assistantTokens !== nCtx?.assistantTokens) return false;
+  if (pCtx?.toolResultsTokens !== nCtx?.toolResultsTokens) return false;
+  if (pCtx?.userInputTokens !== nCtx?.userInputTokens) return false;
+  if (pCtx?.subagentTokens !== nCtx?.subagentTokens) return false;
+  if (pCtx?.checkpointTokens !== nCtx?.checkpointTokens) return false;
   if (pCtx?.systemToolsTokens !== nCtx?.systemToolsTokens) return false;
   if (pCtx?.mcpToolsTokens !== nCtx?.mcpToolsTokens) return false;
   if (pCtx?.skillsTokens !== nCtx?.skillsTokens) return false;
@@ -901,7 +949,20 @@ function isEquivalentTelemetry(prev, next) {
     }
   }
 
-  if ((prev.conversations?.length || 0) !== (next.conversations?.length || 0)) return false;
+  const pConvs = prev.conversations || [];
+  const nConvs = next.conversations || [];
+  if (pConvs.length !== nConvs.length) return false;
+  for (let i = 0; i < pConvs.length; i++) {
+    if (
+      pConvs[i]?.cascadeId !== nConvs[i]?.cascadeId ||
+      pConvs[i]?.title !== nConvs[i]?.title ||
+      pConvs[i]?.stepCount !== nConvs[i]?.stepCount ||
+      pConvs[i]?.subagentCount !== nConvs[i]?.subagentCount ||
+      pConvs[i]?.totalStepCount !== nConvs[i]?.totalStepCount
+    ) {
+      return false;
+    }
+  }
 
   return true;
 }
@@ -1059,6 +1120,131 @@ function stopAsyncTelemetryLoop() {
   }
 }
 
+/**
+ * 根据代理索引返回对应的微边框语义徽章样式类名。
+ *
+ * @param {number} [index=0]
+ * @param {boolean} [isMain=false]
+ * @returns {string}
+ */
+function getAgentBadgeClass(index = 0, isMain = false) {
+  if (isMain || index <= 0) return 'badge-main';
+  const slot = ((index - 1) % 3) + 1;
+  return `badge-sub-${slot}`;
+}
+
+/**
+ * 格式化主/子代理的完整显示名称（如 `子代理 #1 · Codebase Researcher`）。
+ *
+ * @param {object|null|undefined} agent
+ * @returns {string}
+ */
+function formatAgentLabel(agent) {
+  if (!agent) return '主代理';
+  if (agent.isMain) return agent.shortLabel || '主代理';
+  const rolePart = agent.role && agent.role !== '子代理' ? ` · ${agent.role}` : '';
+  return `${agent.shortLabel || '子代理'}${rolePart}`;
+}
+
+/**
+ * 解析当前选中的主/子代理作用域视图数据与独立上下文窗口检视目标。
+ * 同时在客户端按需组装主代理与全部汇总的 `recentSteps`，避免后端 JSON 载荷重复序列化 2-3 倍步骤列表。
+ *
+ * @param {object|null} telemetry
+ * @param {string} [selectedAgentScope='all']
+ * @param {string} [ctxInspectorAgentId='auto']
+ */
+function resolveScopedConversation(
+  telemetry,
+  selectedAgentScope = 'all',
+  ctxInspectorAgentId = 'auto'
+) {
+  const active = telemetry?.activeConversation || {};
+  const agents = Array.isArray(active.agents) && active.agents.length > 0 ? active.agents : [];
+  const hasSubagents = Boolean(active.hasSubagents && agents.length > 1);
+  const subagents = agents.filter((a) => !a.isMain);
+  const mainAgent = agents.find((a) => a.isMain) || active;
+  if (mainAgent && !Array.isArray(mainAgent.recentSteps) && Array.isArray(active.recentSteps)) {
+    mainAgent.recentSteps = active.recentSteps;
+  }
+  const aggregated = active.aggregated || active;
+  if (hasSubagents && aggregated && !Array.isArray(aggregated.recentSteps)) {
+    const combined = [];
+    for (const ag of agents) {
+      const steps = ag.isMain ? ag.recentSteps || active.recentSteps || [] : ag.recentSteps || [];
+      combined.push(...steps);
+    }
+    combined.sort(
+      (a, b) =>
+        (b.createdAtMs || 0) - (a.createdAtMs || 0) ||
+        (b.agentIndex || 0) - (a.agentIndex || 0) ||
+        (b.stepIndex || 0) - (a.stepIndex || 0)
+    );
+    aggregated.recentSteps = combined;
+  }
+
+  if (!hasSubagents) {
+    return {
+      hasSubagents: false,
+      effectiveScope: 'main',
+      effectiveCtxScope: 'main',
+      agents,
+      subagents: [],
+      mainAgent,
+      aggregated,
+      scopedConv: active,
+      ctxAgent: mainAgent,
+    };
+  }
+
+  const isValidSub = subagents.some((s) => s.agentId === selectedAgentScope);
+  const effectiveScope =
+    selectedAgentScope === 'main'
+      ? 'main'
+      : isValidSub
+        ? selectedAgentScope
+        : 'all';
+
+  const scopedConv =
+    effectiveScope === 'all'
+      ? aggregated
+      : agents.find((a) => a.agentId === effectiveScope) || mainAgent;
+
+  let ctxAgent = scopedConv;
+  let effectiveCtxScope = effectiveScope;
+  if (effectiveScope === 'all') {
+    if (ctxInspectorAgentId && ctxInspectorAgentId !== 'auto') {
+      const matched = agents.find((a) => a.agentId === ctxInspectorAgentId);
+      if (matched) {
+        ctxAgent = matched;
+        effectiveCtxScope = matched.agentId;
+      } else {
+        effectiveCtxScope = 'auto';
+      }
+    } else {
+      effectiveCtxScope = 'auto';
+    }
+    if (effectiveCtxScope === 'auto') {
+      ctxAgent =
+        agents.find((a) => a.agentId === aggregated.activeAgentId) ||
+        agents.find((a) => a.isRunning) ||
+        mainAgent;
+    }
+  }
+
+  return {
+    hasSubagents: true,
+    effectiveScope,
+    effectiveCtxScope,
+    agents,
+    subagents,
+    mainAgent,
+    aggregated,
+    scopedConv,
+    ctxAgent,
+  };
+}
+
 // --- src/components/ui/TopLongPillNav.js ---
 /**
  * @fileoverview Top Long-Pill Navigation Bar (顶部唯一长药丸功能分割栏).
@@ -1174,7 +1360,9 @@ const CustomSelect = defineComponent({
     let isOpen = false;
     let focusedIndex = -1;
 
-    const leadIcon = createSvgIcon(getProps().icon || 'bolt', { size: 13 });
+    const initialIcon = getProps().icon;
+    const leadIcon = createSvgIcon(initialIcon || 'bolt', { size: 13 });
+    patchAttr(leadIcon, 'hidden', !initialIcon);
     const triggerLabel = h('span', { className: 'select-label' });
     const chevronIcon = createSvgIcon('chevron-down', { size: 13 });
 
@@ -1201,7 +1389,8 @@ const CustomSelect = defineComponent({
       hidden: true,
     });
 
-    const rootEl = h('div', { className: 'custom-select' }, [triggerBtn, menuEl]);
+    const initialClass = ['custom-select', getProps().className].filter(Boolean).join(' ');
+    const rootEl = h('div', { className: initialClass }, [triggerBtn, menuEl]);
 
     function toggleOpen(nextOpen) {
       isOpen = Boolean(nextOpen);
@@ -1303,9 +1492,16 @@ const CustomSelect = defineComponent({
     }
 
     function syncTriggerAndMenu() {
-      const { options = [], modelValue, placeholder = '请选择', icon = 'bolt' } = getProps();
-      patchSvgIcon(leadIcon, icon);
-      const selectedOpt = options.find((o) => o.value === modelValue) || options[0];
+      const { options = [], modelValue, placeholder = '请选择', icon } = getProps();
+      patchAttr(leadIcon, 'hidden', !icon);
+      if (icon) {
+        patchSvgIcon(leadIcon, icon);
+      }
+      const selectedOpt =
+        options.find((o) => o.value === modelValue) ||
+        (modelValue !== '' && modelValue !== null && modelValue !== undefined
+          ? options[0]
+          : undefined);
       patchText(triggerLabel, selectedOpt ? selectedOpt.label : placeholder);
       if (isOpen) {
         renderMenuOptions();
@@ -1959,20 +2155,37 @@ const SegmentedControl = defineComponent({
 
 // --- src/components/ui/ContextSegmentMeter.js ---
 /**
- * @fileoverview 6-channel segmented context window progress bar updated via
- * CSS custom variables against the current model's automatic compaction baseline.
+ * @fileoverview 10-channel segmented context window progress bar updated via
+ * CSS custom variables against the current model's automatic compaction baseline,
+ * dynamically ordered from largest to smallest segment.
  */
 
+
+const SEGMENT_DEFS = [
+  { key: 'assistant', cls: 'seg-assistant', getVal: (c) => Number(c.assistantTokens || 0) },
+  { key: 'toolResults', cls: 'seg-tool-results', getVal: (c) => Number(c.toolResultsTokens || 0) },
+  {
+    key: 'userInput',
+    cls: 'seg-user-input',
+    getVal: (c) => Number(c.userInputTokens ?? c.messagesTokens ?? 0),
+  },
+  { key: 'subagent', cls: 'seg-subagent-msg', getVal: (c) => Number(c.subagentTokens || 0) },
+  { key: 'checkpoint', cls: 'seg-checkpoint', getVal: (c) => Number(c.checkpointTokens || 0) },
+  { key: 'systemPrompt', cls: 'seg-system-prompt', getVal: (c) => Number(c.systemPromptTokens || 0) },
+  { key: 'systemTools', cls: 'seg-system-tools', getVal: (c) => Number(c.systemToolsTokens || 0) },
+  { key: 'mcpTools', cls: 'seg-mcp-tools', getVal: (c) => Number(c.mcpToolsTokens || 0) },
+  { key: 'skills', cls: 'seg-skills', getVal: (c) => Number(c.skillsTokens || 0) },
+  { key: 'userRules', cls: 'seg-user-rules', getVal: (c) => Number(c.userRulesTokens || 0) },
+];
 
 const ContextSegmentMeter = defineComponent({
   name: 'ContextSegmentMeter',
   setup({ getProps }) {
-    const segMessages = h('div', { className: 'progress-seg seg-messages' });
-    const segSystemTools = h('div', { className: 'progress-seg seg-system-tools' });
-    const segMcpTools = h('div', { className: 'progress-seg seg-mcp-tools' });
-    const segSkills = h('div', { className: 'progress-seg seg-skills' });
-    const segSystemPrompt = h('div', { className: 'progress-seg seg-system-prompt' });
-    const segUserRules = h('div', { className: 'progress-seg seg-user-rules' });
+    const segments = SEGMENT_DEFS.map((def, idx) => ({
+      ...def,
+      defaultOrder: idx,
+      el: h('div', { className: `progress-seg ${def.cls}` }),
+    }));
 
     const trackEl = h(
       'div',
@@ -1982,25 +2195,30 @@ const ContextSegmentMeter = defineComponent({
         'aria-valuemin': '0',
         'aria-valuemax': '100',
       },
-      [segMessages, segSystemTools, segMcpTools, segSkills, segSystemPrompt, segUserRules]
+      segments.map((s) => s.el)
     );
+
+    let lastOrderSig = segments.map((s) => s.key).join(',');
 
     function syncMeter() {
       const ctx = getProps().context || {};
       const limit = Math.max(1, Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000));
-      const pctMessages = Math.min(100, ((ctx.messagesTokens || 0) / limit) * 100);
-      const pctSystemTools = Math.min(100, ((ctx.systemToolsTokens || 0) / limit) * 100);
-      const pctMcpTools = Math.min(100, ((ctx.mcpToolsTokens || 0) / limit) * 100);
-      const pctSkills = Math.min(100, ((ctx.skillsTokens || 0) / limit) * 100);
-      const pctSystemPrompt = Math.min(100, ((ctx.systemPromptTokens || 0) / limit) * 100);
-      const pctUserRules = Math.min(100, ((ctx.userRulesTokens || 0) / limit) * 100);
+      const scored = segments.map((seg) => {
+        const val = seg.getVal(ctx);
+        const pct = Math.min(100, (val / limit) * 100);
+        patchStyleVar(seg.el, '--seg-w', `${pct.toFixed(2)}%`);
+        return { seg, val };
+      });
 
-      patchStyleVar(segMessages, '--seg-w', `${pctMessages.toFixed(2)}%`);
-      patchStyleVar(segSystemTools, '--seg-w', `${pctSystemTools.toFixed(2)}%`);
-      patchStyleVar(segMcpTools, '--seg-w', `${pctMcpTools.toFixed(2)}%`);
-      patchStyleVar(segSkills, '--seg-w', `${pctSkills.toFixed(2)}%`);
-      patchStyleVar(segSystemPrompt, '--seg-w', `${pctSystemPrompt.toFixed(2)}%`);
-      patchStyleVar(segUserRules, '--seg-w', `${pctUserRules.toFixed(2)}%`);
+      scored.sort((a, b) => b.val - a.val || a.seg.defaultOrder - b.seg.defaultOrder);
+      const nextOrderSig = scored.map((x) => x.seg.key).join(',');
+      if (nextOrderSig !== lastOrderSig) {
+        lastOrderSig = nextOrderSig;
+        for (const { seg } of scored) {
+          trackEl.appendChild(seg.el);
+        }
+      }
+
       patchAttr(trackEl, 'aria-valuenow', Math.round(ctx.compactionUsedPct ?? ctx.usedPct ?? 0));
     }
 
@@ -2008,14 +2226,7 @@ const ContextSegmentMeter = defineComponent({
 
     return {
       el: trackEl,
-      refs: {
-        segMessages,
-        segSystemTools,
-        segMcpTools,
-        segSkills,
-        segSystemPrompt,
-        segUserRules,
-      },
+      refs: { segments },
       onPropsChange: syncMeter,
     };
   },
@@ -2247,15 +2458,24 @@ function createTrendAreaChart() {
  */
 
 
+function formatConvOptionMeta(c) {
+  if (!c) return '';
+  const subs = Number(c.subagentCount || 0);
+  if (subs > 0) {
+    return `主${c.stepCount || 0} · ${subs}子 (共${c.totalStepCount || c.stepCount || 0}步)`;
+  }
+  return `${c.stepCount || 0}步`;
+}
+
 const TopSessionHeader = defineComponent({
   name: 'TopSessionHeader',
   setup({ onCleanup }) {
     const convSelect = CustomSelect({
       modelValue: telemetryStore.getState().selectedConversationId,
-      icon: 'bolt',
       placeholder: '跟随最新会话',
       options: [{ value: '', label: '跟随最新会话' }],
       onUpdateModelValue: (nextConvId) => {
+        uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' });
         telemetryStore.setState({ selectedConversationId: nextConvId });
         fetchTelemetry({ force: false });
       },
@@ -2312,116 +2532,237 @@ const TopSessionHeader = defineComponent({
       [createSvgIcon('refresh', { size: 13 })]
     );
 
-    const headerEl = h('header', { className: 'session-header' }, [
+    const headerRowEl = h('div', { className: 'session-header' }, [
       h('div', { className: 'session-left' }, [convSelect.el]),
       h('div', { className: 'session-right' }, [updateBtn, statusTag, refreshBtn]),
     ]);
+
+    // --- 方案 A：顶栏二级主/子代理切换条 (.agent-scope-bar，无子代理时自动隐藏) ---
+    const scopeAllBtnText = h('span', { text: '全部汇总' });
+    const scopeAllBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'scope-pill-btn is-active',
+        onClick: () =>
+          uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' }),
+      },
+      [scopeAllBtnText]
+    );
+
+    const scopeMainBtnText = h('span', { text: '主代理' });
+    const scopeMainBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'scope-pill-btn',
+        onClick: () => uiStore.setState({ selectedAgentScope: 'main' }),
+      },
+      [scopeMainBtnText]
+    );
+
+    const subagentSelect = CustomSelect({
+      modelValue: '',
+      icon: 'cpu',
+      placeholder: '子代理 (0)',
+      className: 'scope-subagent-select',
+      options: [],
+      onUpdateModelValue: (nextSubId) => {
+        if (nextSubId) {
+          uiStore.setState({ selectedAgentScope: nextSubId });
+        }
+      },
+    });
+
+    const scopeRightText = h('span', { className: 'agent-scope-right text-mono', text: '' });
+
+    const scopeBarEl = h(
+      'div',
+      { className: 'agent-scope-bar', hidden: true },
+      [
+        h('div', { className: 'agent-scope-left' }, [
+          scopeAllBtn,
+          scopeMainBtn,
+          subagentSelect.el,
+        ]),
+        scopeRightText,
+      ]
+    );
+
+    const headerEl = h('header', { className: 'top-session-stack' }, [headerRowEl, scopeBarEl]);
+
+    let lastActiveCascadeId = '';
+
+    function renderHeaderState() {
+      const telSt = telemetryStore.getState();
+      const uiSt = uiStore.getState();
+      const telemetry = telSt.telemetry;
+      const currentCascadeId = telemetry?.activeConversation?.cascadeId || '';
+      if (currentCascadeId && lastActiveCascadeId && currentCascadeId !== lastActiveCascadeId) {
+        lastActiveCascadeId = currentCascadeId;
+        if (uiSt.selectedAgentScope !== 'all' || uiSt.ctxInspectorAgentId !== 'auto') {
+          uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' });
+          return;
+        }
+      } else if (currentCascadeId) {
+        lastActiveCascadeId = currentCascadeId;
+      }
+
+      const convs = telemetry?.conversations || [];
+      const latestTitle = convs[0]?.title ? `最新 (${convs[0].title})` : '跟随最新会话';
+      const options = [
+        { value: '', label: latestTitle, meta: convs[0] ? formatConvOptionMeta(convs[0]) : '' },
+        ...convs.map((c) => ({
+          value: c.cascadeId,
+          label: c.title || c.cascadeId.slice(0, 8),
+          meta: formatConvOptionMeta(c),
+        })),
+      ];
+      convSelect.setProps({
+        modelValue: telSt.selectedConversationId,
+        options,
+      });
+
+      const {
+        hasSubagents,
+        effectiveScope,
+        subagents,
+        mainAgent,
+        aggregated,
+        scopedConv,
+      } = resolveScopedConversation(telemetry, uiSt.selectedAgentScope, uiSt.ctxInspectorAgentId);
+
+      patchAttr(scopeBarEl, 'hidden', !hasSubagents);
+      if (hasSubagents) {
+        patchText(scopeAllBtnText, `全部 (${aggregated?.stepCount ?? 0})`);
+        patchClasses(scopeAllBtn, { 'is-active': effectiveScope === 'all' });
+
+        patchText(scopeMainBtnText, `主代理 (${mainAgent?.stepCount ?? 0})`);
+        patchClasses(scopeMainBtn, { 'is-active': effectiveScope === 'main' });
+
+        const isSubSelected = effectiveScope !== 'all' && effectiveScope !== 'main';
+        patchClasses(subagentSelect.el, { 'is-active-sub': isSubSelected });
+        const subOptions = subagents.map((s) => ({
+          value: s.agentId,
+          label: formatAgentLabel(s),
+          meta: `${s.stepCount || 0}步 · 窗${s.context?.usedPct ?? 0}%`,
+        }));
+        subagentSelect.setProps({
+          modelValue: isSubSelected ? effectiveScope : '',
+          placeholder: `子代理 (${subagents.length})`,
+          options: subOptions,
+        });
+
+        patchText(
+          scopeRightText,
+          formatUsd(scopedConv?.sessionCostUsd || 0, {
+            unpricedCalls: scopedConv?.sessionUnpricedCalls,
+          })
+        );
+      } else {
+        subagentSelect.close();
+      }
+
+      const cloudStatus = telemetry?.cloudStatus;
+      const hasUpdate = Boolean(cloudStatus?.updateAvailable);
+      patchAttr(updateBtn, 'hidden', !hasUpdate);
+      if (hasUpdate && !isHeaderUpdating) {
+        patchText(
+          updateBtnText,
+          cloudStatus?.latestPluginVersion
+            ? `升级 v${cloudStatus.latestPluginVersion}`
+            : '有新版本'
+        );
+      }
+
+      const isSyncing = telSt.syncState === 'syncing';
+      const isSynced = telSt.syncState === 'synced';
+      const isError = telSt.syncState === 'error';
+      const isRunning = Boolean(aggregated?.isRunning || telemetry?.activeConversation?.isRunning);
+      const quotaMeta = telemetry?.quotas?.meta;
+      const quotaStale = Boolean(quotaMeta?.refreshFailed || quotaMeta?.isStale);
+
+      patchClasses(refreshBtn, { 'is-spinning': isSyncing });
+      patchAttr(refreshBtn, 'disabled', isSyncing);
+
+      if (isSyncing) {
+        patchSvgIcon(statusIcon, 'refresh');
+        patchText(statusText, '同步中');
+        patchClasses(statusTag, {
+          'state-running': false,
+          'state-synced': true,
+          'state-warn': false,
+        });
+      } else if (isSynced) {
+        patchSvgIcon(statusIcon, 'check');
+        patchText(statusText, '已刷新');
+        patchClasses(statusTag, {
+          'state-running': false,
+          'state-synced': true,
+          'state-warn': false,
+        });
+      } else if (isError) {
+        patchSvgIcon(statusIcon, 'warning');
+        patchText(statusText, '重试中');
+        patchClasses(statusTag, {
+          'state-running': false,
+          'state-synced': false,
+          'state-warn': true,
+        });
+      } else if (isRunning) {
+        const runningAgent = (telemetry?.activeConversation?.agents || []).find((a) => a.isRunning);
+        const runSuffix =
+          hasSubagents && runningAgent ? ` · ${runningAgent.badgeText || runningAgent.shortLabel}` : '';
+        patchSvgIcon(statusIcon, 'bolt');
+        patchText(statusText, `生成中${runSuffix}`);
+        patchClasses(statusTag, {
+          'state-running': true,
+          'state-synced': false,
+          'state-warn': false,
+        });
+      } else if (quotaStale) {
+        patchSvgIcon(statusIcon, 'warning');
+        patchText(statusText, quotaMeta?.hasOfficialData ? '额度缓存' : '额度离线');
+        patchClasses(statusTag, {
+          'state-running': false,
+          'state-synced': false,
+          'state-warn': true,
+        });
+      } else {
+        patchSvgIcon(statusIcon, 'pulse');
+        patchText(statusText, '实时 2s');
+        patchClasses(statusTag, {
+          'state-running': false,
+          'state-synced': false,
+          'state-warn': false,
+        });
+      }
+    }
 
     const unsubTelemetry = telemetryStore.subscribe(
       (st) => ({
         selectedConversationId: st.selectedConversationId,
         syncState: st.syncState,
-        conversations: st.telemetry?.conversations,
-        isRunning: st.telemetry?.activeConversation?.isRunning,
-        quotaMeta: st.telemetry?.quotas?.meta,
-        cloudStatus: st.telemetry?.cloudStatus,
+        telemetry: st.telemetry,
       }),
-      (slice) => {
-        const convs = slice.conversations || [];
-        const latestTitle = convs[0]?.title ? `最新 (${convs[0].title})` : '跟随最新会话';
-        const options = [
-          { value: '', label: latestTitle, meta: convs[0] ? `${convs[0].stepCount}步` : '' },
-          ...convs.map((c) => ({
-            value: c.cascadeId,
-            label: c.title || c.cascadeId.slice(0, 8),
-            meta: `${c.stepCount || 0}步`,
-          })),
-        ];
-        convSelect.setProps({
-          modelValue: slice.selectedConversationId,
-          options,
-        });
+      () => renderHeaderState()
+    );
 
-        const hasUpdate = Boolean(slice.cloudStatus?.updateAvailable);
-        patchAttr(updateBtn, 'hidden', !hasUpdate);
-        if (hasUpdate && !isHeaderUpdating) {
-          patchText(
-            updateBtnText,
-            slice.cloudStatus?.latestPluginVersion
-              ? `升级 v${slice.cloudStatus.latestPluginVersion}`
-              : '有新版本'
-          );
-        }
-
-        const isSyncing = slice.syncState === 'syncing';
-        const isSynced = slice.syncState === 'synced';
-        const isError = slice.syncState === 'error';
-        const isRunning = Boolean(slice.isRunning);
-        const quotaStale = Boolean(slice.quotaMeta?.refreshFailed || slice.quotaMeta?.isStale);
-
-        patchClasses(refreshBtn, { 'is-spinning': isSyncing });
-        patchAttr(refreshBtn, 'disabled', isSyncing);
-
-        if (isSyncing) {
-          patchSvgIcon(statusIcon, 'refresh');
-          patchText(statusText, '同步中');
-          patchClasses(statusTag, {
-            'state-running': false,
-            'state-synced': true,
-            'state-warn': false,
-          });
-        } else if (isSynced) {
-          patchSvgIcon(statusIcon, 'check');
-          patchText(statusText, '已刷新');
-          patchClasses(statusTag, {
-            'state-running': false,
-            'state-synced': true,
-            'state-warn': false,
-          });
-        } else if (isError) {
-          patchSvgIcon(statusIcon, 'warning');
-          patchText(statusText, '重试中');
-          patchClasses(statusTag, {
-            'state-running': false,
-            'state-synced': false,
-            'state-warn': true,
-          });
-        } else if (isRunning) {
-          patchSvgIcon(statusIcon, 'bolt');
-          patchText(statusText, '生成中');
-          patchClasses(statusTag, {
-            'state-running': true,
-            'state-synced': false,
-            'state-warn': false,
-          });
-        } else if (quotaStale) {
-          patchSvgIcon(statusIcon, 'warning');
-          patchText(statusText, slice.quotaMeta?.hasOfficialData ? '额度缓存' : '额度离线');
-          patchClasses(statusTag, {
-            'state-running': false,
-            'state-synced': false,
-            'state-warn': true,
-          });
-        } else {
-          patchSvgIcon(statusIcon, 'pulse');
-          patchText(statusText, '实时 2s');
-          patchClasses(statusTag, {
-            'state-running': false,
-            'state-synced': false,
-            'state-warn': false,
-          });
-        }
-      }
+    const unsubUi = uiStore.subscribe(
+      (st) => st.selectedAgentScope,
+      () => renderHeaderState()
     );
 
     onCleanup(() => {
       unsubTelemetry();
+      unsubUi();
       convSelect.destroy();
+      subagentSelect.destroy();
     });
 
     return {
       el: headerEl,
-      refs: { convSelect, statusTag, refreshBtn },
+      refs: { convSelect, subagentSelect, statusTag, refreshBtn, scopeBarEl },
     };
   },
 });
@@ -2437,6 +2778,20 @@ const TopSessionHeader = defineComponent({
  *    自动适配 5h/每周双窗口或单窗口模式，并展示本机周累计消耗与 AI 积分脚标。
  */
 
+
+const PILL_BASE_PAD_PX = 14;
+const CJK_CHAR_PX = 11;
+const ASCII_CHAR_PX = 6.1;
+const PILL_GAP_PX = 4;
+const DEFAULT_BAR_WIDTH_PX = 310;
+
+function estPillWidth(text) {
+  let w = PILL_BASE_PAD_PX;
+  for (const ch of String(text || '')) {
+    w += ch.charCodeAt(0) > 255 ? CJK_CHAR_PX : ASCII_CHAR_PX;
+  }
+  return Math.ceil(w);
+}
 
 const LiveOverviewView = defineComponent({
   name: 'LiveOverviewView',
@@ -2487,70 +2842,124 @@ const LiveOverviewView = defineComponent({
       ]),
     ]);
 
-    // --- 2. 6 段上下文窗口构成面板（自动锚定模型上下文压缩基线） ---
+    // --- 2. 6 段上下文窗口构成面板（自动锚定模型上下文压缩基线 + 方案 B 内嵌独立 256k 窗口检视条） ---
+    const ctxAgentBadge = h('span', {
+      className: 'agent-badge badge-main',
+      hidden: true,
+      text: '主代理',
+    });
     const ctxSummaryText = h('span', { className: 'text-mono', text: '0 / 256.0k (0%)' });
     const ctxSegmentBar = ContextSegmentMeter({ context: {} });
 
-    const bdMessages = h('strong', { className: 'text-mono', text: '0' });
-    const bdSystemTools = h('strong', { className: 'text-mono', text: '0' });
-    const bdMcpTools = h('strong', { className: 'text-mono', text: '0' });
-    const bdSkills = h('strong', { className: 'text-mono', text: '0' });
-    const bdSystemPrompt = h('strong', { className: 'text-mono', text: '0' });
-    const bdUserRules = h('strong', { className: 'text-mono', text: '0' });
+    const ctxPillGroup = h('div', { className: 'ctx-pill-group' });
+    const ctxInspectorBar = h(
+      'div',
+      { className: 'ctx-inspector-bar', hidden: true },
+      [ctxPillGroup]
+    );
+
+    const ctxChannels = [
+      {
+        key: 'assistant',
+        label: '模型回复',
+        segClass: 'seg-assistant',
+        title: '模型推理思考、回复正文与工具调用入参',
+        getValue: (c) => Number(c.assistantTokens || 0),
+      },
+      {
+        key: 'toolResults',
+        label: '工具结果',
+        segClass: 'seg-tool-results',
+        title: '文件读取、终端输出与工具执行返回内容',
+        getValue: (c) => Number(c.toolResultsTokens || 0),
+      },
+      {
+        key: 'userInput',
+        label: '用户消息',
+        segClass: 'seg-user-input',
+        title: '用户提问文本与上传附件',
+        getValue: (c) => Number(c.userInputTokens ?? c.messagesTokens ?? 0),
+      },
+      {
+        key: 'subagent',
+        label: '子代理通知',
+        segClass: 'seg-subagent-msg',
+        title: '子代理完成汇报与后台任务系统通知',
+        getValue: (c) => Number(c.subagentTokens || 0),
+      },
+      {
+        key: 'checkpoint',
+        label: '压缩摘要',
+        segClass: 'seg-checkpoint',
+        title: '自动上下文压缩生成的历史摘要检查点',
+        getValue: (c) => Number(c.checkpointTokens || 0),
+      },
+      {
+        key: 'systemPrompt',
+        label: '系统提示词',
+        segClass: 'seg-system-prompt',
+        title: '核心身份、终端沙箱、制品与环境提示词',
+        getValue: (c) => Number(c.systemPromptTokens || 0),
+      },
+      {
+        key: 'systemTools',
+        label: '系统工具',
+        segClass: 'seg-system-tools',
+        title: '内置系统工具 Schema 定义',
+        getValue: (c) => Number(c.systemToolsTokens || 0),
+      },
+      {
+        key: 'mcpTools',
+        label: 'MCP 工具',
+        segClass: 'seg-mcp-tools',
+        title: 'MCP 外部服务工具与资源定义',
+        getValue: (c) => Number(c.mcpToolsTokens || 0),
+      },
+      {
+        key: 'skills',
+        label: 'Skill',
+        segClass: 'seg-skills',
+        title: '已挂载的 Skills 技能索引与说明',
+        getValue: (c) => Number(c.skillsTokens || 0),
+      },
+      {
+        key: 'userRules',
+        label: '用户规则',
+        segClass: 'seg-user-rules',
+        title: '全局与工作区自定义规则 (user_rules)',
+        getValue: (c) => Number(c.userRulesTokens || 0),
+      },
+    ].map((ch, idx) => {
+      const valEl = h('strong', { className: 'text-mono', text: '0' });
+      const itemEl = h('div', { className: 'legend-item', title: ch.title }, [
+        h('span', { className: 'legend-left' }, [
+          h('span', { className: `swatch ${ch.segClass}` }),
+          h('span', { text: ch.label }),
+        ]),
+        valEl,
+      ]);
+      return { ...ch, defaultOrder: idx, valEl, itemEl };
+    });
+
+    const ctxLegendGrid = h(
+      'div',
+      { className: 'ctx-legend-grid' },
+      ctxChannels.map((ch) => ch.itemEl)
+    );
+    let lastLegendOrderSig = ctxChannels.map((ch) => ch.key).join(',');
 
     const ctxPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
           createSvgIcon('layers', { size: 13 }),
-          h('span', { text: '上下文占用' }),
+          h('span', { text: '上下文窗口' }),
+          ctxAgentBadge,
         ]),
         h('span', { className: 'panel-meta' }, [ctxSummaryText]),
       ]),
+      ctxInspectorBar,
       ctxSegmentBar.el,
-      h('div', { className: 'ctx-legend-grid' }, [
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-messages' }),
-            h('span', { text: '消息' }),
-          ]),
-          bdMessages,
-        ]),
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-system-tools' }),
-            h('span', { text: '系统工具' }),
-          ]),
-          bdSystemTools,
-        ]),
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-mcp-tools' }),
-            h('span', { text: 'MCP 工具' }),
-          ]),
-          bdMcpTools,
-        ]),
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-skills' }),
-            h('span', { text: 'Skill' }),
-          ]),
-          bdSkills,
-        ]),
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-system-prompt' }),
-            h('span', { text: '系统提示词' }),
-          ]),
-          bdSystemPrompt,
-        ]),
-        h('div', { className: 'legend-item' }, [
-          h('span', { className: 'legend-left' }, [
-            h('span', { className: 'swatch seg-user-rules' }),
-            h('span', { text: '用户规则' }),
-          ]),
-          bdUserRules,
-        ]),
-      ]),
+      ctxLegendGrid,
     ]);
 
     // --- 3. 官方动态多配额池监控面板 (Gemini / Pro 独立 Argon 池 / Claude & GPT) ---
@@ -2689,24 +3098,55 @@ const LiveOverviewView = defineComponent({
 
     let latestData = null;
     let isDirty = false;
+    let ctxPillsExpanded = false;
+    let lastCascadeId = '';
+    let cachedBarWidth = 0;
 
     /**
-     * 将最新遥测载荷渲染至 4 格测速矩阵、6 段上下文进度条与动态配额池列表。
+     * 将最新遥测载荷渲染至 4 格测速矩阵、6 段上下文进度条（支持主/子代理切换检视）与动态配额池列表。
      */
     function renderData(data) {
       if (!data) return;
-      const active = data.activeConversation || {};
-      const ctx = active.context || {};
+      // 在本帧任何 DOM 写入前先读取容器宽度，避免写后读触发浏览器强制同步重排 (Forced Reflow)
+      const measuredWidth =
+        ctxInspectorBar.clientWidth || (ctxPanel.clientWidth ? ctxPanel.clientWidth - 24 : 0);
+      if (measuredWidth > 160) {
+        cachedBarWidth = measuredWidth;
+      }
+      const availRowWidth = cachedBarWidth > 160 ? cachedBarWidth : DEFAULT_BAR_WIDTH_PX;
+
+      const currentCascadeId = data.activeConversation?.cascadeId || '';
+      if (currentCascadeId && currentCascadeId !== lastCascadeId) {
+        if (lastCascadeId) {
+          ctxPillsExpanded = false;
+        }
+        lastCascadeId = currentCascadeId;
+      }
+
+      const uiSt = uiStore.getState();
+      const {
+        hasSubagents,
+        effectiveScope,
+        effectiveCtxScope,
+        agents,
+        aggregated,
+        scopedConv,
+        ctxAgent,
+      } = resolveScopedConversation(data, uiSt.selectedAgentScope, uiSt.ctxInspectorAgentId);
+
+      const active = scopedConv || data.activeConversation || {};
+      const ctx = ctxAgent?.context || active.context || {};
       const quotas = data.quotas || {};
 
-      // 1. 更新 4 格实时测速矩阵
+      // 1. 更新 4 格实时测速矩阵（根据当前代理作用域动态展示全部汇总或单代理指标）
       patchClasses(pulseDot, { 'is-pulsing': Boolean(active.isRunning) });
       patchText(tpsVal, formatMetric(active.latestTokPerSec, ' tok/s'));
       const reason = speedReasonText(active.latestSpeedReason);
-      patchText(
-        tpsSub,
-        reason ? `${active.activeModelShort || '模型未知'} · ${reason}` : active.activeModelShort || '模型未知'
-      );
+      const modelAndAgent =
+        hasSubagents && effectiveScope === 'all' && active.activeAgentBadge
+          ? `[${active.activeAgentBadge}] ${active.activeModelShort || '模型未知'}`
+          : active.activeModelShort || '模型未知';
+      patchText(tpsSub, reason ? `${modelAndAgent} · ${reason}` : modelAndAgent);
 
       patchText(ttftVal, formatMetric(active.latestTtftSec, 's'));
       patchText(ttftSub, `均值 ${formatMetric(active.ttftSummary?.avgSec, 's')}`);
@@ -2721,7 +3161,138 @@ const LiveOverviewView = defineComponent({
         `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
       );
 
-      // 2. 更新 6 段上下文窗口构成（优先使用模型自动压缩基线 compactionLimitTokens）
+      // 2. 更新 6 段上下文窗口构成与方案 B 内嵌上下文窗口检视胶囊条
+      patchAttr(ctxAgentBadge, 'hidden', !hasSubagents);
+      patchAttr(ctxInspectorBar, 'hidden', !hasSubagents);
+      if (hasSubagents && ctxAgent) {
+        const badgeCls = getAgentBadgeClass(ctxAgent.index || 0, Boolean(ctxAgent.isMain));
+        patchAttr(ctxAgentBadge, 'class', `agent-badge ${badgeCls}`);
+        const badgeFullText = formatAgentLabel(ctxAgent);
+        patchText(ctxAgentBadge, badgeFullText);
+        patchAttr(ctxAgentBadge, 'title', badgeFullText);
+
+        const pillItems = [];
+        if (effectiveScope === 'all') {
+          pillItems.push({
+            key: 'auto',
+            label: `跟随活跃 (${aggregated?.activeAgentBadge || '主'})`,
+            title: '自动展示当前正在运行或最新活跃的代理上下文窗口',
+            isActive: effectiveCtxScope === 'auto',
+            mode: 'ctx-only',
+          });
+        } else {
+          pillItems.push({
+            key: 'all',
+            label: `全部汇总 (${aggregated?.stepCount ?? 0}步)`,
+            title: '切回全部代理汇总视图',
+            isActive: false,
+            mode: 'scope',
+          });
+        }
+
+        const allAgentPills = agents.map((ag) => {
+          const agPct = ag.context?.usedPct ?? 0;
+          const isAct =
+            effectiveScope === 'all'
+              ? effectiveCtxScope === ag.agentId
+              : effectiveScope === ag.agentId;
+          return {
+            key: ag.agentId,
+            label: `${ag.badgeText || ag.shortLabel} ${agPct}%`,
+            title: `${formatAgentLabel(ag)} (${ag.activeModelShort || '模型未知'} · ${ag.stepCount || 0}步)`,
+            isActive: isAct,
+            mode: effectiveScope === 'all' ? 'ctx-only' : 'scope',
+          };
+        });
+
+        // 根据当前卡片的实际像素宽度估算单行可容纳的胶囊数量，尽可能塞满整行右侧空间
+        const firstPillWidth = pillItems.length > 0 ? estPillWidth(pillItems[0].label) : 0;
+        const totalAllWidth = allAgentPills.reduce(
+          (sum, p) => sum + PILL_GAP_PX + estPillWidth(p.label),
+          firstPillWidth
+        );
+        const needsCollapse = totalAllWidth > availRowWidth && allAgentPills.length > 2;
+
+        if (needsCollapse && !ctxPillsExpanded) {
+          const toggleReservePx = PILL_GAP_PX + estPillWidth(`+${allAgentPills.length} 展开 ▾`);
+          let usedW = firstPillWidth;
+          let fitCount = 0;
+          for (let i = 0; i < allAgentPills.length; i++) {
+            const pw = PILL_GAP_PX + estPillWidth(allAgentPills[i].label);
+            if (fitCount >= 1 && usedW + pw + toggleReservePx > availRowWidth) {
+              break;
+            }
+            usedW += pw;
+            fitCount++;
+          }
+          // 至少折叠 2 个胶囊（避免出现比胶囊本身还宽的 "+1 展开 ▾"）
+          const maxKeep = Math.max(1, allAgentPills.length - 2);
+          const maxCollapsedCount = Math.max(1, Math.min(maxKeep, fitCount));
+          const visibleAgentPills = allAgentPills.slice(0, maxCollapsedCount);
+          const activeHiddenPill = allAgentPills
+            .slice(maxCollapsedCount)
+            .find((p) => p.isActive);
+          if (activeHiddenPill) {
+            if (visibleAgentPills.length >= 2) {
+              visibleAgentPills[visibleAgentPills.length - 1] = activeHiddenPill;
+            } else {
+              visibleAgentPills.push(activeHiddenPill);
+            }
+          }
+          const hiddenCount = allAgentPills.length - visibleAgentPills.length;
+          pillItems.push(...visibleAgentPills, {
+            key: '__toggle_more__',
+            label: `+${hiddenCount} 展开 ▾`,
+            title: `展开全部 ${allAgentPills.length - 1} 个子代理的上下文窗口胶囊`,
+            isActive: false,
+            isMoreToggle: true,
+            mode: 'toggle-expand',
+          });
+        } else {
+          pillItems.push(...allAgentPills);
+          if (needsCollapse) {
+            pillItems.push({
+              key: '__toggle_more__',
+              label: '收起 ▴',
+              title: '折叠多余子代理胶囊',
+              isActive: false,
+              isMoreToggle: true,
+              mode: 'toggle-expand',
+            });
+          }
+        }
+
+        patchKeyedList(ctxPillGroup, pillItems, {
+          keyFn: (item) => item.key,
+          sigFn: (item) =>
+            `${item.key}:${item.label}:${item.isActive}:${item.isMoreToggle}:${item.mode}:${item.title}`,
+          createRow: () => {
+            const btn = h('button', { type: 'button', className: 'ctx-agent-pill' });
+            return { el: btn, refs: { btn } };
+          },
+          updateRow: (refs, item) => {
+            patchText(refs.btn, item.label);
+            patchAttr(refs.btn, 'title', item.title);
+            patchClasses(refs.btn, {
+              'is-active': item.isActive,
+              'is-more-toggle': Boolean(item.isMoreToggle),
+            });
+            refs.btn.onclick = () => {
+              if (item.mode === 'toggle-expand') {
+                ctxPillsExpanded = !ctxPillsExpanded;
+                renderData(latestData);
+              } else if (item.mode === 'ctx-only') {
+                uiStore.setState({ ctxInspectorAgentId: item.key });
+              } else if (item.key === 'all') {
+                uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' });
+              } else {
+                uiStore.setState({ selectedAgentScope: item.key });
+              }
+            };
+          },
+        });
+      }
+
       const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000);
       const totalTokens = Number(ctx.totalTokens || 0);
       const usedPct =
@@ -2731,12 +3302,19 @@ const LiveOverviewView = defineComponent({
         `${formatTokens(totalTokens)} / ${formatTokens(limitTokens)} (${usedPct}%)`
       );
       ctxSegmentBar.setProps({ context: { ...ctx, limitTokens, usedPct } });
-      patchText(bdMessages, formatTokens(ctx.messagesTokens || 0));
-      patchText(bdSystemTools, formatTokens(ctx.systemToolsTokens || 0));
-      patchText(bdMcpTools, formatTokens(ctx.mcpToolsTokens || 0));
-      patchText(bdSkills, formatTokens(ctx.skillsTokens || 0));
-      patchText(bdSystemPrompt, formatTokens(ctx.systemPromptTokens || 0));
-      patchText(bdUserRules, formatTokens(ctx.userRulesTokens || 0));
+      const scoredChannels = ctxChannels.map((ch) => {
+        const val = ch.getValue(ctx);
+        patchText(ch.valEl, formatTokens(val));
+        return { ch, val };
+      });
+      scoredChannels.sort((a, b) => b.val - a.val || a.ch.defaultOrder - b.ch.defaultOrder);
+      const nextLegendOrderSig = scoredChannels.map((x) => x.ch.key).join(',');
+      if (nextLegendOrderSig !== lastLegendOrderSig) {
+        lastLegendOrderSig = nextLegendOrderSig;
+        for (const { ch } of scoredChannels) {
+          ctxLegendGrid.appendChild(ch.itemEl);
+        }
+      }
 
       // 3. 更新动态配额池列表（支持 Gemini、Pro 独立 Argon 池、Claude & GPT 等）
       patchText(
@@ -2805,21 +3383,52 @@ const LiveOverviewView = defineComponent({
       }
     );
 
+    let prevScope = uiStore.getState().selectedAgentScope;
+    let prevCtxTarget = uiStore.getState().ctxInspectorAgentId;
+
     const unsubView = uiStore.subscribe(
-      (st) => st.activeView,
-      (activeView) => {
-        if (activeView === 'overview' && isDirty) {
+      (st) => ({
+        activeView: st.activeView,
+        selectedAgentScope: st.selectedAgentScope,
+        ctxInspectorAgentId: st.ctxInspectorAgentId,
+      }),
+      (slice) => {
+        const scopeChanged =
+          slice.selectedAgentScope !== prevScope || slice.ctxInspectorAgentId !== prevCtxTarget;
+        prevScope = slice.selectedAgentScope;
+        prevCtxTarget = slice.ctxInspectorAgentId;
+
+        if (slice.activeView !== 'overview') {
+          if (scopeChanged) isDirty = true;
+          return;
+        }
+        if ((isDirty || scopeChanged) && latestData) {
           isDirty = false;
-          if (latestData) {
-            renderData(latestData);
-          }
+          renderData(latestData);
         }
       }
     );
 
+    let ro = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => {
+        if (uiStore.getState().activeView !== 'overview') return;
+        const nextW =
+          ctxInspectorBar.clientWidth || (ctxPanel.clientWidth ? ctxPanel.clientWidth - 24 : 0);
+        if (nextW > 160 && Math.abs(nextW - cachedBarWidth) >= 6) {
+          cachedBarWidth = nextW;
+          if (latestData?.activeConversation?.hasSubagents) {
+            renderData(latestData);
+          }
+        }
+      });
+      ro.observe(ctxPanel);
+    }
+
     onCleanup(() => {
       unsub();
       unsubView();
+      if (ro) ro.disconnect();
       ctxSegmentBar.destroy();
       viewScrollbar.destroy();
     });
@@ -3416,6 +4025,24 @@ const ConsumptionView = defineComponent({
 const StepsDetailView = defineComponent({
   name: 'StepsDetailView',
   setup({ onCleanup }) {
+    // 方案 B：明细面板标题栏内嵌代理筛选下拉框（与顶栏代理切换条双向同步）
+    const inlineScopeSelect = CustomSelect({
+      modelValue: uiStore.getState().selectedAgentScope,
+      icon: 'layers',
+      placeholder: '全部代理',
+      className: 'steps-inline-scope-select',
+      options: [{ value: 'all', label: '全部代理' }],
+      onUpdateModelValue: (nextScope) => {
+        if (nextScope) {
+          uiStore.setState({
+            selectedAgentScope: nextScope,
+            ...(nextScope === 'all' ? { ctxInspectorAgentId: 'auto' } : {}),
+          });
+        }
+      },
+    });
+    inlineScopeSelect.el.setAttribute('hidden', '');
+
     // 顶部子表分段切换器：在“按步查看”与“按模型汇总”之间切换
     const subTabSwitch = SegmentedControl({
       ariaLabel: '明细表视图切换',
@@ -3486,7 +4113,10 @@ const StepsDetailView = defineComponent({
             createSvgIcon('table', { size: 13 }),
             h('span', { text: '调用记录' }),
           ]),
-          subTabSwitch.el,
+          h('div', { className: 'steps-header-controls' }, [
+            inlineScopeSelect.el,
+            subTabSwitch.el,
+          ]),
         ]),
         stepsScroll.el,
         modelsScroll.el,
@@ -3514,26 +4144,82 @@ const StepsDetailView = defineComponent({
      */
     function renderStepsData(slice) {
       if (!slice) return;
-      const steps = slice.recentSteps || [];
-      const models = slice.modelBreakdown || [];
+      const uiSt = uiStore.getState();
+      const {
+        hasSubagents,
+        effectiveScope,
+        subagents,
+        mainAgent,
+        aggregated,
+        scopedConv,
+      } = resolveScopedConversation(
+        { activeConversation: slice.activeConversation },
+        uiSt.selectedAgentScope,
+        uiSt.ctxInspectorAgentId
+      );
+
+      patchAttr(inlineScopeSelect.el, 'hidden', !hasSubagents);
+      if (hasSubagents) {
+        const scopeOpts = [
+          {
+            value: 'all',
+            label: '全部汇总',
+            meta: `${aggregated?.stepCount ?? 0}步`,
+          },
+          {
+            value: 'main',
+            label: '主代理',
+            meta: `${mainAgent?.stepCount ?? 0}步`,
+          },
+          ...subagents.map((s) => ({
+            value: s.agentId,
+            label: formatAgentLabel(s),
+            meta: `${s.stepCount || 0}步`,
+          })),
+        ];
+        inlineScopeSelect.setProps({
+          modelValue: effectiveScope,
+          options: scopeOpts,
+        });
+      } else {
+        inlineScopeSelect.close();
+      }
+
+      const steps =
+        (hasSubagents ? scopedConv?.recentSteps : slice.recentSteps) ||
+        slice.recentSteps ||
+        [];
+      const models =
+        hasSubagents && Array.isArray(scopedConv?.modelBreakdown)
+          ? scopedConv.modelBreakdown
+          : slice.modelBreakdown || [];
       const showUpstream = Boolean(slice.showUpstreamModel);
+      const modelsTabBadge = hasSubagents
+        ? effectiveScope === 'all'
+          ? '本会话汇总'
+          : scopedConv?.shortLabel || '当前代理'
+        : slice.rangeLabel;
 
       subTabSwitch.setProps({
         options: [
           { value: 'steps', label: `按步查看 (${steps.length})` },
-          { value: 'models', label: `按模型汇总 (${slice.rangeLabel})` },
+          { value: 'models', label: `按模型汇总 (${modelsTabBadge})` },
         ],
       });
 
-      // 1. 单步测速表增量对账：以 `<cascadeId>-<stepIndex>` 为稳定行键，仅在签名变化时刷新单元格
+      // 1. 单步测速表增量对账：以 `<agentCascadeId>-<stepIndex>` 为稳定行键，仅在签名变化时刷新单元格
       patchKeyedList(stepsTbody, steps, {
-        keyFn: (st) => `${slice.cascadeId || 'conv'}-${st.stepIndex}`,
+        keyFn: (st) => `${st.agentCascadeId || slice.cascadeId || 'conv'}-${st.stepIndex}`,
         sigFn: (st) =>
-          `${st.stepIndex}:${showUpstream ? st.modelUpstream || st.responseModel || st.modelShort : st.modelShort}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}`,
+          `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${showUpstream ? st.modelUpstream || st.responseModel || st.modelShort : st.modelShort}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}`,
         createRow: () => {
+          const agentBadgeEl = h('span', {
+            className: 'agent-badge is-clickable',
+            hidden: true,
+            style: 'margin-right: 4px;',
+          });
           const stepNumText = h('span');
-          const compIcon = createSvgIcon('bolt', { size: 11, className: 'text-muted' });
-          const tdStep = h('td', {}, [stepNumText, compIcon]);
+          const tdStep = h('td', {}, [agentBadgeEl, stepNumText]);
 
           const tdModel = h('td', {
             style: 'max-width: 140px; overflow: hidden; text-overflow: ellipsis;',
@@ -3557,8 +4243,8 @@ const StepsDetailView = defineComponent({
           return {
             el: tr,
             refs: {
+              agentBadgeEl,
               stepNumText,
-              compIcon,
               tdModel,
               speedMain,
               speedReason,
@@ -3570,8 +4256,28 @@ const StepsDetailView = defineComponent({
           };
         },
         updateRow: (refs, st) => {
-          patchText(refs.stepNumText, `#${Number(st.stepIndex)} `);
-          patchAttr(refs.compIcon, 'hidden', !st.isCompactionStep);
+          patchAttr(refs.agentBadgeEl, 'hidden', !hasSubagents);
+          if (hasSubagents) {
+            const badgeCls = getAgentBadgeClass(st.agentIndex || 0, !st.isSubagent);
+            patchAttr(refs.agentBadgeEl, 'class', `agent-badge is-clickable ${badgeCls}`);
+            patchText(refs.agentBadgeEl, st.agentBadge || (st.isSubagent ? '子' : '主'));
+            patchAttr(
+              refs.agentBadgeEl,
+              'title',
+              effectiveScope === 'all'
+                ? `点击仅过滤查看 ${st.agentLabel || '该代理'}`
+                : '点击切回全部汇总'
+            );
+            refs.agentBadgeEl.onclick = () => {
+              const targetScope = st.agentId || 'main';
+              const nextScope = effectiveScope === targetScope ? 'all' : targetScope;
+              uiStore.setState({
+                selectedAgentScope: nextScope,
+                ...(nextScope === 'all' ? { ctxInspectorAgentId: 'auto' } : {}),
+              });
+            };
+          }
+          patchText(refs.stepNumText, `#${Number(st.stepIndex)}`);
           const modelText =
             (showUpstream ? st.modelUpstream || st.responseModel : st.modelShort) ||
             st.modelShort ||
@@ -3636,12 +4342,16 @@ const StepsDetailView = defineComponent({
         },
       });
 
-      stepsScroll.refresh();
-      modelsScroll.refresh();
+      if (uiSt.stepsSubTab === 'models') {
+        modelsScroll.refresh();
+      } else {
+        stepsScroll.refresh();
+      }
     }
 
     const unsubTelemetry = telemetryStore.subscribe(
       (st) => ({
+        activeConversation: st.telemetry?.activeConversation,
         cascadeId: st.telemetry?.activeConversation?.cascadeId,
         recentSteps: st.telemetry?.activeConversation?.recentSteps,
         modelBreakdown: st.telemetry?.modelBreakdown,
@@ -3659,14 +4369,23 @@ const StepsDetailView = defineComponent({
       }
     );
 
+    let prevScope = uiStore.getState().selectedAgentScope;
+
     const unsubView = uiStore.subscribe(
-      (st) => st.activeView,
-      (activeView) => {
-        if (activeView === 'steps' && isDirty) {
+      (st) => ({
+        activeView: st.activeView,
+        selectedAgentScope: st.selectedAgentScope,
+      }),
+      (uiSlice) => {
+        const scopeChanged = uiSlice.selectedAgentScope !== prevScope;
+        prevScope = uiSlice.selectedAgentScope;
+        if (uiSlice.activeView !== 'steps') {
+          if (scopeChanged) isDirty = true;
+          return;
+        }
+        if ((isDirty || scopeChanged) && latestSlice) {
           isDirty = false;
-          if (latestSlice) {
-            renderStepsData(latestSlice);
-          }
+          renderStepsData(latestSlice);
         }
       }
     );
@@ -3675,6 +4394,7 @@ const StepsDetailView = defineComponent({
       unsubUi();
       unsubTelemetry();
       unsubView();
+      inlineScopeSelect.destroy();
       subTabSwitch.destroy();
       stepsScroll.destroy();
       modelsScroll.destroy();
@@ -3682,7 +4402,14 @@ const StepsDetailView = defineComponent({
 
     return {
       el: rootEl,
-      refs: { stepsTbody, modelsTbody, subTabSwitch, stepsScroll, modelsScroll },
+      refs: {
+        stepsTbody,
+        modelsTbody,
+        inlineScopeSelect,
+        subTabSwitch,
+        stepsScroll,
+        modelsScroll,
+      },
     };
   },
 });
@@ -3899,7 +4626,7 @@ const SettingsView = defineComponent({
     // --- 面板 2：版本更新面板 ---
     const pricingCountVal = h('strong', { className: 'cell-value', text: '—' });
     const pricingSyncSub = h('span', { className: 'cell-sub', text: '读取中…' });
-    const versionVal = h('strong', { className: 'cell-value', text: 'v1.4.0' });
+    const versionVal = h('strong', { className: 'cell-value', text: 'v1.4.1' });
     const versionSub = h('span', { className: 'cell-sub', text: '检查中…' });
 
     const syncPricingBtnText = h('span', { text: '更新价格表' });
@@ -3954,7 +4681,7 @@ const SettingsView = defineComponent({
                 return;
               }
               if (!cs?.updateAvailable) {
-                const curVer = cs?.currentPluginVersion || '1.4.0';
+                const curVer = cs?.currentPluginVersion || '1.4.1';
                 showCloudFeedback(`当前已是最新版本 (v${curVer})`, 4500);
                 return;
               }
@@ -4057,7 +4784,7 @@ const SettingsView = defineComponent({
         `${srcLabel} · ${formatSyncTimeText(cs.lastSyncedAtMs, cs.catalogUpdatedAt)}`
       );
 
-      const curVer = cs.currentPluginVersion || '1.4.0';
+      const curVer = cs.currentPluginVersion || '1.4.1';
       const latVer = cs.latestPluginVersion || curVer;
       const modeTag = cs.installMode === 'git' ? 'Git' : 'ZIP';
       patchText(versionVal, `v${curVer}`);
@@ -4188,20 +4915,38 @@ const App = defineComponent({
       }
     );
 
+    function syncStepsBadge() {
+      const { scopedConv } = resolveScopedConversation(
+        telemetryStore.getState().telemetry,
+        uiStore.getState().selectedAgentScope,
+        uiStore.getState().ctxInspectorAgentId
+      );
+      const stepCount = scopedConv?.stepCount ?? 0;
+      topPillNav.setProps({
+        items: VIEW_TABS.map((t) =>
+          t.value === 'steps' ? { ...t, badge: stepCount > 0 ? stepCount : '' } : t
+        ),
+      });
+    }
+
     const unsubStepCount = telemetryStore.subscribe(
-      (st) => st.telemetry?.activeConversation?.stepCount ?? 0,
-      (stepCount) => {
-        topPillNav.setProps({
-          items: VIEW_TABS.map((t) =>
-            t.value === 'steps' ? { ...t, badge: stepCount > 0 ? stepCount : '' } : t
-          ),
-        });
-      }
+      (st) => ({
+        stepCount: st.telemetry?.activeConversation?.stepCount ?? 0,
+        totalStepsAllAgents: st.telemetry?.activeConversation?.totalStepsAllAgents ?? 0,
+        subagentCount: st.telemetry?.activeConversation?.subagentCount ?? 0,
+      }),
+      () => syncStepsBadge()
+    );
+
+    const unsubScopeBadge = uiStore.subscribe(
+      (st) => st.selectedAgentScope,
+      () => syncStepsBadge()
     );
 
     onCleanup(() => {
       unsubUi();
       unsubStepCount();
+      unsubScopeBadge();
       sessionHeader.destroy();
       topPillNav.destroy();
       overviewView.destroy();

@@ -48,13 +48,18 @@
   --metric-danger: var(--destructive, hsl(0 74% 50%));
   --metric-danger-soft: color-mix(in srgb, var(--metric-danger) 15%, transparent);
 
-  /* Context Window 6-Channel Palette */
+  /* Context Window 10-Channel Palette */
   --ctx-messages: hsl(217 82% 51%);
+  --ctx-assistant: hsl(217 82% 54%);
+  --ctx-tool-results: hsl(192 82% 43%);
+  --ctx-user-input: hsl(245 72% 62%);
+  --ctx-subagent-msg: hsl(280 70% 58%);
+  --ctx-checkpoint: hsl(38 90% 50%);
   --ctx-system-tools: hsl(22 86% 50%);
-  --ctx-mcp-tools: hsl(268 72% 56%);
+  --ctx-mcp-tools: hsl(316 72% 54%);
   --ctx-skills: hsl(145 64% 38%);
-  --ctx-system-prompt: hsl(190 80% 38%);
-  --ctx-user-rules: hsl(340 76% 52%);
+  --ctx-system-prompt: hsl(168 72% 40%);
+  --ctx-user-rules: hsl(346 78% 54%);
 
   /* Legacy 4-Channel Palette (retained for compatibility) */
   --ctx-cached: hsl(217 82% 51%);

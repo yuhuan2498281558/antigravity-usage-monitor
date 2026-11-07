@@ -56,20 +56,69 @@ function isEquivalentTelemetry(prev, next) {
     return false;
   }
 
-  // 3. 比对活跃会话的实时测速指标（会话 ID、步数、运行状态、TPS、TTFT、当前模型标识与单步费用）
+  // 3. 比对活跃会话的实时测速指标（会话 ID、步数、子代理拓扑、运行状态、TPS、TTFT、当前模型标识与单步费用）
   if (pAct?.cascadeId !== nAct?.cascadeId) return false;
   if (pAct?.stepCount !== nAct?.stepCount) return false;
+  if (pAct?.subagentCount !== nAct?.subagentCount) return false;
+  if (pAct?.totalStepsAllAgents !== nAct?.totalStepsAllAgents) return false;
   if (pAct?.isRunning !== nAct?.isRunning) return false;
+  if (pAct?.aggregated?.isRunning !== nAct?.aggregated?.isRunning) return false;
+  if (pAct?.aggregated?.activeAgentId !== nAct?.aggregated?.activeAgentId) return false;
+  if (pAct?.aggregated?.activeAgentBadge !== nAct?.aggregated?.activeAgentBadge) return false;
+  if (pAct?.aggregated?.latestTokPerSec !== nAct?.aggregated?.latestTokPerSec) return false;
+  if (pAct?.aggregated?.latestTtftSec !== nAct?.aggregated?.latestTtftSec) return false;
+  if (pAct?.aggregated?.avgTokPerSec !== nAct?.aggregated?.avgTokPerSec) return false;
+  if (pAct?.aggregated?.latestStepCostUsd !== nAct?.aggregated?.latestStepCostUsd) return false;
+  if (pAct?.aggregated?.sessionCostUsd !== nAct?.aggregated?.sessionCostUsd) return false;
+  if (pAct?.aggregated?.activeModelShort !== nAct?.aggregated?.activeModelShort) return false;
   if (pAct?.latestTokPerSec !== nAct?.latestTokPerSec) return false;
   if (pAct?.latestTtftSec !== nAct?.latestTtftSec) return false;
   if (pAct?.activeModelShort !== nAct?.activeModelShort || pAct?.activeModelLabel !== nAct?.activeModelLabel) return false;
   if (pAct?.latestStepCostUsd !== nAct?.latestStepCostUsd || pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls) return false;
+
+  const pAgents = pAct?.agents || [];
+  const nAgents = nAct?.agents || [];
+  if (pAgents.length !== nAgents.length) return false;
+  for (let i = 0; i < pAgents.length; i++) {
+    const pa = pAgents[i];
+    const na = nAgents[i];
+    const pLastStep = pa?.recentSteps?.[0];
+    const nLastStep = na?.recentSteps?.[0];
+    if (
+      pa?.agentId !== na?.agentId ||
+      pa?.role !== na?.role ||
+      pa?.stepCount !== na?.stepCount ||
+      pa?.isRunning !== na?.isRunning ||
+      pa?.latestTokPerSec !== na?.latestTokPerSec ||
+      pa?.latestTtftSec !== na?.latestTtftSec ||
+      pa?.avgTokPerSec !== na?.avgTokPerSec ||
+      pa?.latestStepCostUsd !== na?.latestStepCostUsd ||
+      pa?.sessionCostUsd !== na?.sessionCostUsd ||
+      pa?.activeModelShort !== na?.activeModelShort ||
+      pa?.context?.totalTokens !== na?.context?.totalTokens ||
+      pa?.context?.messagesTokens !== na?.context?.messagesTokens ||
+      pa?.context?.toolResultsTokens !== na?.context?.toolResultsTokens ||
+      pa?.context?.assistantTokens !== na?.context?.assistantTokens ||
+      pLastStep?.tokPerSec !== nLastStep?.tokPerSec ||
+      pLastStep?.ttftSec !== nLastStep?.ttftSec ||
+      pLastStep?.outputTokens !== nLastStep?.outputTokens ||
+      pLastStep?.modelUpstream !== nLastStep?.modelUpstream ||
+      pLastStep?.costUsd !== nLastStep?.costUsd
+    ) {
+      return false;
+    }
+  }
 
   // 4. 比对 6 通道上下文窗口构成（总 Token 与消息/系统工具/MCP/Skill/系统提示词/用户规则）及近期步骤明细
   const pCtx = pAct?.context;
   const nCtx = nAct?.context;
   if (pCtx?.totalTokens !== nCtx?.totalTokens) return false;
   if (pCtx?.messagesTokens !== nCtx?.messagesTokens) return false;
+  if (pCtx?.assistantTokens !== nCtx?.assistantTokens) return false;
+  if (pCtx?.toolResultsTokens !== nCtx?.toolResultsTokens) return false;
+  if (pCtx?.userInputTokens !== nCtx?.userInputTokens) return false;
+  if (pCtx?.subagentTokens !== nCtx?.subagentTokens) return false;
+  if (pCtx?.checkpointTokens !== nCtx?.checkpointTokens) return false;
   if (pCtx?.systemToolsTokens !== nCtx?.systemToolsTokens) return false;
   if (pCtx?.mcpToolsTokens !== nCtx?.mcpToolsTokens) return false;
   if (pCtx?.skillsTokens !== nCtx?.skillsTokens) return false;
@@ -179,7 +228,20 @@ function isEquivalentTelemetry(prev, next) {
     }
   }
 
-  if ((prev.conversations?.length || 0) !== (next.conversations?.length || 0)) return false;
+  const pConvs = prev.conversations || [];
+  const nConvs = next.conversations || [];
+  if (pConvs.length !== nConvs.length) return false;
+  for (let i = 0; i < pConvs.length; i++) {
+    if (
+      pConvs[i]?.cascadeId !== nConvs[i]?.cascadeId ||
+      pConvs[i]?.title !== nConvs[i]?.title ||
+      pConvs[i]?.stepCount !== nConvs[i]?.stepCount ||
+      pConvs[i]?.subagentCount !== nConvs[i]?.subagentCount ||
+      pConvs[i]?.totalStepCount !== nConvs[i]?.totalStepCount
+    ) {
+      return false;
+    }
+  }
 
   return true;
 }
@@ -335,4 +397,129 @@ export function stopAsyncTelemetryLoop() {
     clearTimeout(pollTimer);
     pollTimer = null;
   }
+}
+
+/**
+ * 根据代理索引返回对应的微边框语义徽章样式类名。
+ *
+ * @param {number} [index=0]
+ * @param {boolean} [isMain=false]
+ * @returns {string}
+ */
+export function getAgentBadgeClass(index = 0, isMain = false) {
+  if (isMain || index <= 0) return 'badge-main';
+  const slot = ((index - 1) % 3) + 1;
+  return `badge-sub-${slot}`;
+}
+
+/**
+ * 格式化主/子代理的完整显示名称（如 `子代理 #1 · Codebase Researcher`）。
+ *
+ * @param {object|null|undefined} agent
+ * @returns {string}
+ */
+export function formatAgentLabel(agent) {
+  if (!agent) return '主代理';
+  if (agent.isMain) return agent.shortLabel || '主代理';
+  const rolePart = agent.role && agent.role !== '子代理' ? ` · ${agent.role}` : '';
+  return `${agent.shortLabel || '子代理'}${rolePart}`;
+}
+
+/**
+ * 解析当前选中的主/子代理作用域视图数据与独立上下文窗口检视目标。
+ * 同时在客户端按需组装主代理与全部汇总的 `recentSteps`，避免后端 JSON 载荷重复序列化 2-3 倍步骤列表。
+ *
+ * @param {object|null} telemetry
+ * @param {string} [selectedAgentScope='all']
+ * @param {string} [ctxInspectorAgentId='auto']
+ */
+export function resolveScopedConversation(
+  telemetry,
+  selectedAgentScope = 'all',
+  ctxInspectorAgentId = 'auto'
+) {
+  const active = telemetry?.activeConversation || {};
+  const agents = Array.isArray(active.agents) && active.agents.length > 0 ? active.agents : [];
+  const hasSubagents = Boolean(active.hasSubagents && agents.length > 1);
+  const subagents = agents.filter((a) => !a.isMain);
+  const mainAgent = agents.find((a) => a.isMain) || active;
+  if (mainAgent && !Array.isArray(mainAgent.recentSteps) && Array.isArray(active.recentSteps)) {
+    mainAgent.recentSteps = active.recentSteps;
+  }
+  const aggregated = active.aggregated || active;
+  if (hasSubagents && aggregated && !Array.isArray(aggregated.recentSteps)) {
+    const combined = [];
+    for (const ag of agents) {
+      const steps = ag.isMain ? ag.recentSteps || active.recentSteps || [] : ag.recentSteps || [];
+      combined.push(...steps);
+    }
+    combined.sort(
+      (a, b) =>
+        (b.createdAtMs || 0) - (a.createdAtMs || 0) ||
+        (b.agentIndex || 0) - (a.agentIndex || 0) ||
+        (b.stepIndex || 0) - (a.stepIndex || 0)
+    );
+    aggregated.recentSteps = combined;
+  }
+
+  if (!hasSubagents) {
+    return {
+      hasSubagents: false,
+      effectiveScope: 'main',
+      effectiveCtxScope: 'main',
+      agents,
+      subagents: [],
+      mainAgent,
+      aggregated,
+      scopedConv: active,
+      ctxAgent: mainAgent,
+    };
+  }
+
+  const isValidSub = subagents.some((s) => s.agentId === selectedAgentScope);
+  const effectiveScope =
+    selectedAgentScope === 'main'
+      ? 'main'
+      : isValidSub
+        ? selectedAgentScope
+        : 'all';
+
+  const scopedConv =
+    effectiveScope === 'all'
+      ? aggregated
+      : agents.find((a) => a.agentId === effectiveScope) || mainAgent;
+
+  let ctxAgent = scopedConv;
+  let effectiveCtxScope = effectiveScope;
+  if (effectiveScope === 'all') {
+    if (ctxInspectorAgentId && ctxInspectorAgentId !== 'auto') {
+      const matched = agents.find((a) => a.agentId === ctxInspectorAgentId);
+      if (matched) {
+        ctxAgent = matched;
+        effectiveCtxScope = matched.agentId;
+      } else {
+        effectiveCtxScope = 'auto';
+      }
+    } else {
+      effectiveCtxScope = 'auto';
+    }
+    if (effectiveCtxScope === 'auto') {
+      ctxAgent =
+        agents.find((a) => a.agentId === aggregated.activeAgentId) ||
+        agents.find((a) => a.isRunning) ||
+        mainAgent;
+    }
+  }
+
+  return {
+    hasSubagents: true,
+    effectiveScope,
+    effectiveCtxScope,
+    agents,
+    subagents,
+    mainAgent,
+    aggregated,
+    scopedConv,
+    ctxAgent,
+  };
 }

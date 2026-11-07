@@ -13,7 +13,9 @@ export const CustomSelect = defineComponent({
     let isOpen = false;
     let focusedIndex = -1;
 
-    const leadIcon = createSvgIcon(getProps().icon || 'bolt', { size: 13 });
+    const initialIcon = getProps().icon;
+    const leadIcon = createSvgIcon(initialIcon || 'bolt', { size: 13 });
+    patchAttr(leadIcon, 'hidden', !initialIcon);
     const triggerLabel = h('span', { className: 'select-label' });
     const chevronIcon = createSvgIcon('chevron-down', { size: 13 });
 
@@ -40,7 +42,8 @@ export const CustomSelect = defineComponent({
       hidden: true,
     });
 
-    const rootEl = h('div', { className: 'custom-select' }, [triggerBtn, menuEl]);
+    const initialClass = ['custom-select', getProps().className].filter(Boolean).join(' ');
+    const rootEl = h('div', { className: initialClass }, [triggerBtn, menuEl]);
 
     function toggleOpen(nextOpen) {
       isOpen = Boolean(nextOpen);
@@ -142,9 +145,16 @@ export const CustomSelect = defineComponent({
     }
 
     function syncTriggerAndMenu() {
-      const { options = [], modelValue, placeholder = '请选择', icon = 'bolt' } = getProps();
-      patchSvgIcon(leadIcon, icon);
-      const selectedOpt = options.find((o) => o.value === modelValue) || options[0];
+      const { options = [], modelValue, placeholder = '请选择', icon } = getProps();
+      patchAttr(leadIcon, 'hidden', !icon);
+      if (icon) {
+        patchSvgIcon(leadIcon, icon);
+      }
+      const selectedOpt =
+        options.find((o) => o.value === modelValue) ||
+        (modelValue !== '' && modelValue !== null && modelValue !== undefined
+          ? options[0]
+          : undefined);
       patchText(triggerLabel, selectedOpt ? selectedOpt.label : placeholder);
       if (isOpen) {
         renderMenuOptions();
