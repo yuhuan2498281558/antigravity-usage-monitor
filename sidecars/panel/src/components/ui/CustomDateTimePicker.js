@@ -257,8 +257,8 @@ export const CustomDateTimePicker = defineComponent({
     };
 
     if (typeof document !== 'undefined' && document.addEventListener) {
-      document.addEventListener('click', handleDocClick);
-      onCleanup(() => document.removeEventListener('click', handleDocClick));
+      document.addEventListener('click', handleDocClick, true);
+      onCleanup(() => document.removeEventListener('click', handleDocClick, true));
     }
 
     syncDisplay();

@@ -331,4 +331,214 @@ test('converges multi-level nested subagents to ultimate root and preserves metr
   // Main agent steps are not duplicated in agents[0].recentSteps or aggregated.recentSteps
   assert.equal(p.activeConversation.agents[0].recentSteps,undefined);
   assert.equal(p.activeConversation.aggregated.recentSteps,undefined);
+  // Running sub-l2 with 0 steps still exposes liveActivity on both subagent and aggregated view
+  assert.equal(p.activeConversation.agents[0].liveActivity,null);
+  assert.equal(p.activeConversation.agents[2].liveActivity.phase,'thinking');
+  assert.equal(p.activeConversation.aggregated.liveActivity.agentId,'sub-l2');
+  assert.equal(p.activeConversation.aggregated.liveActivity.agentBadge,'子2');
+  // runningConversations includes root-multi with main summary and collapsible subagents summary
+  assert.equal(p.runningConversations.length,1);
+  assert.equal(p.runningConversations[0].cascadeId,'root-multi');
+  assert.equal(p.runningConversations[0].title,'Multi-Level Task');
+  assert.equal(p.runningConversations[0].subagentCount,2);
+  assert.equal(p.runningConversations[0].runningSubagentCount,1);
+  assert.equal(p.runningConversations[0].mainActivity.label,'等待子代理');
+  assert.equal(p.runningConversations[0].subagents[0].role,'Level 1 Orchestrator');
+  assert.equal(p.runningConversations[0].subagents[0].isRunning,false);
+  assert.equal(p.runningConversations[0].subagents[0].liveActivity.label,'已完成');
+  assert.equal(p.runningConversations[0].subagents[1].role,'Level 2 Deep Worker');
+  assert.equal(p.runningConversations[0].subagents[1].isRunning,true);
+});
+
+test('trendSeries buckets hourly for <=72h windows (today/24h) and daily for >72h windows (7d)', async () => {
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs - 5000).toISOString();
+  const finIso = new Date(nowMs).toISOString();
+  const h = backendHarness({
+    trajectories: {
+      c1: {
+        trajectory: {
+          steps: [
+            {
+              status: 'CORTEX_STEP_STATUS_DONE',
+              metadata: {
+                createdAt: nowIso,
+                finishedGeneratingAt: finIso,
+                modelUsage: {
+                  model: 'MODEL_PLACEHOLDER_M37',
+                  inputTokens: '100',
+                  cacheReadTokens: '200',
+                  outputTokens: '600',
+                  thinkingOutputTokens: '100',
+                  responseOutputTokens: '500',
+                },
+              },
+              plannerResponse: { response: 'answer', thinkingDuration: '2s' },
+            },
+          ],
+          generatorMetadata: [{ stepIndices: [0], chatModel: { timeToFirstToken: '1s', streamingDuration: '4s' } }],
+        },
+      },
+    },
+    summaries: {
+      c1: { stepCount: 1, lastModifiedTime: finIso, status: 'IDLE' },
+    },
+  });
+
+  const p24h = await h.buildTelemetryPayloadInternal('c1', false, { range: '24h' });
+  const trend24h = p24h.consumption.trendSeries;
+  assert.ok(trend24h.length >= 24 && trend24h.length <= 26);
+  assert.equal(trend24h[0].granularity, 'hour');
+  assert.match(trend24h[0].fullLabel, /\d+月\d+日 \d{2}:00 - \d{2}:00/);
+  assert.equal(trend24h.reduce((sum, b) => sum + b.tokens, 0), 900);
+  assert.equal(trend24h.reduce((sum, b) => sum + b.calls, 0), 1);
+
+  const p7d = await h.buildTelemetryPayloadInternal('c1', false, { range: '7d' });
+  const trend7d = p7d.consumption.trendSeries;
+  assert.ok(trend7d.length >= 7 && trend7d.length <= 8);
+  assert.equal(trend7d[0].granularity, 'day');
+  assert.match(trend7d[0].fullLabel, /\d+月\d+日 \(周[日一二三四五六]\)/);
+  assert.equal(trend7d.reduce((sum, b) => sum + b.tokens, 0), 900);
+});
+
+test('supports Gemini 4 Carbon pricing/pool and resolves all newly added language_server placeholder enums', async () => {
+  const nowIso = new Date().toISOString();
+  const h = backendHarness({
+    userStatus: {
+      name: 'Carbon Tester',
+      cascadeModelConfigData: {
+        clientModelConfigs: [
+          {
+            label: 'Gemini 3.8 Flash (High)',
+            modelId: 'gemini-3.8-flash-high',
+            modelOrAlias: { model: 'MODEL_PLACEHOLDER_M318' },
+            quotaInfo: { remainingFraction: 0.9, resetTime: '2026-11-12T00:00:00Z' },
+          },
+          {
+            label: 'Gemini 4 Carbon (High)',
+            modelId: 'gemini-4-carbon-high',
+            modelOrAlias: { model: 'MODEL_PLACEHOLDER_M429' },
+            quotaInfo: { remainingFraction: 0.65, resetTime: '2026-11-17T00:00:00Z' },
+          },
+        ],
+      },
+    },
+    trajectories: {
+      cCarbon: {
+        trajectory: {
+          steps: [
+            {
+              status: 'CORTEX_STEP_STATUS_DONE',
+              metadata: {
+                createdAt: '2026-11-10T00:00:00Z',
+                finishedGeneratingAt: '2026-11-10T00:00:05Z',
+                modelUsage: {
+                  model: 'MODEL_PLACEHOLDER_M298',
+                  inputTokens: '1000000',
+                  cacheReadTokens: '0',
+                  outputTokens: '0',
+                },
+              },
+              plannerResponse: { response: 'flash 3.7 high' },
+            },
+            {
+              status: 'CORTEX_STEP_STATUS_DONE',
+              metadata: {
+                createdAt: '2026-11-10T00:00:06Z',
+                finishedGeneratingAt: '2026-11-10T00:00:10Z',
+                modelUsage: {
+                  model: 'MODEL_PLACEHOLDER_M402',
+                  inputTokens: '1000000',
+                  cacheReadTokens: '0',
+                  outputTokens: '0',
+                },
+              },
+              plannerResponse: { response: 'claude opus 5.5 high' },
+            },
+            {
+              status: 'CORTEX_STEP_STATUS_DONE',
+              metadata: {
+                createdAt: '2026-11-10T00:00:11Z',
+                finishedGeneratingAt: '2026-11-10T00:00:15Z',
+                modelUsage: {
+                  model: 'MODEL_PLACEHOLDER_M429',
+                  inputTokens: '1000000',
+                  cacheReadTokens: '1000000',
+                  outputTokens: '100000',
+                },
+              },
+              plannerResponse: { response: 'carbon high' },
+            },
+            {
+              status: 'CORTEX_STEP_STATUS_DONE',
+              metadata: {
+                createdAt: '2026-11-10T00:00:16Z',
+                finishedGeneratingAt: '2026-11-10T00:00:20Z',
+                modelUsage: {
+                  model: 'claude-fable-5-2-high',
+                  inputTokens: '1000000',
+                  cacheReadTokens: '1000000',
+                  outputTokens: '100000',
+                },
+              },
+              plannerResponse: { response: 'fable 5.2 high' },
+            },
+            {
+              status: 'CORTEX_STEP_STATUS_DONE',
+              metadata: {
+                createdAt: '2026-11-10T00:00:21Z',
+                finishedGeneratingAt: '2026-11-10T00:00:25Z',
+                modelUsage: {
+                  model: 'gpt-6.1-terra',
+                  inputTokens: '1000000',
+                  cacheReadTokens: '1000000',
+                  outputTokens: '100000',
+                },
+              },
+              plannerResponse: { response: 'gpt 6.1 terra' },
+            },
+            {
+              status: 'CORTEX_STEP_STATUS_DONE',
+              metadata: {
+                createdAt: '2026-11-10T00:00:26Z',
+                finishedGeneratingAt: '2026-11-10T00:00:30Z',
+                modelUsage: {
+                  model: 'MODEL_PLACEHOLDER_M429',
+                  inputTokens: '0',
+                  cacheReadTokens: '0',
+                  outputTokens: '100',
+                },
+              },
+              plannerResponse: { response: 'carbon tail' },
+            },
+          ],
+          generatorMetadata: [
+            { stepIndices: [0], chatModel: { timeToFirstToken: '1s', streamingDuration: '4s' } },
+            { stepIndices: [1], chatModel: { timeToFirstToken: '1s', streamingDuration: '3s' } },
+            { stepIndices: [2], chatModel: { timeToFirstToken: '1s', streamingDuration: '3s' } },
+            { stepIndices: [3], chatModel: { timeToFirstToken: '1s', streamingDuration: '3s' } },
+            { stepIndices: [4], chatModel: { timeToFirstToken: '1s', streamingDuration: '3s' } },
+            { stepIndices: [5], chatModel: { timeToFirstToken: '1s', streamingDuration: '1s' } },
+          ],
+        },
+      },
+    },
+    summaries: {
+      cCarbon: { stepCount: 6, lastModifiedTime: nowIso, status: 'IDLE' },
+    },
+  });
+
+  const p = await h.buildTelemetryPayloadInternal('cCarbon');
+  assert.equal(p.activeConversation.sessionUnpricedCalls, 0);
+  // Step 0: M298 -> Gemini 3.7 Flash ($0.75)
+  // Step 1: M402 -> Claude Opus 5.5 ($4.00)
+  // Step 2: Carbon High -> 1M*$2.00 + 1M*$0.10 + 0.1M*$10.0 = $3.10
+  // Step 3: Fable 5.2 High -> 1M*$8.00 + 1M*$0.20 + 0.1M*$40.0 = $12.20
+  // Step 4: GPT-6.1 Terra -> 1M*$1.00 + 1M*$0.05 + 0.1M*$5.0 = $1.55
+  // Step 5: Carbon High -> 100 tok * $10/1M = $0.001
+  // Total = 0.75 + 4.00 + 3.10 + 12.20 + 1.55 + 0.001 = $21.601 -> $21.60
+  assert.equal(p.activeConversation.sessionCostUsd, 21.6);
+  assert.equal(p.activeConversation.activeModelShort, 'carbon-4-high');
+  assert.equal(p.quotas.activePool.poolKey, 'Carbon');
+  assert.equal(p.quotas.activePool.weeklyRemainingIntPct, 65);
 });

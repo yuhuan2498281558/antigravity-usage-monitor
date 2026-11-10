@@ -12,7 +12,7 @@
  * - 所有核心业务逻辑均已模块化拆分至 `./backend/*.mjs`。
  */
 
-import { readFileSync, promises as fsPromises } from 'node:fs';
+import { readFileSync, statSync, promises as fsPromises } from 'node:fs';
 import { join } from 'node:path';
 import { Response, SidecarApp } from 'sidecar_sdk';
 import {
@@ -24,11 +24,23 @@ import {
   saveJson,
 } from './backend/config.mjs';
 import { diagnostics } from './backend/ls-rpc.mjs';
-import { performPluginUpdate, syncCloudCatalog } from './backend/plugin-updater.mjs';
+import {
+  performPluginUpdate,
+  scheduleSidecarRestart,
+  syncCloudCatalog,
+} from './backend/plugin-updater.mjs';
 import { getCloudStatus } from './backend/pricing-catalog.mjs';
 import { buildTelemetryPayload } from './backend/telemetry-builder.mjs';
 
 const app = new SidecarApp();
+
+const bootBundleVersion = (() => {
+  try {
+    return statSync(join(HERE, 'app.js')).mtimeMs || 0;
+  } catch {
+    return 0;
+  }
+})();
 
 /**
  * 异步读取 `sidecars/panel` 目录下的静态资源文件（兼容单元测试同步沙箱）。
@@ -53,6 +65,10 @@ const readLocalAsync = async (relPath) => {
  */
 function isLocalHostRequest(req) {
   if (!req?.headers) return true;
+  const secFetchSite = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+  if (secFetchSite === 'cross-site') {
+    return false;
+  }
   const host = String(req.headers.host || '').toLowerCase();
   if (host && !/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host)) {
     return false;
@@ -60,11 +76,20 @@ function isLocalHostRequest(req) {
   const origin = String(req.headers.origin || '').toLowerCase();
   if (
     origin &&
-    !/^(https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?|vscode-webview:\/\/)/.test(origin)
+    !/^(?:https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?|vscode-webview:\/\/[a-z0-9._-]+)$/.test(
+      origin
+    )
   ) {
     return false;
   }
   return true;
+}
+
+const MAX_SAFE_DATE_MS = 8_640_000_000_000_000;
+
+function sanitizePositiveFiniteMs(val) {
+  const num = Number(val);
+  return Number.isFinite(num) && num > 0 && num <= MAX_SAFE_DATE_MS ? Math.floor(num) : 0;
 }
 
 const NO_STORE_HEADERS = { 'Cache-Control': 'no-store, no-cache, must-revalidate' };
@@ -114,7 +139,10 @@ app.api(
         contentType: 'application/json',
       });
     }
-    const convId = data?.conversationId || process.env.ANTIGRAVITY_CONVERSATION_ID || '';
+    const rawConvId = String(
+      data?.conversationId || process.env.ANTIGRAVITY_CONVERSATION_ID || ''
+    ).trim();
+    const convId = rawConvId && !/[\\/]|\.\./.test(rawConvId) ? rawConvId : '';
     const force = data?.force === '1' || data?.force === true;
     if (LS_ADDR !== 'test.invalid') {
       if (force && Date.now() - cloudSyncState.lastAttemptMs > 15_000) {
@@ -128,10 +156,17 @@ app.api(
     }
     const filterOpts = {
       range: data?.range || 'all',
-      startMs: data?.startMs ? Number(data.startMs) : 0,
-      endMs: data?.endMs ? Number(data.endMs) : 0,
+      startMs: sanitizePositiveFiniteMs(data?.startMs),
+      endMs: sanitizePositiveFiniteMs(data?.endMs),
     };
     const payload = await buildTelemetryPayload(convId, force, filterOpts);
+    if (
+      bootBundleVersion > 0 &&
+      payload.uiBundleVersion > 0 &&
+      payload.uiBundleVersion !== bootBundleVersion
+    ) {
+      scheduleSidecarRestart(150);
+    }
     return new Response(JSON.stringify(payload), {
       status: 200,
       contentType: 'application/json',
@@ -141,6 +176,13 @@ app.api(
   'GET'
 );
 
+const VALID_WEEKLY_LIMIT_MODES = new Set(['official', 'tokens', 'cost']);
+
+function sanitizePositiveSettingNumber(val, fallback) {
+  const num = Number(val);
+  return Number.isFinite(num) && num > 0 ? num : fallback;
+}
+
 app.api('/api/settings', (data, req) => {
   if (!isLocalHostRequest(req)) {
     return new Response(JSON.stringify({ error: 'Forbidden host or origin' }), {
@@ -149,19 +191,30 @@ app.api('/api/settings', (data, req) => {
     });
   }
   const current = loadSettings();
+  const payload = data && typeof data === 'object' ? data : {};
+  const rawMode = String(payload.weeklyLimitMode || '').trim();
   const updated = {
     ...current,
-    contextWindowLimit: Number(data.contextWindowLimit || current.contextWindowLimit),
-    weeklyTokenBudget: Number(data.weeklyTokenBudget || current.weeklyTokenBudget),
-    weeklyCostBudget: Number(data.weeklyCostBudget || current.weeklyCostBudget),
-    weeklyLimitMode: data.weeklyLimitMode || current.weeklyLimitMode,
+    contextWindowLimit: sanitizePositiveSettingNumber(
+      payload.contextWindowLimit,
+      current.contextWindowLimit
+    ),
+    weeklyTokenBudget: sanitizePositiveSettingNumber(
+      payload.weeklyTokenBudget,
+      current.weeklyTokenBudget
+    ),
+    weeklyCostBudget: sanitizePositiveSettingNumber(
+      payload.weeklyCostBudget,
+      current.weeklyCostBudget
+    ),
+    weeklyLimitMode: VALID_WEEKLY_LIMIT_MODES.has(rawMode) ? rawMode : current.weeklyLimitMode,
     showUpstreamModel:
-      typeof data.showUpstreamModel === 'boolean'
-        ? data.showUpstreamModel
+      typeof payload.showUpstreamModel === 'boolean'
+        ? payload.showUpstreamModel
         : Boolean(current.showUpstreamModel),
     autoUpdatePlugin:
-      typeof data.autoUpdatePlugin === 'boolean'
-        ? data.autoUpdatePlugin
+      typeof payload.autoUpdatePlugin === 'boolean'
+        ? payload.autoUpdatePlugin
         : Boolean(current.autoUpdatePlugin),
   };
   saveJson(SETTINGS_FILE, updated);

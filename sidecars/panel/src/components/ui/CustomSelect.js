@@ -152,9 +152,7 @@ export const CustomSelect = defineComponent({
       }
       const selectedOpt =
         options.find((o) => o.value === modelValue) ||
-        (modelValue !== '' && modelValue !== null && modelValue !== undefined
-          ? options[0]
-          : undefined);
+        (!modelValue ? options[0] : undefined);
       patchText(triggerLabel, selectedOpt ? selectedOpt.label : placeholder);
       if (isOpen) {
         renderMenuOptions();
@@ -168,8 +166,8 @@ export const CustomSelect = defineComponent({
     };
 
     if (typeof document !== 'undefined' && document.addEventListener) {
-      document.addEventListener('click', handleDocClick);
-      onCleanup(() => document.removeEventListener('click', handleDocClick));
+      document.addEventListener('click', handleDocClick, true);
+      onCleanup(() => document.removeEventListener('click', handleDocClick, true));
     }
 
     syncTriggerAndMenu();

@@ -62,7 +62,10 @@ function isEquivalentTelemetry(prev, next) {
   if (pAct?.subagentCount !== nAct?.subagentCount) return false;
   if (pAct?.totalStepsAllAgents !== nAct?.totalStepsAllAgents) return false;
   if (pAct?.isRunning !== nAct?.isRunning) return false;
+  if (pAct?.liveActivity?.signature !== nAct?.liveActivity?.signature) return false;
   if (pAct?.aggregated?.isRunning !== nAct?.aggregated?.isRunning) return false;
+  if (pAct?.aggregated?.liveActivity?.signature !== nAct?.aggregated?.liveActivity?.signature) return false;
+  if (pAct?.aggregated?.liveActivity?.agentId !== nAct?.aggregated?.liveActivity?.agentId) return false;
   if (pAct?.aggregated?.activeAgentId !== nAct?.aggregated?.activeAgentId) return false;
   if (pAct?.aggregated?.activeAgentBadge !== nAct?.aggregated?.activeAgentBadge) return false;
   if (pAct?.aggregated?.latestTokPerSec !== nAct?.aggregated?.latestTokPerSec) return false;
@@ -71,8 +74,14 @@ function isEquivalentTelemetry(prev, next) {
   if (pAct?.aggregated?.latestStepCostUsd !== nAct?.aggregated?.latestStepCostUsd) return false;
   if (pAct?.aggregated?.sessionCostUsd !== nAct?.aggregated?.sessionCostUsd) return false;
   if (pAct?.aggregated?.activeModelShort !== nAct?.aggregated?.activeModelShort) return false;
+  if (pAct?.aggregated?.latestCacheHitPct !== nAct?.aggregated?.latestCacheHitPct) return false;
+  if (pAct?.aggregated?.latestSpeedReason !== nAct?.aggregated?.latestSpeedReason) return false;
   if (pAct?.latestTokPerSec !== nAct?.latestTokPerSec) return false;
   if (pAct?.latestTtftSec !== nAct?.latestTtftSec) return false;
+  if (pAct?.latestCacheHitPct !== nAct?.latestCacheHitPct) return false;
+  if (pAct?.latestSpeedReason !== nAct?.latestSpeedReason) return false;
+  if (pAct?.ttftSummary?.avgSec !== nAct?.ttftSummary?.avgSec) return false;
+  if (pAct?.speedSummary?.sampleCount !== nAct?.speedSummary?.sampleCount) return false;
   if (pAct?.activeModelShort !== nAct?.activeModelShort || pAct?.activeModelLabel !== nAct?.activeModelLabel) return false;
   if (pAct?.latestStepCostUsd !== nAct?.latestStepCostUsd || pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls) return false;
 
@@ -89,9 +98,12 @@ function isEquivalentTelemetry(prev, next) {
       pa?.role !== na?.role ||
       pa?.stepCount !== na?.stepCount ||
       pa?.isRunning !== na?.isRunning ||
+      pa?.liveActivity?.signature !== na?.liveActivity?.signature ||
       pa?.latestTokPerSec !== na?.latestTokPerSec ||
       pa?.latestTtftSec !== na?.latestTtftSec ||
       pa?.avgTokPerSec !== na?.avgTokPerSec ||
+      pa?.latestCacheHitPct !== na?.latestCacheHitPct ||
+      pa?.latestSpeedReason !== na?.latestSpeedReason ||
       pa?.latestStepCostUsd !== na?.latestStepCostUsd ||
       pa?.sessionCostUsd !== na?.sessionCostUsd ||
       pa?.activeModelShort !== na?.activeModelShort ||
@@ -99,6 +111,14 @@ function isEquivalentTelemetry(prev, next) {
       pa?.context?.messagesTokens !== na?.context?.messagesTokens ||
       pa?.context?.toolResultsTokens !== na?.context?.toolResultsTokens ||
       pa?.context?.assistantTokens !== na?.context?.assistantTokens ||
+      pa?.context?.userInputTokens !== na?.context?.userInputTokens ||
+      pa?.context?.subagentTokens !== na?.context?.subagentTokens ||
+      pa?.context?.checkpointTokens !== na?.context?.checkpointTokens ||
+      pa?.context?.systemToolsTokens !== na?.context?.systemToolsTokens ||
+      pa?.context?.mcpToolsTokens !== na?.context?.mcpToolsTokens ||
+      pa?.context?.skillsTokens !== na?.context?.skillsTokens ||
+      pa?.context?.systemPromptTokens !== na?.context?.systemPromptTokens ||
+      pa?.context?.userRulesTokens !== na?.context?.userRulesTokens ||
       pLastStep?.tokPerSec !== nLastStep?.tokPerSec ||
       pLastStep?.ttftSec !== nLastStep?.ttftSec ||
       pLastStep?.outputTokens !== nLastStep?.outputTokens ||
@@ -109,7 +129,7 @@ function isEquivalentTelemetry(prev, next) {
     }
   }
 
-  // 4. 比对 6 通道上下文窗口构成（总 Token 与消息/系统工具/MCP/Skill/系统提示词/用户规则）及近期步骤明细
+  // 4. 比对 10 通道上下文窗口构成及近期步骤明细
   const pCtx = pAct?.context;
   const nCtx = nAct?.context;
   if (pCtx?.totalTokens !== nCtx?.totalTokens) return false;
@@ -127,9 +147,21 @@ function isEquivalentTelemetry(prev, next) {
   if ((pAct?.recentSteps?.length || 0) !== (nAct?.recentSteps?.length || 0)) return false;
   for (let i = 0; i < (pAct?.recentSteps?.length || 0); i++) {
     const before = pAct.recentSteps[i], after = nAct.recentSteps[i];
-    if (before.modelKey !== after.modelKey || before.modelShort !== after.modelShort ||
-        before.modelUpstream !== after.modelUpstream || before.responseModel !== after.responseModel ||
-        before.modelSource !== after.modelSource || before.costUsd !== after.costUsd) return false;
+    if (
+      before.modelKey !== after.modelKey ||
+      before.modelShort !== after.modelShort ||
+      before.modelUpstream !== after.modelUpstream ||
+      before.responseModel !== after.responseModel ||
+      before.modelSource !== after.modelSource ||
+      before.costUsd !== after.costUsd ||
+      before.tokPerSec !== after.tokPerSec ||
+      before.ttftSec !== after.ttftSec ||
+      before.outputTokens !== after.outputTokens ||
+      before.inputTokens !== after.inputTokens ||
+      before.cacheReadTokens !== after.cacheReadTokens
+    ) {
+      return false;
+    }
   }
 
   // 5. 比对消费统计所选时间区间、当前会话累计消费与账号全局累计消费
@@ -153,12 +185,30 @@ function isEquivalentTelemetry(prev, next) {
   if (pAcct?.costUsd !== nAcct?.costUsd) return false;
   if (pAcct?.unpricedCalls !== nAcct?.unpricedCalls) return false;
 
-  // 6. 比对历史趋势时间分桶序列
+  // 6. 比对历史趋势时间分桶序列与年度分月序列
   const pTrend = prev.consumption?.trendSeries || [];
   const nTrend = next.consumption?.trendSeries || [];
   if (pTrend.length !== nTrend.length) return false;
   for (let i = 0; i < pTrend.length; i++) {
-    if (pTrend[i]?.tokens !== nTrend[i]?.tokens || pTrend[i]?.label !== nTrend[i]?.label) {
+    if (
+      pTrend[i]?.tokens !== nTrend[i]?.tokens ||
+      pTrend[i]?.calls !== nTrend[i]?.calls ||
+      pTrend[i]?.label !== nTrend[i]?.label ||
+      pTrend[i]?.fullLabel !== nTrend[i]?.fullLabel
+    ) {
+      return false;
+    }
+  }
+  if (prev.consumption?.monthlyYear !== next.consumption?.monthlyYear) return false;
+  const pMonthly = prev.consumption?.monthlySeries || [];
+  const nMonthly = next.consumption?.monthlySeries || [];
+  if (pMonthly.length !== nMonthly.length) return false;
+  for (let i = 0; i < pMonthly.length; i++) {
+    if (
+      pMonthly[i]?.totalTokens !== nMonthly[i]?.totalTokens ||
+      pMonthly[i]?.costUsd !== nMonthly[i]?.costUsd ||
+      pMonthly[i]?.calls !== nMonthly[i]?.calls
+    ) {
       return false;
     }
   }
@@ -197,7 +247,18 @@ function isEquivalentTelemetry(prev, next) {
   }
 
   // 8. 比对账号订阅档位与动态多配额池（活跃池、周汇总及各配额池的 5h/周限额进度与重置时间）
-  if (prev.account?.tierName !== next.account?.tierName || prev.account?.planName !== next.account?.planName) {
+  if (
+    prev.account?.tierName !== next.account?.tierName ||
+    prev.account?.planName !== next.account?.planName ||
+    prev.account?.aiCredits !== next.account?.aiCredits
+  ) {
+    return false;
+  }
+
+  if (
+    prev.quotas?.meta?.refreshFailed !== next.quotas?.meta?.refreshFailed ||
+    prev.quotas?.meta?.isStale !== next.quotas?.meta?.isStale
+  ) {
     return false;
   }
 
@@ -209,6 +270,11 @@ function isEquivalentTelemetry(prev, next) {
   if (pQuot?.weeklyUsedPct !== nQuot?.weeklyUsedPct) return false;
   if (prev.quotas?.weekly?.usedPct !== next.quotas?.weekly?.usedPct) return false;
   if (prev.quotas?.weekly?.remainingPct !== next.quotas?.weekly?.remainingPct) return false;
+  if (prev.quotas?.weekly?.tokens !== next.quotas?.weekly?.tokens) return false;
+  if (prev.quotas?.weekly?.costUsd !== next.quotas?.weekly?.costUsd) return false;
+  if (prev.quotas?.weekly?.calls !== next.quotas?.weekly?.calls) return false;
+  if (prev.quotas?.weekly?.unpricedCalls !== next.quotas?.weekly?.unpricedCalls) return false;
+  if (prev.quotas?.weekly?.resetTime !== next.quotas?.weekly?.resetTime) return false;
 
   const pPools = prev.quotas?.pools || [];
   const nPools = next.quotas?.pools || [];
@@ -235,11 +301,45 @@ function isEquivalentTelemetry(prev, next) {
     if (
       pConvs[i]?.cascadeId !== nConvs[i]?.cascadeId ||
       pConvs[i]?.title !== nConvs[i]?.title ||
+      pConvs[i]?.status !== nConvs[i]?.status ||
       pConvs[i]?.stepCount !== nConvs[i]?.stepCount ||
       pConvs[i]?.subagentCount !== nConvs[i]?.subagentCount ||
       pConvs[i]?.totalStepCount !== nConvs[i]?.totalStepCount
     ) {
       return false;
+    }
+  }
+
+  const pRunning = prev.runningConversations || [];
+  const nRunning = next.runningConversations || [];
+  if (pRunning.length !== nRunning.length) return false;
+  for (let i = 0; i < pRunning.length; i++) {
+    const pr = pRunning[i];
+    const nr = nRunning[i];
+    if (
+      pr?.cascadeId !== nr?.cascadeId ||
+      pr?.title !== nr?.title ||
+      pr?.isCurrentSelected !== nr?.isCurrentSelected ||
+      pr?.isMainRunning !== nr?.isMainRunning ||
+      pr?.subagentCount !== nr?.subagentCount ||
+      pr?.runningSubagentCount !== nr?.runningSubagentCount ||
+      pr?.mainActivity?.signature !== nr?.mainActivity?.signature
+    ) {
+      return false;
+    }
+    const pSubs = pr?.subagents || [];
+    const nSubs = nr?.subagents || [];
+    if (pSubs.length !== nSubs.length) return false;
+    for (let j = 0; j < pSubs.length; j++) {
+      if (
+        pSubs[j]?.cascadeId !== nSubs[j]?.cascadeId ||
+        pSubs[j]?.role !== nSubs[j]?.role ||
+        pSubs[j]?.isRunning !== nSubs[j]?.isRunning ||
+        pSubs[j]?.stepCount !== nSubs[j]?.stepCount ||
+        pSubs[j]?.liveActivity?.signature !== nSubs[j]?.liveActivity?.signature
+      ) {
+        return false;
+      }
     }
   }
 

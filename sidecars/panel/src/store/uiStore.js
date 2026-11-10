@@ -16,6 +16,4 @@ export const uiStore = createReactiveStore({
   stepsSubTab: 'steps', // 'steps' | 'models'
   selectedAgentScope: 'all', // 'all' | 'main' | <subagent cascadeId>
   ctxInspectorAgentId: 'auto', // 'auto' | 'main' | <subagent cascadeId>
-  showAllPools: true,
-  ctxBreakdownOpen: true,
 });

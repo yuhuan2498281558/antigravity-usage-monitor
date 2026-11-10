@@ -27,6 +27,7 @@ export function inferFamilyFromProviderOrKey(rawModelKey = '', modelId = '', api
   const combined = `${rawModelKey} ${modelId}`.toUpperCase();
   if (
     combined.includes('GEMINI') ||
+    combined.includes('CARBON') ||
     combined.includes('ARGON') ||
     combined.includes('FLASH') ||
     combined.includes('GOOGLE')
@@ -35,6 +36,7 @@ export function inferFamilyFromProviderOrKey(rawModelKey = '', modelId = '', api
   }
   if (
     combined.includes('CLAUDE') ||
+    combined.includes('FABLE') ||
     combined.includes('SONNET') ||
     combined.includes('OPUS') ||
     combined.includes('HAIKU')
@@ -58,6 +60,16 @@ export function isArgonModelIdentifier(...parts) {
 }
 
 /**
+ * 判断一组模型标识字段是否指向 Gemini 4 Carbon 系列模型。
+ *
+ * @param {...string} parts 待检测的标识片段
+ * @returns {boolean}
+ */
+export function isCarbonModelIdentifier(...parts) {
+  return /\bcarbon\b|gemini-4-carbon/i.test(parts.filter(Boolean).join(' '));
+}
+
+/**
  * 剥离模型展示名称末尾的思考档位后缀（如 `(High)`、`(Medium)`、`(Thinking)`），提取基础模型族名。
  *
  * @param {string} [label='']
@@ -66,13 +78,13 @@ export function isArgonModelIdentifier(...parts) {
 export function getBaseModelLabel(label = '') {
   return (
     String(label || '')
-      .replace(/\s*\((?:High|Medium|Low|Thinking|Extra Low)\)\s*$/i, '')
+      .replace(/\s*\((?:Max|High|Medium|Low|Thinking|Extra Low|Tiered)\)\s*$/i, '')
       .trim() || String(label || 'Unknown Model')
   );
 }
 
 /**
- * 将形如 `gemini-3.1-pro` 或 `gemini-3.5-flash-lite` 的通用模型 Slug 转为人类可读标签。
+ * 将形如 `gemini-3.1-pro`、`gemini-3.5-flash-lite` 或 `gemini-4-carbon` 的通用模型 Slug 转为人类可读标签。
  *
  * @param {string} [slug='']
  * @returns {string}
@@ -82,7 +94,7 @@ export function formatGenericModelSlug(slug = '') {
     .trim()
     .replace(/^session-display:/i, '');
   if (!s || /^MODEL_PLACEHOLDER_/i.test(s)) return '';
-  const m = s.match(/^gemini-(\d+(?:\.\d+)?)-(pro|flash|argon)(?:-(lite))?/i);
+  const m = s.match(/^gemini-(\d+(?:\.\d+)?)-(pro|flash|argon|carbon)(?:-(lite))?/i);
   if (m) {
     const ver = m[1];
     const tier = m[2].charAt(0).toUpperCase() + m[2].slice(1).toLowerCase();

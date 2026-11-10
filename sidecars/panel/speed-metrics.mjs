@@ -33,7 +33,7 @@ export function parseIsoMs(value) {
   if (!Number.isFinite(ms)) {
     return 0;
   }
-  const fraction = value.match(/\.(\d+)Z$/);
+  const fraction = value.match(/\.(\d+)(?:Z|[+-]\d{2}:?\d{2})$/i);
   if (!fraction) {
     return ms;
   }
@@ -185,39 +185,6 @@ function isMcpToolItem(name, source = '', type = '') {
 }
 
 /**
- * 从 `chatModel` 元数据中提取并拆解 6 大上下文 Token 构成分类：
- * - `messagesTokens`：对话历史消息
- * - `systemToolsTokens`：内置系统工具定义
- * - `mcpToolsTokens`：MCP 外部服务器工具与资源定义
- * - `skillsTokens`：已注入的 Skills 指令说明
- * - `systemPromptTokens`：核心系统提示词
- * - `userRulesTokens`：用户自定义全局/工作区规则
- *
- * 提取算法分为两个阶段：
- * 1. **第一阶段（优先采用原生 `contextWindowMetadata.tokenBreakdown.groups`）**：
- *    遍历服务端提供的精确 Token 分组树：
- *    - 针对 `TOKEN_TYPE_SYSTEM_PROMPT` 分组：遍历其 `children`，通过 `classifyPromptSection` 精细拆分为
- *      `skills`、`userRules`、`mcpTools` 与 `systemPrompt`；若父组 `gTokens` 大于子项之和，差额归入 `systemPromptTokens`。
- *    - 针对 `TOKEN_TYPE_TOOLS` 或含 `MCP` 标识的分组：遍历其 `children`，通过 `isMcpToolItem` 区分内置系统工具（`systemToolsTokens`）
- *      与 MCP 工具（`mcpToolsTokens`）；未拆分子项的余量同样按 `isMcpToolItem` 归属。
- *    - 针对 `TOKEN_TYPE_CHAT_MESSAGES` 分组：优先累加分组总 `gTokens`，若为 0 则累加其 `children` 的 Token 数至 `messagesTokens`。
- * 2. **第二阶段（缺失分组时的结构化字段回退估算）**：
- *    当第一阶段未覆盖某类分组（`!hasPromptGroup` / `!hasToolsGroup` / `!hasMessagesGroup`）时，
- *    分别回退遍历 `chat.promptSections`、`chat.tools`、`chat.messagePrompts`：
- *    优先读取条目自带的 `numTokens`，若缺失则按 UTF-8 字节长度除以 3（`byteLength / 3` 向上取整）进行估算。
- *
- * @param {object} chat `generatorMetadata.chatModel` 对象
- * @returns {{
- *   messagesTokens: number,
- *   systemToolsTokens: number,
- *   mcpToolsTokens: number,
- *   skillsTokens: number,
- *   systemPromptTokens: number,
- *   userRulesTokens: number,
- *   totalTokens: number
- * } | null} 上下文 Token 构成明细，无任何可用元数据时返回 null
- */
-/**
  * 识别 `TOKEN_TYPE_CHAT_MESSAGES` 子项（如 `"391: CHECKPOINT"`、`"404: GENERIC"`）所属的对话细分类型。
  *
  * @param {object} child
@@ -246,6 +213,22 @@ function classifyChatMessageChild(child) {
   return 'toolResults';
 }
 
+/**
+ * 从 `chatModel` 元数据中提取并拆解 10 大上下文 Token 构成分类：
+ * - `systemPromptTokens`：核心系统提示词
+ * - `userRulesTokens`：用户自定义全局/工作区规则
+ * - `skillsTokens`：已注入的 Skills 指令说明
+ * - `systemToolsTokens`：内置系统工具定义
+ * - `mcpToolsTokens`：MCP 外部服务器工具与资源定义
+ * - `checkpointTokens`：上下文压缩摘要（Checkpoint）
+ * - `userInputTokens`：用户输入消息
+ * - `assistantTokens`：主代理回复与思考
+ * - `subagentTokens`：子代理汇报消息
+ * - `toolResultsTokens`：工具执行返回结果
+ *
+ * @param {object} chat `generatorMetadata.chatModel` 对象
+ * @returns {object | null} 上下文 Token 构成明细，无任何可用元数据时返回 null
+ */
 export function extractContextBreakdown(chat) {
   if (!chat || typeof chat !== 'object') {
     return null;
@@ -811,6 +794,23 @@ export function normalizeCachedStep(step) {
     };
   }
 
+  const DEAD_V3_KEYS = [
+    'phaseDurationSec',
+    'phaseTokPerSec',
+    'phaseReason',
+    'answerStartDelaySec',
+    'streamDurationSec',
+    'streamTokens',
+    'streamTokPerSec',
+  ];
+  const hasDeadV3Key = DEAD_V3_KEYS.some((k) => Object.prototype.hasOwnProperty.call(step, k));
+  if (hasDeadV3Key) {
+    step = { ...step };
+    for (const k of DEAD_V3_KEYS) {
+      delete step[k];
+    }
+  }
+
   if (step.measurementVersion === MEASUREMENT_VERSION) {
     return step;
   }
@@ -827,13 +827,6 @@ export function normalizeCachedStep(step) {
     thinkingDurationSec: null,
     totalDurationSec: null,
     totalTokPerSec: null,
-    phaseDurationSec: null,
-    phaseTokPerSec: null,
-    phaseReason: 'legacy_cache',
-    answerStartDelaySec: null,
-    streamDurationSec: null,
-    streamTokens: null,
-    streamTokPerSec: null,
     speedBasis: 'unavailable',
     speedSampleEligible: false,
     speedReason: 'legacy_cache',
@@ -969,3 +962,857 @@ export function summarizeTtft(steps) {
     avgSec,
   };
 }
+
+/** 标志着原始轨迹步骤已进入终态的状态枚举集合（兼容 Connect RPC 与 transcript.jsonl） */
+const LIVE_TERMINAL_STATUSES = new Set([
+  'CORTEX_STEP_STATUS_DONE',
+  'CORTEX_STEP_STATUS_ERROR',
+  'CORTEX_STEP_STATUS_CANCELED',
+  'CORTEX_STEP_STATUS_CANCELLED',
+  'DONE',
+  'ERROR',
+  'CANCELED',
+  'CANCELLED',
+]);
+
+/**
+ * 判断原始步骤状态是否属于等待人工确认或审批状态。
+ *
+ * @param {unknown} status
+ * @returns {boolean}
+ */
+function isWaitingStepStatus(status) {
+  const s = String(status || '').toUpperCase();
+  return (
+    s.includes('WAIT') ||
+    s.includes('CONFIRM') ||
+    s.includes('APPROV') ||
+    s.includes('BLOCKED')
+  );
+}
+
+/**
+ * 判断单个原始轨迹步骤是否已执行完毕。
+ *
+ * @param {object} step
+ * @returns {boolean}
+ */
+function isRawStepComplete(step) {
+  if (!step || typeof step !== 'object') return true;
+  if (typeof step.status === 'string' && step.status.trim()) {
+    return LIVE_TERMINAL_STATUSES.has(step.status.trim().toUpperCase());
+  }
+  return Boolean(
+    step.metadata?.completedAt ||
+      step.metadata?.finishedGeneratingAt ||
+      step.completed_at ||
+      step.completedAt
+  );
+}
+
+function getRawStepStartMs(step) {
+  const m = step?.metadata || {};
+  return Math.floor(
+    parseIsoMs(m.createdAt || m.viewableAt || step?.created_at || step?.createdAt) || 0
+  );
+}
+
+function getRawStepFinishMs(step) {
+  const m = step?.metadata || {};
+  const explicitEnd = parseIsoMs(
+    m.completedAt || m.finishedGeneratingAt || step?.completed_at || step?.completedAt
+  );
+  if (explicitEnd > 0) return Math.floor(explicitEnd);
+  if (typeof step?.content === 'string') {
+    const mCompleted = step.content.match(/^Completed At:\s*(\S+)/m);
+    if (mCompleted && mCompleted[1]) {
+      const parsed = parseIsoMs(mCompleted[1]);
+      if (parsed > 0) return Math.floor(parsed);
+    }
+  }
+  return 0;
+}
+
+function getRawStepEndMs(step) {
+  const finishMs = getRawStepFinishMs(step);
+  if (finishMs > 0) return finishMs;
+  const m = step?.metadata || {};
+  return Math.floor(
+    parseIsoMs(m.viewableAt || m.createdAt || step?.created_at || step?.createdAt) || 0
+  );
+}
+
+function getStepStableId(step, fallbackIdx) {
+  const idx =
+    step?.step_index ??
+    step?.stepIndex ??
+    step?.metadata?.sourceTrajectoryStepInfo?.stepIndex;
+  return idx !== undefined && idx !== null ? idx : fallbackIdx;
+}
+
+/**
+ * 反转义 `transcript.jsonl` 或工具参数中可能被二次 JSON 序列化的字段值。
+ *
+ * @param {unknown} val
+ * @returns {unknown}
+ */
+function unwrapArgValue(val) {
+  if (typeof val !== 'string') return val;
+  const trimmed = val.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+    (trimmed.startsWith('{') && trimmed.endsWith('}'))
+  ) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // 半流式或非标准 JSON 回退至正则反转义
+    }
+  }
+  return trimmed
+    .replace(/^"+|"+$/g, '')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\')
+    .replace(/\\n/g, ' ')
+    .replace(/\\r/g, '');
+}
+
+function unwrapArgString(val) {
+  const unwrapped = unwrapArgValue(val);
+  if (typeof unwrapped === 'string') return unwrapped.trim();
+  if (typeof unwrapped === 'number' && Number.isFinite(unwrapped)) return String(unwrapped);
+  return '';
+}
+
+/**
+ * 截取路径末尾的文件或目录基名（兼容 Windows 反斜杠、`file://` URI 及二次转义字符串）。
+ *
+ * @param {unknown} rawPath
+ * @returns {string}
+ */
+function shortBasename(rawPath) {
+  if (typeof rawPath !== 'string' || !rawPath.trim()) return '';
+  let cleaned = unwrapArgString(rawPath).replace(/^file:\/\/\/?/i, '');
+  try {
+    if (cleaned.includes('%')) {
+      cleaned = decodeURIComponent(cleaned);
+    }
+  } catch {
+    // 忽略 URI 解码异常
+  }
+  cleaned = cleaned.replace(/[\\/]+$/, '');
+  const parts = cleaned.split(/[\\/]/);
+  return parts[parts.length - 1] || cleaned;
+}
+
+/**
+ * 将多行或含 Markdown 标记的文本清洗为紧凑的单行预览摘要。
+ *
+ * @param {unknown} rawText
+ * @param {number} [maxLen=52]
+ * @param {boolean} [takeLastLine=false]
+ * @returns {string}
+ */
+function cleanSingleLineSnippet(rawText, maxLen = 52, takeLastLine = false) {
+  if (typeof rawText !== 'string' || !rawText.trim()) return '';
+  const lines = rawText
+    .split(/\r?\n/)
+    .map((l) =>
+      l
+        .replace(/^[#>*\-\d.\s]+/, '')
+        .replace(/[`*_~]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+    )
+    .filter(Boolean);
+  if (lines.length === 0) return '';
+  const target = takeLastLine ? lines[lines.length - 1] : lines[0];
+  return target.length > maxLen ? `${target.slice(0, maxLen - 1)}…` : target;
+}
+
+/**
+ * 从可能尚未流式接收完毕的半截 JSON 字符串中按字段名提取字符串值。
+ *
+ * @param {string} rawJson
+ * @param {string[]} keys
+ * @returns {string}
+ */
+function extractPartialJsonStringField(rawJson, keys) {
+  if (typeof rawJson !== 'string' || !rawJson) return '';
+  for (const key of keys) {
+    const re = new RegExp(`"${key}"\\s*:\\s*"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)`, 'i');
+    const m = rawJson.match(re);
+    if (m && m[1]) {
+      return m[1]
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\')
+        .replace(/\\n/g, ' ')
+        .replace(/\\r/g, '')
+        .trim();
+    }
+  }
+  return '';
+}
+
+function getStepPlannerToolCalls(step) {
+  if (Array.isArray(step?.plannerResponse?.toolCalls)) {
+    return step.plannerResponse.toolCalls;
+  }
+  if (Array.isArray(step?.tool_calls)) {
+    return step.tool_calls;
+  }
+  if (Array.isArray(step?.toolCalls)) {
+    return step.toolCalls;
+  }
+  return [];
+}
+
+function getStepResponseText(step) {
+  const p = step?.plannerResponse || {};
+  return String(p.modifiedResponse || p.response || step?.content || '').trim();
+}
+
+function getStepThinkingText(step) {
+  const p = step?.plannerResponse || {};
+  return String(p.rawThinking || p.thinking || step?.thinking || '').trim();
+}
+
+function isPlannerStep(step) {
+  const t = String(step?.type || '').toUpperCase();
+  return (
+    t === 'CORTEX_STEP_TYPE_PLANNER_RESPONSE' ||
+    t === 'PLANNER_RESPONSE' ||
+    Boolean(step?.plannerResponse) ||
+    Array.isArray(step?.tool_calls)
+  );
+}
+
+function isCheckpointStep(step) {
+  const t = String(step?.type || '').toUpperCase();
+  return t === 'CORTEX_STEP_TYPE_CHECKPOINT' || t === 'CHECKPOINT';
+}
+
+/**
+ * 解析工具调用对象或半流式 JSON 参数，返回适合界面单行展示的中文动作标签与详情描述。
+ *
+ * @param {object|null|undefined} rawToolCall
+ * @param {object|null|undefined} [fallbackStep=null]
+ * @returns {{ toolName: string, isAskUser: boolean, label: string, detail: string }}
+ */
+export function summarizeToolCall(rawToolCall, fallbackStep = null) {
+  const stepToolCall = fallbackStep?.metadata?.toolCall || {};
+  const stepType = String(fallbackStep?.type || '').toUpperCase();
+  let rawName = String(
+    rawToolCall?.name ||
+      rawToolCall?.toolName ||
+      rawToolCall?.function?.name ||
+      stepToolCall?.name ||
+      ''
+  ).trim();
+
+  if (!rawName) {
+    if (
+      stepType.includes('RUN_COMMAND') ||
+      stepType.includes('COMMAND_STATUS') ||
+      fallbackStep?.runCommand
+    ) {
+      rawName = 'run_command';
+    } else if (stepType.includes('INVOKE_SUBAGENT') || fallbackStep?.invokeSubagent) {
+      rawName = 'invoke_subagent';
+    } else if (
+      stepType.includes('VIEW_FILE') ||
+      stepType.includes('READ_FILE') ||
+      fallbackStep?.viewFile ||
+      fallbackStep?.readFile
+    ) {
+      rawName = 'read_file';
+    } else if (
+      stepType.includes('CODE_ACTION') ||
+      stepType.includes('EDIT_FILE') ||
+      fallbackStep?.codeAction ||
+      fallbackStep?.editFile
+    ) {
+      rawName = 'edit_file';
+    } else if (stepType.includes('GREP_SEARCH') || fallbackStep?.grepSearch) {
+      rawName = 'grep_search';
+    } else if (stepType.includes('FIND_BY_NAME') || fallbackStep?.findByName) {
+      rawName = 'find_by_name';
+    } else if (stepType.includes('SEARCH_WEB') || fallbackStep?.searchWeb) {
+      rawName = 'search_web';
+    }
+  }
+
+  const nameLower = rawName.toLowerCase().replace(/^default_api:/, '');
+  let args = {};
+  let rawArgsStr = '';
+
+  const candidateArgs =
+    rawToolCall?.args ??
+    rawToolCall?.arguments ??
+    rawToolCall?.argumentsJson ??
+    rawToolCall?.function?.arguments ??
+    stepToolCall?.argumentsJson;
+
+  if (candidateArgs && typeof candidateArgs === 'object') {
+    args = candidateArgs;
+  } else if (typeof candidateArgs === 'string' && candidateArgs.trim()) {
+    rawArgsStr = candidateArgs.trim();
+    try {
+      const parsed = JSON.parse(rawArgsStr);
+      if (parsed && typeof parsed === 'object') args = parsed;
+    } catch {
+      // 半流式 JSON 尚未闭合，后续通过正则提取关键字段
+    }
+  }
+
+  const stepPayload =
+    fallbackStep?.runCommand ||
+    fallbackStep?.commandStatus ||
+    fallbackStep?.viewFile ||
+    fallbackStep?.readFile ||
+    fallbackStep?.viewFileOutline ||
+    fallbackStep?.viewCodeItem ||
+    fallbackStep?.codeAction ||
+    fallbackStep?.editFile ||
+    fallbackStep?.replaceFileContent ||
+    fallbackStep?.writeToFile ||
+    fallbackStep?.grepSearch ||
+    fallbackStep?.findByName ||
+    fallbackStep?.listDir ||
+    fallbackStep?.searchWeb ||
+    fallbackStep?.readUrlContent ||
+    null;
+
+  const pickField = (keys) => {
+    for (const k of keys) {
+      const fromArgs = unwrapArgString(args?.[k]);
+      if (fromArgs) return fromArgs;
+      const camelKey = k.charAt(0).toLowerCase() + k.slice(1);
+      const fromArgsCamel = unwrapArgString(args?.[camelKey]);
+      if (fromArgsCamel) return fromArgsCamel;
+      if (stepPayload && typeof stepPayload === 'object') {
+        const fromStep = unwrapArgString(stepPayload[k] ?? stepPayload[camelKey]);
+        if (fromStep) return fromStep;
+      }
+    }
+    return extractPartialJsonStringField(rawArgsStr, keys);
+  };
+
+  if (
+    nameLower === 'run_command' ||
+    nameLower === 'command_status' ||
+    nameLower === 'send_command_input'
+  ) {
+    const summary = pickField(['toolSummary', 'Description', 'Summary']);
+    const cmd = pickField(['CommandLine', 'Command', 'command']);
+    const cmdSnippet = cleanSingleLineSnippet(cmd, 48);
+    const detail =
+      summary && cmdSnippet && summary !== cmdSnippet
+        ? `${summary} (${cmdSnippet})`
+        : summary || cmdSnippet || '';
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '执行命令',
+      detail,
+    };
+  }
+
+  if (
+    nameLower === 'read_file' ||
+    nameLower === 'view_file' ||
+    nameLower === 'view_file_outline' ||
+    nameLower === 'view_code_item' ||
+    nameLower === 'read_notebook'
+  ) {
+    const file = shortBasename(
+      pickField(['Path', 'AbsolutePath', 'AbsolutePathUri', 'FilePath', 'File', 'Uri'])
+    );
+    const startLine = pickField(['StartLine', 'startLine']);
+    const endLine = pickField(['EndLine', 'endLine']);
+    const rangeSuffix =
+      startLine && endLine
+        ? `:${startLine}-${endLine}`
+        : startLine
+          ? `:${startLine}+`
+          : '';
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '读取文件',
+      detail: file ? `${file}${rangeSuffix}` : '',
+    };
+  }
+
+  if (
+    nameLower === 'edit_file' ||
+    nameLower === 'replace_file_content' ||
+    nameLower === 'multi_replace_file_content' ||
+    nameLower === 'edit_notebook'
+  ) {
+    const file = shortBasename(
+      pickField(['Path', 'TargetFile', 'AbsolutePath', 'AbsolutePathUri', 'FilePath', 'Uri'])
+    );
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '修改文件',
+      detail: file || '',
+    };
+  }
+
+  if (nameLower === 'write_file' || nameLower === 'write_to_file') {
+    const file = shortBasename(
+      pickField(['Path', 'TargetFile', 'AbsolutePath', 'AbsolutePathUri', 'FilePath', 'Uri'])
+    );
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '写入文件',
+      detail: file || '',
+    };
+  }
+
+  if (nameLower === 'grep_search' || nameLower === 'ripgrep') {
+    const query = pickField(['Query', 'Pattern', 'query']);
+    const searchPath = shortBasename(pickField(['SearchPath', 'DirectoryPath', 'Path']));
+    const detail =
+      query && searchPath
+        ? `${cleanSingleLineSnippet(query, 32)} (${searchPath})`
+        : cleanSingleLineSnippet(query, 48) || searchPath || '';
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '搜索代码',
+      detail,
+    };
+  }
+
+  if (nameLower === 'find_by_name' || nameLower === 'list_dir') {
+    const pattern = pickField(['Pattern', 'Query']);
+    const dir = shortBasename(pickField(['SearchDirectory', 'DirectoryPath', 'Path']));
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '查找文件',
+      detail: pattern && dir ? `${pattern} (${dir})` : pattern || dir || '',
+    };
+  }
+
+  if (nameLower === 'search_web' || nameLower === 'read_url_content' || nameLower === 'fetch_url') {
+    const isUrl = nameLower.includes('url');
+    const target = pickField(['query', 'Query', 'Url', 'url']);
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: isUrl ? '读取网页' : '网页搜索',
+      detail: cleanSingleLineSnippet(target, 52) || '',
+    };
+  }
+
+  if (nameLower === 'invoke_subagent') {
+    const subSpec = fallbackStep?.invokeSubagent?.subagents?.[0] || {};
+    const role =
+      pickField(['Role', 'role']) ||
+      String(subSpec.role || '').trim() ||
+      pickField(['TypeName', 'typeName']) ||
+      String(subSpec.typeName || '').trim();
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '调用子代理',
+      detail: role || '',
+    };
+  }
+
+  if (nameLower === 'send_message') {
+    const recipient = pickField(['Recipient', 'recipient']);
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '通信子代理',
+      detail: recipient ? recipient.slice(0, 8) : '',
+    };
+  }
+
+  if (nameLower === 'manage_subagents' || nameLower === 'define_subagent') {
+    const subName = pickField(['Name', 'Action', 'action']);
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '管理子代理',
+      detail: subName || '',
+    };
+  }
+
+  if (nameLower === 'manage_task') {
+    const action = pickField(['Action', 'action']);
+    const taskId = pickField(['TaskId', 'taskId']);
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '后台任务',
+      detail: taskId ? `${action || 'status'} (${taskId})` : action || '',
+    };
+  }
+
+  if (nameLower === 'schedule') {
+    const dur = pickField(['DurationSeconds']);
+    const cron = pickField(['CronExpression']);
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '定时任务',
+      detail: dur ? `${dur}s` : cron || '',
+    };
+  }
+
+  if (nameLower === 'ask_question') {
+    const rawQuestions = unwrapArgValue(args?.questions);
+    const qText =
+      (Array.isArray(rawQuestions) ? rawQuestions[0]?.question : '') ||
+      extractPartialJsonStringField(
+        typeof args?.questions === 'string' ? args.questions : rawArgsStr,
+        ['question']
+      );
+    return {
+      toolName: nameLower,
+      isAskUser: true,
+      label: '等待用户选择',
+      detail: cleanSingleLineSnippet(qText, 50) || '',
+    };
+  }
+
+  if (nameLower === 'search_marketplace' || nameLower === 'list_plugin_accounts') {
+    const rawQueries = unwrapArgValue(args?.queries);
+    const q = Array.isArray(rawQueries) ? rawQueries.join(', ') : '';
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '查询插件',
+      detail: cleanSingleLineSnippet(q, 48) || '',
+    };
+  }
+
+  if (isMcpToolItem(nameLower)) {
+    const mcpClean = nameLower.replace(/^mcp[_-]/i, '').replace(/_/g, ' · ');
+    return {
+      toolName: nameLower,
+      isAskUser: false,
+      label: '调用 MCP',
+      detail: mcpClean || '',
+    };
+  }
+
+  return {
+    toolName: nameLower || 'tool',
+    isAskUser: false,
+    label: '调用工具',
+    detail: nameLower || '',
+  };
+}
+
+/**
+ * 从当前正在运行的会话原始步骤数组 (`rawSteps`，兼容 `GetCascadeTrajectory` 与 `transcript.jsonl`) 中提取模型实时动作摘要。
+ *
+ * 状态判定覆盖完整 Agent 循环：
+ * 1. 轨迹为空或刚创建：显示“准备推理”；
+ * 2. 末尾步骤未完成 (`!isRawStepComplete(lastStep)`)：
+ *    - 若为 `CHECKPOINT`：显示“上下文压缩”；
+ *    - 若为 `PLANNER_RESPONSE`：按 `toolCalls -> response -> thinking -> 首字等待` 优先级提取当前流式动作；
+ *    - 若为工具执行步骤：结合 `status` 判定是否处于“等待确认”，并回溯最近一次 `PLANNER_RESPONSE` 匹配对应的工具名与 `[m/n]` 批次进度；
+ * 3. 末尾步骤已完成 (`DONE`) 但会话仍处于 `RUNNING`：
+ *    - 若最近一次 `PLANNER_RESPONSE` 声明了 `N` 个工具调用，而其后仅有 `M < N` 个完成步骤，则判定第 `M + 1` 个工具正在执行中；
+ *    - 若 `M >= N`（全部工具已返回结果）或末尾为 `USER_INPUT`，则判定模型正在汇总工具结果并准备下一轮推理。
+ *
+ * @param {Array<object>} [rawSteps=[]]
+ * @param {boolean} [isRunning=false]
+ * @param {number} [fallbackStartMs=0]
+ * @returns {{
+ *   phase: 'thinking' | 'responding' | 'tool' | 'waiting' | 'compacting',
+ *   label: string,
+ *   detail: string,
+ *   stepProgress: string,
+ *   startedAtMs: number,
+ *   signature: string
+ * } | null}
+ */
+export function extractLiveActivity(rawSteps = [], isRunning = false, fallbackStartMs = 0) {
+  if (!isRunning) return null;
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
+    const startMs = Math.floor(fallbackStartMs || 0);
+    return {
+      phase: 'thinking',
+      label: '推理中',
+      detail: '',
+      stepProgress: '',
+      startedAtMs: startMs,
+      signature: `init:0`,
+    };
+  }
+
+  const hasBracketPrefix = (text) => /^\[\d+\s*\/\s*\d+\]/.test(String(text || '').trim());
+
+  let lastPlannerIdx = -1;
+  let lastUserIdx = -1;
+  for (let i = rawSteps.length - 1; i >= 0; i--) {
+    const st = rawSteps[i];
+    const t = String(st?.type || '').toUpperCase();
+    if (lastPlannerIdx === -1 && isPlannerStep(st)) {
+      lastPlannerIdx = i;
+    }
+    if (lastUserIdx === -1 && t.includes('USER_INPUT')) {
+      lastUserIdx = i;
+    }
+    if (lastPlannerIdx !== -1 && lastUserIdx !== -1) break;
+  }
+
+  const lastIdx = rawSteps.length - 1;
+  const lastStep = rawSteps[lastIdx];
+  const lastStepId = getStepStableId(lastStep, lastIdx);
+  const lastComplete = isRawStepComplete(lastStep);
+
+  // 情况 A：最后一个步骤本身尚未完成（正在流式生成或正在执行该步骤）
+  if (!lastComplete) {
+    const startMs = getRawStepStartMs(lastStep) || Math.floor(fallbackStartMs || 0);
+
+    if (isCheckpointStep(lastStep)) {
+      return {
+        phase: 'compacting',
+        label: '上下文压缩',
+        detail: '',
+        stepProgress: '',
+        startedAtMs: startMs,
+        signature: `compacting:${lastStepId}`,
+      };
+    }
+
+    if (isPlannerStep(lastStep)) {
+      const tools = getStepPlannerToolCalls(lastStep);
+      const respText = getStepResponseText(lastStep);
+      const thinkText = getStepThinkingText(lastStep);
+
+      if (tools.length > 0) {
+        const activeTool = tools[tools.length - 1];
+        const info = summarizeToolCall(activeTool, lastStep);
+        const stepProgress =
+          tools.length > 1 && !hasBracketPrefix(info.detail) ? `${tools.length}/${tools.length}` : '';
+        const phase = info.isAskUser ? 'waiting' : 'tool';
+        return {
+          phase,
+          label: info.label,
+          detail: info.detail,
+          stepProgress,
+          startedAtMs: startMs,
+          signature: `planner-tool:${lastStepId}:${tools.length}:${info.label}:${info.detail}`,
+        };
+      }
+
+      if (respText.length > 0) {
+        const snippet = cleanSingleLineSnippet(respText, 52, true);
+        return {
+          phase: 'responding',
+          label: '正在输出回复',
+          detail: snippet,
+          stepProgress: '',
+          startedAtMs: startMs,
+          signature: `responding:${lastStepId}:${snippet}`,
+        };
+      }
+
+      if (thinkText.length > 0) {
+        const snippet = cleanSingleLineSnippet(thinkText, 52, true);
+        return {
+          phase: 'thinking',
+          label: '推理中',
+          detail: snippet,
+          stepProgress: '',
+          startedAtMs: startMs,
+          signature: `thinking:${lastStepId}:${snippet}`,
+        };
+      }
+
+      return {
+        phase: 'thinking',
+        label: '推理中',
+        detail: '',
+        stepProgress: '',
+        startedAtMs: startMs,
+        signature: `waiting-ttft:${lastStepId}`,
+      };
+    }
+
+    // 末尾是未完成的工具执行步骤
+    let matchedPlannerTool = null;
+    let stepProgress = '';
+    if (lastPlannerIdx >= 0 && lastPlannerIdx > lastUserIdx) {
+      const pTools = getStepPlannerToolCalls(rawSteps[lastPlannerIdx]);
+      const toolStepsAfterPlanner = [];
+      for (let k = lastPlannerIdx + 1; k <= lastIdx; k++) {
+        const kt = String(rawSteps[k]?.type || '').toUpperCase();
+        if (!kt.includes('CHECKPOINT') && !kt.includes('MEMENTO') && !kt.includes('EPHEMERAL')) {
+          toolStepsAfterPlanner.push(rawSteps[k]);
+        }
+      }
+      const toolIdx = toolStepsAfterPlanner.length - 1;
+      if (toolIdx >= 0 && toolIdx < pTools.length) {
+        matchedPlannerTool = pTools[toolIdx];
+        if (pTools.length > 1) {
+          stepProgress = `${toolIdx + 1}/${pTools.length}`;
+        }
+      }
+    }
+
+    const info = summarizeToolCall(matchedPlannerTool, lastStep);
+    if (hasBracketPrefix(info.detail)) {
+      stepProgress = '';
+    }
+    const waiting = isWaitingStepStatus(lastStep?.status) || info.isAskUser;
+    const prevEndMs = lastIdx > 0 ? getRawStepFinishMs(rawSteps[lastIdx - 1]) : 0;
+    const resolvedStartMs = startMs || prevEndMs || 0;
+    const label = waiting && !info.isAskUser ? `等待确认 · ${info.label}` : info.label;
+
+    return {
+      phase: waiting ? 'waiting' : 'tool',
+      label,
+      detail: info.detail,
+      stepProgress,
+      startedAtMs: resolvedStartMs,
+      signature: `step-run:${lastStepId}:${waiting}:${label}:${stepProgress}:${info.detail}`,
+    };
+  }
+
+  // 情况 B：末尾步骤已是完成态 (DONE)，但整个会话仍处于 RUNNING 状态
+  if (lastPlannerIdx >= 0 && lastPlannerIdx > lastUserIdx) {
+    const plannerStep = rawSteps[lastPlannerIdx];
+    const plannerStepId = getStepStableId(plannerStep, lastPlannerIdx);
+    const pTools = getStepPlannerToolCalls(plannerStep);
+    const toolStepsAfterPlanner = [];
+    for (let k = lastPlannerIdx + 1; k <= lastIdx; k++) {
+      const kt = String(rawSteps[k]?.type || '').toUpperCase();
+      if (!kt.includes('CHECKPOINT') && !kt.includes('MEMENTO') && !kt.includes('EPHEMERAL')) {
+        toolStepsAfterPlanner.push(rawSteps[k]);
+      }
+    }
+    const completedAfterPlanner = toolStepsAfterPlanner.length;
+
+    // B1：上一轮 PLANNER_RESPONSE 发出的 N 个工具调用尚有未落盘完成的项 (completedAfterPlanner < N)
+    if (pTools.length > 0 && completedAfterPlanner < pTools.length) {
+      const currentTool = pTools[completedAfterPlanner];
+      const info = summarizeToolCall(currentTool, null);
+      const stepProgress =
+        pTools.length > 1 && !hasBracketPrefix(info.detail)
+          ? `${completedAfterPlanner + 1}/${pTools.length}`
+          : '';
+      // 优先采用上一已完成步骤的真实完成时刻，若为 transcript.jsonl 无完成时间戳则回退至步骤创建时刻
+      const startMs =
+        getRawStepFinishMs(lastStep) ||
+        getRawStepFinishMs(plannerStep) ||
+        getRawStepEndMs(lastStep) ||
+        getRawStepEndMs(plannerStep) ||
+        0;
+      const phase = info.isAskUser ? 'waiting' : 'tool';
+
+      return {
+        phase,
+        label: info.label,
+        detail: info.detail,
+        stepProgress,
+        startedAtMs: startMs,
+        signature: `pending-tool:${plannerStepId}:${completedAfterPlanner}:${info.label}:${stepProgress}:${info.detail}`,
+      };
+    }
+
+    // B2：上一轮发出的工具已全部执行完毕，按各自对应的工具完成步骤提取目标文件/命令
+    if (pTools.length > 0 && completedAfterPlanner >= pTools.length) {
+      const infos = pTools.map((t, idx) =>
+        summarizeToolCall(t, toolStepsAfterPlanner[idx] || lastStep)
+      );
+      const lastToolInfo = infos[infos.length - 1];
+      const allSameLabel = infos.every((x) => x.label === lastToolInfo.label);
+      const detailsList = infos.map((x) => x.detail).filter(Boolean);
+      const combinedDetail =
+        infos.length > 1 && allSameLabel
+          ? cleanSingleLineSnippet(detailsList.join(', '), 64)
+          : lastToolInfo.detail || cleanSingleLineSnippet(detailsList.join(', '), 64);
+      const stepProgress =
+        pTools.length > 1 && !hasBracketPrefix(combinedDetail)
+          ? `${pTools.length}/${pTools.length}`
+          : '';
+      const startMs = getRawStepFinishMs(lastStep) || getRawStepEndMs(lastStep) || 0;
+      return {
+        phase: 'thinking',
+        label: lastToolInfo.label,
+        detail: combinedDetail,
+        stepProgress,
+        startedAtMs: startMs,
+        signature: `post-tool-think:${lastStepId}:${lastToolInfo.label}:${combinedDetail}`,
+      };
+    }
+
+    // B2.5：Connect RPC 轨迹中工具作为独立步骤存在（plannerResponse.toolCalls 为空）时，直接提取最后一个工具步骤的目标文件/命令
+    if (lastIdx > lastPlannerIdx) {
+      const stepTypeUpper = String(lastStep?.type || '').toUpperCase();
+      if (!stepTypeUpper.includes('USER_INPUT') && !stepTypeUpper.includes('GENERIC')) {
+        const lastInfo = summarizeToolCall(null, lastStep);
+        if (lastInfo.toolName !== 'tool' || lastInfo.detail) {
+          const startMs = getRawStepFinishMs(lastStep) || getRawStepEndMs(lastStep) || 0;
+          return {
+            phase: 'thinking',
+            label: lastInfo.label,
+            detail: lastInfo.detail,
+            stepProgress: '',
+            startedAtMs: startMs,
+            signature: `post-step-tool:${lastStepId}:${lastInfo.label}:${lastInfo.detail}`,
+          };
+        }
+      }
+    }
+
+    // B3：末尾即为无工具调用的 PLANNER_RESPONSE（但会话仍处于 RUNNING），展示最新回复或思考摘要
+    if (lastPlannerIdx === lastIdx) {
+      const respText = getStepResponseText(plannerStep);
+      const thinkText = getStepThinkingText(plannerStep);
+      const startMs = getRawStepFinishMs(plannerStep) || getRawStepStartMs(plannerStep) || 0;
+      if (respText.length > 0) {
+        const snippet = cleanSingleLineSnippet(respText, 52, true);
+        if (snippet) {
+          return {
+            phase: 'responding',
+            label: '正在输出回复',
+            detail: snippet,
+            stepProgress: '',
+            startedAtMs: startMs,
+            signature: `responding-done:${lastStepId}:${snippet}`,
+          };
+        }
+      }
+      if (thinkText.length > 0) {
+        const snippet = cleanSingleLineSnippet(thinkText, 52, true);
+        if (snippet) {
+          return {
+            phase: 'thinking',
+            label: '推理中',
+            detail: snippet,
+            stepProgress: '',
+            startedAtMs: startMs,
+            signature: `thinking-done:${lastStepId}:${snippet}`,
+          };
+        }
+      }
+    }
+  }
+
+  // B4：末尾是 USER_INPUT 或普通完成步骤
+  const startMs = getRawStepFinishMs(lastStep) || getRawStepStartMs(lastStep) || 0;
+  return {
+    phase: 'thinking',
+    label: '推理中',
+    detail: '',
+    stepProgress: '',
+    startedAtMs: startMs,
+    signature: `post-step-think:${lastStepId}`,
+  };
+}
+

@@ -4,13 +4,6 @@
  * reactive subscriptions, and lifecycle cleanup.
  */
 
-const globalEmitListeners = new Set();
-
-export function onComponentEmit(listener) {
-  globalEmitListeners.add(listener);
-  return () => globalEmitListeners.delete(listener);
-}
-
 export function defineComponent({ name, setup }) {
   return function createInstance(initialProps = {}) {
     let props = { ...initialProps };
@@ -40,14 +33,6 @@ export function defineComponent({ name, setup }) {
         for (const fn of handlers) {
           fn(payload);
         }
-      }
-      for (const observer of globalEmitListeners) {
-        observer({
-          component: name || 'AnonymousComponent',
-          event,
-          payload,
-          timestamp: Date.now(),
-        });
       }
     }
 
@@ -88,6 +73,7 @@ export function defineComponent({ name, setup }) {
           console.error(`[${name}] cleanup error:`, err);
         }
       }
+      eventHandlers.clear();
       if (setupResult.el?.parentNode) {
         setupResult.el.parentNode.removeChild(setupResult.el);
       }

@@ -58,18 +58,6 @@ export const SVG_ICON_DEFS = Object.freeze({
     { tag: 'circle', attrs: { cx: '10.5', cy: '8', r: '1.5' } },
     { tag: 'circle', attrs: { cx: '6.8', cy: '12.5', r: '1.5' } },
   ],
-  flask: [
-    { tag: 'path', attrs: { d: 'M6 2.2h4' } },
-    { tag: 'path', attrs: { d: 'M6.8 2.2v3.6L3.2 12.2a1.2 1.2 0 0 0 1.1 1.8h7.4a1.2 1.2 0 0 0 1.1-1.8L9.2 5.8V2.2' } },
-    { tag: 'path', attrs: { d: 'M4.6 10.2h6.8' } },
-  ],
-  session: [
-    { tag: 'path', attrs: { d: 'M2.5 3.2h11v7.6H6l-3.5 2.5V3.2z' } },
-  ],
-  cpu: [
-    { tag: 'rect', attrs: { x: '4', y: '4', width: '8', height: '8', rx: '1' } },
-    { tag: 'path', attrs: { d: 'M6.5 1.8v2.2M9.5 1.8v2.2M6.5 12v2.2M9.5 12v2.2M1.8 6.5H4M1.8 9.5H4M12 6.5h2.2M12 9.5h2.2' } },
-  ],
   calendar: [
     { tag: 'rect', attrs: { x: '2.2', y: '3.2', width: '11.6', height: '10.6', rx: '1' } },
     { tag: 'path', attrs: { d: 'M5.2 1.8v2.4M10.8 1.8v2.4M2.2 6.5h11.6' } },
@@ -83,12 +71,6 @@ export const SVG_ICON_DEFS = Object.freeze({
   ],
   minus: [
     { tag: 'path', attrs: { d: 'M3.5 8h9' } },
-  ],
-  swap: [
-    { tag: 'path', attrs: { d: 'M3 5.5h10l-2.6-2.6M13 10.5H3l2.6 2.6' } },
-  ],
-  close: [
-    { tag: 'path', attrs: { d: 'M4 4l8 8M12 4l-8 8' } },
   ],
   dot: [
     { tag: 'circle', attrs: { cx: '8', cy: '8', r: '3.2', fill: 'currentColor', stroke: 'none' } },

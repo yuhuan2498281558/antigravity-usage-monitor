@@ -68,8 +68,8 @@
   --ctx-output: hsl(190 80% 38%);
 
   /* Elevation & Shadows */
-  --shadow-popover: 0 6px 20px color-mix(in srgb, var(--text-primary) 14%, transparent);
-  --shadow-glider: 0 1px 2px color-mix(in srgb, var(--text-primary) 10%, transparent);
+  --shadow-popover: 0 4px 12px rgb(0 0 0 / 0.22);
+  --shadow-glider: 0 1px 2px rgb(0 0 0 / 0.14);
 
   /* Fast Hardware-Accelerated Motion Tokens */
   --ease-fast: cubic-bezier(0.22, 1, 0.36, 1);

@@ -19,6 +19,7 @@ import {
 } from '../core/domPatch.js';
 import {
   formatCountdown,
+  formatElapsedSec,
   formatMetric,
   formatTokens,
   formatUsd,
@@ -27,6 +28,7 @@ import {
 } from '../core/formatters.js';
 import { createSvgIcon } from '../icons/SvgIcon.js';
 import {
+  fetchTelemetry,
   formatAgentLabel,
   getAgentBadgeClass,
   resolveScopedConversation,
@@ -53,6 +55,145 @@ function estPillWidth(text) {
 export const LiveOverviewView = defineComponent({
   name: 'LiveOverviewView',
   setup({ onCleanup }) {
+    // --- 0. 可用额度下方的多任务实时运行卡片列表 (展示所有正在运行的主进程 + 默认主代理缩略 + 可折叠子代理列表) ---
+    const liveActivityBar = h('div', {
+      className: 'live-activity-list',
+      hidden: true,
+      'aria-live': 'polite',
+    });
+
+    const expandedTaskConvIds = new Set();
+    const activityTimersMap = new Map();
+    let liveTickTimer = null;
+
+    function bindLiveElapsedTimer(timerKey, sig, rawStartMs, targetEl) {
+      const now = Date.now();
+      const prev = activityTimersMap.get(timerKey);
+      let startMs = prev?.startMs || 0;
+      if (!prev || prev.sig !== sig) {
+        const validRaw = Number(rawStartMs || 0);
+        startMs = validRaw > 0 && validRaw <= now + 2000 ? validRaw : now;
+      } else if (startMs <= 0 && Number(rawStartMs) > 0 && Number(rawStartMs) <= now + 2000) {
+        startMs = Number(rawStartMs);
+      }
+      activityTimersMap.set(timerKey, { sig, startMs, el: targetEl });
+      const elapsedSec = Math.max(0, (now - startMs) / 1000);
+      patchText(targetEl, formatElapsedSec(elapsedSec));
+    }
+
+    function updateLiveElapsedDisplay() {
+      const now = Date.now();
+      for (const entry of activityTimersMap.values()) {
+        if (!entry?.el) continue;
+        const elapsedSec = entry.startMs > 0 ? Math.max(0, (now - entry.startMs) / 1000) : 0;
+        patchText(entry.el, formatElapsedSec(elapsedSec));
+      }
+    }
+
+    function stopLiveTicker() {
+      if (liveTickTimer) {
+        clearInterval(liveTickTimer);
+        liveTickTimer = null;
+      }
+      activityTimersMap.clear();
+    }
+
+    function ensureLiveTicker() {
+      if (!liveTickTimer) {
+        liveTickTimer = setInterval(updateLiveElapsedDisplay, 1000);
+      }
+    }
+
+    function createLiveTaskCard() {
+      const dotIcon = createSvgIcon('dot', { size: 9 });
+      patchClasses(dotIcon, { 'is-pulsing': true });
+      const dotWrap = h('span', { className: 'live-activity-dot' }, [dotIcon]);
+      const titleEl = h('strong', { className: 'live-task-title', text: '当前会话' });
+      const subToggleBtn = h('button', {
+        type: 'button',
+        className: 'live-sub-toggle',
+        hidden: true,
+        text: '子代理 (0) ▸',
+      });
+      const elapsedEl = h('span', {
+        className: 'live-activity-elapsed text-mono',
+        text: '0s',
+      });
+
+      const headerEl = h('div', { className: 'live-task-header' }, [
+        h('div', { className: 'live-task-title-wrap' }, [dotWrap, titleEl]),
+        h('div', { className: 'live-task-header-right' }, [subToggleBtn, elapsedEl]),
+      ]);
+
+      const mainBadge = h('span', { className: 'agent-badge badge-main', text: '主' });
+      const mainPhase = h('strong', { className: 'live-activity-phase', text: '推理中' });
+      const mainProgress = h('span', {
+        className: 'live-activity-progress text-mono',
+        hidden: true,
+        text: '',
+      });
+      const mainSep = h('span', { className: 'live-activity-sep', hidden: true, text: '·' });
+      const mainDetail = h('span', {
+        className: 'live-activity-detail',
+        hidden: true,
+        text: '',
+      });
+
+      const mainRowEl = h('div', { className: 'live-task-main-row' }, [
+        mainBadge,
+        mainPhase,
+        mainProgress,
+        mainSep,
+        mainDetail,
+      ]);
+
+      const subListEl = h('div', { className: 'live-sub-list', hidden: true });
+      const cardEl = h('div', { className: 'live-task-card' }, [headerEl, mainRowEl, subListEl]);
+
+      return {
+        el: cardEl,
+        refs: {
+          cardEl,
+          dotIcon,
+          titleEl,
+          subToggleBtn,
+          elapsedEl,
+          mainPhase,
+          mainProgress,
+          mainSep,
+          mainDetail,
+          subListEl,
+        },
+      };
+    }
+
+    function createLiveSubRow() {
+      const subBadge = h('span', { className: 'agent-badge badge-sub-1', text: '子1' });
+      const subRole = h('span', { className: 'live-sub-role', text: '子代理' });
+      const subSummary = h('span', { className: 'live-sub-summary', text: '' });
+      const subElapsed = h('span', { className: 'live-sub-elapsed text-mono', text: '0s' });
+
+      const rowEl = h('div', { className: 'live-sub-row' }, [
+        h('div', { className: 'live-sub-left' }, [
+          subBadge,
+          subRole,
+          subSummary,
+        ]),
+        subElapsed,
+      ]);
+
+      return {
+        el: rowEl,
+        refs: {
+          rowEl,
+          subBadge,
+          subRole,
+          subSummary,
+          subElapsed,
+        },
+      };
+    }
+
     // --- 1. 4 格实时测速矩阵 (实时吞吐 / 首Token / 会话均速 / 本步消费) ---
     const tpsVal = h('strong', { className: 'cell-value accent-speed', text: '—' });
     const tpsSub = h('span', { className: 'cell-sub', text: '模型未知' });
@@ -277,7 +418,7 @@ export const LiveOverviewView = defineComponent({
       {
         style: 'display: flex; flex-direction: column; gap: var(--space-3); padding-bottom: 2px;',
       },
-      [matrixEl, ctxPanel, quotaPanel]
+      [matrixEl, ctxPanel, quotaPanel, liveActivityBar]
     );
     const viewScrollbar = CustomScrollbar({
       contentEl: overviewInner,
@@ -383,24 +524,246 @@ export const LiveOverviewView = defineComponent({
       const uiSt = uiStore.getState();
       const {
         hasSubagents,
-        effectiveScope,
         effectiveCtxScope,
         agents,
         aggregated,
         scopedConv,
         ctxAgent,
-      } = resolveScopedConversation(data, uiSt.selectedAgentScope, uiSt.ctxInspectorAgentId);
+      } = resolveScopedConversation(data, 'all', uiSt.ctxInspectorAgentId);
 
       const active = scopedConv || data.activeConversation || {};
       const ctx = ctxAgent?.context || active.context || {};
       const quotas = data.quotas || {};
 
-      // 1. 更新 4 格实时测速矩阵（根据当前代理作用域动态展示全部汇总或单代理指标）
+      // 0. 更新多任务实时运行列表（展示所有正在运行的主进程 + 默认主代理缩略 + 默认收起的子代理列表）
+      const rawRunningList =
+        Array.isArray(data.runningConversations) && data.runningConversations.length > 0
+          ? data.runningConversations
+          : data.activeConversation?.isRunning || aggregated?.isRunning
+            ? [
+                {
+                  cascadeId: data.activeConversation?.cascadeId || 'current',
+                  title: data.activeConversation?.title || '当前会话',
+                  isCurrentSelected: true,
+                  isMainRunning: Boolean(data.activeConversation?.isRunning),
+                  isRunning: true,
+                  mainActivity:
+                    data.activeConversation?.liveActivity || aggregated?.liveActivity || null,
+                  subagentCount: Math.max(0, agents.length - 1),
+                  runningSubagentCount: agents.filter((a) => !a.isMain && a.isRunning).length,
+                  subagents: agents
+                    .filter((a) => !a.isMain)
+                    .map((s, idx) => ({
+                      cascadeId: s.cascadeId || s.agentId,
+                      index: s.index || idx + 1,
+                      badgeText: s.badgeText || `子${idx + 1}`,
+                      shortLabel: s.shortLabel || `子代理 #${idx + 1}`,
+                      role: s.role || `子代理 #${idx + 1}`,
+                      isRunning: Boolean(s.isRunning),
+                      stepCount: Number(s.stepCount || 0),
+                      lastModifiedMs: s.lastModifiedMs || 0,
+                      liveActivity: s.liveActivity || {
+                        phase: s.isRunning ? 'thinking' : 'done',
+                        label: s.isRunning ? '推理中' : '已完成',
+                        detail: '',
+                        stepProgress: '',
+                        startedAtMs: s.lastModifiedMs || 0,
+                        signature: `${s.agentId}:${s.stepCount || 0}`,
+                      },
+                    })),
+                },
+              ]
+            : [];
+
+      const hasRunningTasks = rawRunningList.length > 0;
+      patchAttr(liveActivityBar, 'hidden', !hasRunningTasks);
+      if (!hasRunningTasks) {
+        stopLiveTicker();
+      } else {
+        // 先基于完整运行列表收集所有有效计时器 Key（防止 patchKeyedList 在 sig 未变化跳过 updateRow 时误删计时器）
+        const activeTimerKeys = new Set();
+        for (const item of rawRunningList) {
+          activeTimerKeys.add(`main:${item.cascadeId}`);
+          for (const sub of item.subagents || []) {
+            if (sub?.isRunning) {
+              activeTimerKeys.add(`sub:${sub.cascadeId}`);
+            }
+          }
+        }
+        // 清理已结束会话的展开状态
+        const runningIdsSet = new Set(rawRunningList.map((item) => item.cascadeId));
+        for (const id of [...expandedTaskConvIds]) {
+          if (!runningIdsSet.has(id)) {
+            expandedTaskConvIds.delete(id);
+          }
+        }
+
+        patchKeyedList(liveActivityBar, rawRunningList, {
+          keyFn: (item) => item.cascadeId,
+          sigFn: (item) => {
+            const isExp = expandedTaskConvIds.has(item.cascadeId);
+            const subSig = (item.subagents || [])
+              .map(
+                (s) =>
+                  `${s.cascadeId}:${s.isRunning}:${s.stepCount}:${s.liveActivity?.signature || ''}`
+              )
+              .join('|');
+            return `${item.cascadeId}:${item.title}:${item.isMainRunning}:${item.subagentCount}:${item.runningSubagentCount}:${isExp}:${item.mainActivity?.signature || ''}:${subSig}`;
+          },
+          createRow: createLiveTaskCard,
+          updateRow: (refs, item) => {
+            const act = item.mainActivity || {
+              phase: 'thinking',
+              label: '推理中',
+              detail: '',
+              stepProgress: '',
+              startedAtMs: item.lastModifiedMs || 0,
+              signature: `fallback:${item.lastModifiedMs || 0}`,
+            };
+
+            const isWaiting = act.phase === 'waiting';
+            patchClasses(refs.cardEl, { 'is-waiting': isWaiting });
+            patchClasses(refs.dotIcon, { 'is-pulsing': true });
+
+            const convTitle = item.title || item.cascadeId?.slice(0, 8) || '当前会话';
+            patchText(refs.titleEl, convTitle);
+            patchAttr(refs.titleEl, 'title', `点击切换查看会话：${convTitle}`);
+            refs.titleEl.onclick = () => {
+              if (item.cascadeId && item.cascadeId !== 'current') {
+                uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' });
+                telemetryStore.setState({ selectedConversationId: item.cascadeId });
+                fetchTelemetry({ force: false });
+              }
+            };
+
+            const subCount = Number(item.subagentCount || item.subagents?.length || 0);
+            const runSubCount = Number(item.runningSubagentCount || 0);
+            const isExpanded = expandedTaskConvIds.has(item.cascadeId);
+            patchAttr(refs.subToggleBtn, 'hidden', subCount === 0);
+            if (subCount > 0) {
+              const arrow = isExpanded ? '▾' : '▸';
+              const toggleText =
+                runSubCount > 0
+                  ? `子代理 ${runSubCount}/${subCount} ${arrow}`
+                  : `子代理 (${subCount}) ${arrow}`;
+              patchText(refs.subToggleBtn, toggleText);
+              patchClasses(refs.subToggleBtn, { 'is-expanded': isExpanded });
+              patchAttr(
+                refs.subToggleBtn,
+                'title',
+                isExpanded ? '点击收起子代理列表' : '点击展开查看子代理缩略状态'
+              );
+              refs.subToggleBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (expandedTaskConvIds.has(item.cascadeId)) {
+                  expandedTaskConvIds.delete(item.cascadeId);
+                } else {
+                  expandedTaskConvIds.add(item.cascadeId);
+                }
+                renderData(latestData);
+              };
+            }
+
+            const mainTimerKey = `main:${item.cascadeId}`;
+            activeTimerKeys.add(mainTimerKey);
+            bindLiveElapsedTimer(
+              mainTimerKey,
+              `${item.cascadeId}:${act.signature || act.label}`,
+              act.startedAtMs,
+              refs.elapsedEl
+            );
+
+            patchText(refs.mainPhase, act.label || '推理中');
+            const progText = act.stepProgress ? `[${act.stepProgress}]` : '';
+            patchAttr(refs.mainProgress, 'hidden', !progText);
+            if (progText) {
+              patchText(refs.mainProgress, progText);
+            }
+
+            const detailStr = act.detail || '';
+            patchAttr(refs.mainSep, 'hidden', !detailStr);
+            patchAttr(refs.mainDetail, 'hidden', !detailStr);
+            patchText(refs.mainDetail, detailStr);
+
+            const fullTooltip = `[${convTitle}] 主代理 · ${act.label || ''}${progText ? ` ${progText}` : ''}${detailStr ? ` · ${detailStr}` : ''}`;
+            patchAttr(refs.cardEl, 'title', fullTooltip);
+
+            const showSubs = subCount > 0 && isExpanded;
+            patchAttr(refs.subListEl, 'hidden', !showSubs);
+            if (showSubs) {
+              const subItems = item.subagents || [];
+              patchKeyedList(refs.subListEl, subItems, {
+                keyFn: (sub) => sub.cascadeId,
+                sigFn: (sub) =>
+                  `${sub.cascadeId}:${sub.role}:${sub.isRunning}:${sub.stepCount}:${sub.liveActivity?.signature || ''}:${sub.isRunning ? activityTimersMap.has(`sub:${sub.cascadeId}`) : true}`,
+                createRow: createLiveSubRow,
+                updateRow: (subRefs, sub) => {
+                  const subAct = sub.liveActivity || {
+                    phase: sub.isRunning ? 'thinking' : 'done',
+                    label: sub.isRunning ? '推理中' : '已完成',
+                    detail: '',
+                    stepProgress: '',
+                    startedAtMs: sub.lastModifiedMs || 0,
+                  };
+                  patchClasses(subRefs.rowEl, { 'is-done': !sub.isRunning });
+
+                  const badgeCls = getAgentBadgeClass(sub.index || 1, false);
+                  patchAttr(subRefs.subBadge, 'class', `agent-badge ${badgeCls}`);
+                  patchText(subRefs.subBadge, sub.badgeText || `子${sub.index || 1}`);
+
+                  const roleText = sub.role || sub.shortLabel || '子代理';
+                  patchText(subRefs.subRole, roleText);
+
+                  const rawSubLabel = sub.isRunning ? subAct.label || '' : subAct.label || '已完成';
+                  const subProg = subAct.stepProgress ? ` [${subAct.stepProgress}]` : '';
+                  const summaryStr = [
+                    `${rawSubLabel}${subProg}`.trim(),
+                    subAct.detail || '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ');
+                  patchAttr(subRefs.subSummary, 'hidden', !summaryStr);
+                  patchText(subRefs.subSummary, summaryStr);
+
+                  patchAttr(
+                    subRefs.rowEl,
+                    'title',
+                    `[${sub.badgeText || '子'}] ${roleText}${summaryStr ? ` ${summaryStr}` : ''}`
+                  );
+
+                  if (sub.isRunning) {
+                    const subTimerKey = `sub:${sub.cascadeId}`;
+                    activeTimerKeys.add(subTimerKey);
+                    bindLiveElapsedTimer(
+                      subTimerKey,
+                      `${sub.cascadeId}:${subAct.signature || subAct.label}`,
+                      subAct.startedAtMs,
+                      subRefs.subElapsed
+                    );
+                  } else {
+                    patchText(subRefs.subElapsed, `${sub.stepCount || 0}步`);
+                  }
+                },
+              });
+            }
+          },
+        });
+
+        for (const key of [...activityTimersMap.keys()]) {
+          if (!activeTimerKeys.has(key)) {
+            activityTimersMap.delete(key);
+          }
+        }
+        updateLiveElapsedDisplay();
+        ensureLiveTicker();
+      }
+
+      // 1. 更新 4 格实时测速矩阵（展示当前会话全局汇总指标）
       patchClasses(pulseDot, { 'is-pulsing': Boolean(active.isRunning) });
       patchText(tpsVal, formatMetric(active.latestTokPerSec, ' tok/s'));
       const reason = speedReasonText(active.latestSpeedReason);
       const modelAndAgent =
-        hasSubagents && effectiveScope === 'all' && active.activeAgentBadge
+        hasSubagents && active.activeAgentBadge
           ? `[${active.activeAgentBadge}] ${active.activeModelShort || '模型未知'}`
           : active.activeModelShort || '模型未知';
       patchText(tpsSub, reason ? `${modelAndAgent} · ${reason}` : modelAndAgent);
@@ -418,7 +781,7 @@ export const LiveOverviewView = defineComponent({
         `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
       );
 
-      // 2. 更新 6 段上下文窗口构成与方案 B 内嵌上下文窗口检视胶囊条
+      // 2. 更新 10 段上下文窗口构成与内嵌上下文窗口检视胶囊条
       patchAttr(ctxAgentBadge, 'hidden', !hasSubagents);
       patchAttr(ctxInspectorBar, 'hidden', !hasSubagents);
       if (hasSubagents && ctxAgent) {
@@ -428,37 +791,24 @@ export const LiveOverviewView = defineComponent({
         patchText(ctxAgentBadge, badgeFullText);
         patchAttr(ctxAgentBadge, 'title', badgeFullText);
 
-        const pillItems = [];
-        if (effectiveScope === 'all') {
-          pillItems.push({
+        const pillItems = [
+          {
             key: 'auto',
             label: `跟随活跃 (${aggregated?.activeAgentBadge || '主'})`,
             title: '自动展示当前正在运行或最新活跃的代理上下文窗口',
             isActive: effectiveCtxScope === 'auto',
             mode: 'ctx-only',
-          });
-        } else {
-          pillItems.push({
-            key: 'all',
-            label: `全部汇总 (${aggregated?.stepCount ?? 0}步)`,
-            title: '切回全部代理汇总视图',
-            isActive: false,
-            mode: 'scope',
-          });
-        }
+          },
+        ];
 
         const allAgentPills = agents.map((ag) => {
           const agPct = ag.context?.usedPct ?? 0;
-          const isAct =
-            effectiveScope === 'all'
-              ? effectiveCtxScope === ag.agentId
-              : effectiveScope === ag.agentId;
           return {
             key: ag.agentId,
             label: `${ag.badgeText || ag.shortLabel} ${agPct}%`,
             title: `${formatAgentLabel(ag)} (${ag.activeModelShort || '模型未知'} · ${ag.stepCount || 0}步)`,
-            isActive: isAct,
-            mode: effectiveScope === 'all' ? 'ctx-only' : 'scope',
+            isActive: effectiveCtxScope === ag.agentId,
+            mode: 'ctx-only',
           };
         });
 
@@ -632,6 +982,15 @@ export const LiveOverviewView = defineComponent({
       (data) => {
         latestData = data;
         if (uiStore.getState().activeView !== 'overview') {
+          const stillRunning =
+            (Array.isArray(data?.runningConversations) && data.runningConversations.length > 0) ||
+            Boolean(
+              data?.activeConversation?.isRunning ||
+                data?.activeConversation?.aggregated?.isRunning
+            );
+          if (!stillRunning) {
+            stopLiveTicker();
+          }
           isDirty = true;
           return;
         }
@@ -640,19 +999,15 @@ export const LiveOverviewView = defineComponent({
       }
     );
 
-    let prevScope = uiStore.getState().selectedAgentScope;
     let prevCtxTarget = uiStore.getState().ctxInspectorAgentId;
 
     const unsubView = uiStore.subscribe(
       (st) => ({
         activeView: st.activeView,
-        selectedAgentScope: st.selectedAgentScope,
         ctxInspectorAgentId: st.ctxInspectorAgentId,
       }),
       (slice) => {
-        const scopeChanged =
-          slice.selectedAgentScope !== prevScope || slice.ctxInspectorAgentId !== prevCtxTarget;
-        prevScope = slice.selectedAgentScope;
+        const scopeChanged = slice.ctxInspectorAgentId !== prevCtxTarget;
         prevCtxTarget = slice.ctxInspectorAgentId;
 
         if (slice.activeView !== 'overview') {
@@ -683,6 +1038,7 @@ export const LiveOverviewView = defineComponent({
     }
 
     onCleanup(() => {
+      stopLiveTicker();
       unsub();
       unsubView();
       if (ro) ro.disconnect();

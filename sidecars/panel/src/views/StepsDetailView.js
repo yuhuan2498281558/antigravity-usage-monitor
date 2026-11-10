@@ -201,15 +201,15 @@ export const StepsDetailView = defineComponent({
         slice.recentSteps ||
         [];
       const models =
-        hasSubagents && Array.isArray(scopedConv?.modelBreakdown)
+        (Array.isArray(scopedConv?.modelBreakdown) && scopedConv.modelBreakdown.length > 0
           ? scopedConv.modelBreakdown
-          : slice.modelBreakdown || [];
+          : slice.sessionModelBreakdown || slice.modelBreakdown) || [];
       const showUpstream = Boolean(slice.showUpstreamModel);
       const modelsTabBadge = hasSubagents
         ? effectiveScope === 'all'
           ? '本会话汇总'
           : scopedConv?.shortLabel || '当前代理'
-        : slice.rangeLabel;
+        : '本会话';
 
       subTabSwitch.setProps({
         options: [
@@ -365,6 +365,7 @@ export const StepsDetailView = defineComponent({
         activeConversation: st.telemetry?.activeConversation,
         cascadeId: st.telemetry?.activeConversation?.cascadeId,
         recentSteps: st.telemetry?.activeConversation?.recentSteps,
+        sessionModelBreakdown: st.telemetry?.activeConversation?.modelBreakdown,
         modelBreakdown: st.telemetry?.modelBreakdown,
         rangeLabel: st.telemetry?.consumption?.selectedRange?.label || '全部时间',
         showUpstreamModel: Boolean(st.telemetry?.settings?.showUpstreamModel),

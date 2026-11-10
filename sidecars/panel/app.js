@@ -59,18 +59,6 @@ const SVG_ICON_DEFS = Object.freeze({
     { tag: 'circle', attrs: { cx: '10.5', cy: '8', r: '1.5' } },
     { tag: 'circle', attrs: { cx: '6.8', cy: '12.5', r: '1.5' } },
   ],
-  flask: [
-    { tag: 'path', attrs: { d: 'M6 2.2h4' } },
-    { tag: 'path', attrs: { d: 'M6.8 2.2v3.6L3.2 12.2a1.2 1.2 0 0 0 1.1 1.8h7.4a1.2 1.2 0 0 0 1.1-1.8L9.2 5.8V2.2' } },
-    { tag: 'path', attrs: { d: 'M4.6 10.2h6.8' } },
-  ],
-  session: [
-    { tag: 'path', attrs: { d: 'M2.5 3.2h11v7.6H6l-3.5 2.5V3.2z' } },
-  ],
-  cpu: [
-    { tag: 'rect', attrs: { x: '4', y: '4', width: '8', height: '8', rx: '1' } },
-    { tag: 'path', attrs: { d: 'M6.5 1.8v2.2M9.5 1.8v2.2M6.5 12v2.2M9.5 12v2.2M1.8 6.5H4M1.8 9.5H4M12 6.5h2.2M12 9.5h2.2' } },
-  ],
   calendar: [
     { tag: 'rect', attrs: { x: '2.2', y: '3.2', width: '11.6', height: '10.6', rx: '1' } },
     { tag: 'path', attrs: { d: 'M5.2 1.8v2.4M10.8 1.8v2.4M2.2 6.5h11.6' } },
@@ -84,12 +72,6 @@ const SVG_ICON_DEFS = Object.freeze({
   ],
   minus: [
     { tag: 'path', attrs: { d: 'M3.5 8h9' } },
-  ],
-  swap: [
-    { tag: 'path', attrs: { d: 'M3 5.5h10l-2.6-2.6M13 10.5H3l2.6 2.6' } },
-  ],
-  close: [
-    { tag: 'path', attrs: { d: 'M4 4l8 8M12 4l-8 8' } },
   ],
   dot: [
     { tag: 'circle', attrs: { cx: '8', cy: '8', r: '3.2', fill: 'currentColor', stroke: 'none' } },
@@ -427,13 +409,6 @@ function patchKeyedList(container, items, { keyFn, sigFn, createRow, updateRow }
  * reactive subscriptions, and lifecycle cleanup.
  */
 
-const globalEmitListeners = new Set();
-
-function onComponentEmit(listener) {
-  globalEmitListeners.add(listener);
-  return () => globalEmitListeners.delete(listener);
-}
-
 function defineComponent({ name, setup }) {
   return function createInstance(initialProps = {}) {
     let props = { ...initialProps };
@@ -463,14 +438,6 @@ function defineComponent({ name, setup }) {
         for (const fn of handlers) {
           fn(payload);
         }
-      }
-      for (const observer of globalEmitListeners) {
-        observer({
-          component: name || 'AnonymousComponent',
-          event,
-          payload,
-          timestamp: Date.now(),
-        });
       }
     }
 
@@ -511,6 +478,7 @@ function defineComponent({ name, setup }) {
           console.error(`[${name}] cleanup error:`, err);
         }
       }
+      eventHandlers.clear();
       if (setupResult.el?.parentNode) {
         setupResult.el.parentNode.removeChild(setupResult.el);
       }
@@ -621,12 +589,17 @@ function formatCompactDateTime(ms) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function escapeHtml(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+function formatElapsedSec(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const remS = s % 60;
+  if (m < 60) {
+    return `${m}m ${String(remS).padStart(2, '0')}s`;
+  }
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return `${h}h ${remM}m`;
 }
 
 // --- src/core/httpClient.js ---
@@ -647,14 +620,15 @@ async function callSidecarApi(path, { method = 'GET', body, abortKey = '' } = {}
   }
 
   let signal;
+  let requestController = null;
   if (abortKey && typeof AbortController !== 'undefined') {
     const prev = activeControllers.get(abortKey);
     if (prev) {
       prev.abort();
     }
-    const controller = new AbortController();
-    activeControllers.set(abortKey, controller);
-    signal = controller.signal;
+    requestController = new AbortController();
+    activeControllers.set(abortKey, requestController);
+    signal = requestController.signal;
   }
 
   const runRequest = async () => {
@@ -690,6 +664,9 @@ async function callSidecarApi(path, { method = 'GET', body, abortKey = '' } = {}
     if (dedupKey) {
       inFlightGets.delete(dedupKey);
     }
+    if (abortKey && requestController && activeControllers.get(abortKey) === requestController) {
+      activeControllers.delete(abortKey);
+    }
   });
 
   if (dedupKey) {
@@ -716,8 +693,6 @@ const uiStore = createReactiveStore({
   stepsSubTab: 'steps', // 'steps' | 'models'
   selectedAgentScope: 'all', // 'all' | 'main' | <subagent cascadeId>
   ctxInspectorAgentId: 'auto', // 'auto' | 'main' | <subagent cascadeId>
-  showAllPools: true,
-  ctxBreakdownOpen: true,
 });
 
 // --- src/store/telemetryStore.js ---
@@ -783,7 +758,10 @@ function isEquivalentTelemetry(prev, next) {
   if (pAct?.subagentCount !== nAct?.subagentCount) return false;
   if (pAct?.totalStepsAllAgents !== nAct?.totalStepsAllAgents) return false;
   if (pAct?.isRunning !== nAct?.isRunning) return false;
+  if (pAct?.liveActivity?.signature !== nAct?.liveActivity?.signature) return false;
   if (pAct?.aggregated?.isRunning !== nAct?.aggregated?.isRunning) return false;
+  if (pAct?.aggregated?.liveActivity?.signature !== nAct?.aggregated?.liveActivity?.signature) return false;
+  if (pAct?.aggregated?.liveActivity?.agentId !== nAct?.aggregated?.liveActivity?.agentId) return false;
   if (pAct?.aggregated?.activeAgentId !== nAct?.aggregated?.activeAgentId) return false;
   if (pAct?.aggregated?.activeAgentBadge !== nAct?.aggregated?.activeAgentBadge) return false;
   if (pAct?.aggregated?.latestTokPerSec !== nAct?.aggregated?.latestTokPerSec) return false;
@@ -792,8 +770,14 @@ function isEquivalentTelemetry(prev, next) {
   if (pAct?.aggregated?.latestStepCostUsd !== nAct?.aggregated?.latestStepCostUsd) return false;
   if (pAct?.aggregated?.sessionCostUsd !== nAct?.aggregated?.sessionCostUsd) return false;
   if (pAct?.aggregated?.activeModelShort !== nAct?.aggregated?.activeModelShort) return false;
+  if (pAct?.aggregated?.latestCacheHitPct !== nAct?.aggregated?.latestCacheHitPct) return false;
+  if (pAct?.aggregated?.latestSpeedReason !== nAct?.aggregated?.latestSpeedReason) return false;
   if (pAct?.latestTokPerSec !== nAct?.latestTokPerSec) return false;
   if (pAct?.latestTtftSec !== nAct?.latestTtftSec) return false;
+  if (pAct?.latestCacheHitPct !== nAct?.latestCacheHitPct) return false;
+  if (pAct?.latestSpeedReason !== nAct?.latestSpeedReason) return false;
+  if (pAct?.ttftSummary?.avgSec !== nAct?.ttftSummary?.avgSec) return false;
+  if (pAct?.speedSummary?.sampleCount !== nAct?.speedSummary?.sampleCount) return false;
   if (pAct?.activeModelShort !== nAct?.activeModelShort || pAct?.activeModelLabel !== nAct?.activeModelLabel) return false;
   if (pAct?.latestStepCostUsd !== nAct?.latestStepCostUsd || pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls) return false;
 
@@ -810,9 +794,12 @@ function isEquivalentTelemetry(prev, next) {
       pa?.role !== na?.role ||
       pa?.stepCount !== na?.stepCount ||
       pa?.isRunning !== na?.isRunning ||
+      pa?.liveActivity?.signature !== na?.liveActivity?.signature ||
       pa?.latestTokPerSec !== na?.latestTokPerSec ||
       pa?.latestTtftSec !== na?.latestTtftSec ||
       pa?.avgTokPerSec !== na?.avgTokPerSec ||
+      pa?.latestCacheHitPct !== na?.latestCacheHitPct ||
+      pa?.latestSpeedReason !== na?.latestSpeedReason ||
       pa?.latestStepCostUsd !== na?.latestStepCostUsd ||
       pa?.sessionCostUsd !== na?.sessionCostUsd ||
       pa?.activeModelShort !== na?.activeModelShort ||
@@ -820,6 +807,14 @@ function isEquivalentTelemetry(prev, next) {
       pa?.context?.messagesTokens !== na?.context?.messagesTokens ||
       pa?.context?.toolResultsTokens !== na?.context?.toolResultsTokens ||
       pa?.context?.assistantTokens !== na?.context?.assistantTokens ||
+      pa?.context?.userInputTokens !== na?.context?.userInputTokens ||
+      pa?.context?.subagentTokens !== na?.context?.subagentTokens ||
+      pa?.context?.checkpointTokens !== na?.context?.checkpointTokens ||
+      pa?.context?.systemToolsTokens !== na?.context?.systemToolsTokens ||
+      pa?.context?.mcpToolsTokens !== na?.context?.mcpToolsTokens ||
+      pa?.context?.skillsTokens !== na?.context?.skillsTokens ||
+      pa?.context?.systemPromptTokens !== na?.context?.systemPromptTokens ||
+      pa?.context?.userRulesTokens !== na?.context?.userRulesTokens ||
       pLastStep?.tokPerSec !== nLastStep?.tokPerSec ||
       pLastStep?.ttftSec !== nLastStep?.ttftSec ||
       pLastStep?.outputTokens !== nLastStep?.outputTokens ||
@@ -830,7 +825,7 @@ function isEquivalentTelemetry(prev, next) {
     }
   }
 
-  // 4. 比对 6 通道上下文窗口构成（总 Token 与消息/系统工具/MCP/Skill/系统提示词/用户规则）及近期步骤明细
+  // 4. 比对 10 通道上下文窗口构成及近期步骤明细
   const pCtx = pAct?.context;
   const nCtx = nAct?.context;
   if (pCtx?.totalTokens !== nCtx?.totalTokens) return false;
@@ -848,9 +843,21 @@ function isEquivalentTelemetry(prev, next) {
   if ((pAct?.recentSteps?.length || 0) !== (nAct?.recentSteps?.length || 0)) return false;
   for (let i = 0; i < (pAct?.recentSteps?.length || 0); i++) {
     const before = pAct.recentSteps[i], after = nAct.recentSteps[i];
-    if (before.modelKey !== after.modelKey || before.modelShort !== after.modelShort ||
-        before.modelUpstream !== after.modelUpstream || before.responseModel !== after.responseModel ||
-        before.modelSource !== after.modelSource || before.costUsd !== after.costUsd) return false;
+    if (
+      before.modelKey !== after.modelKey ||
+      before.modelShort !== after.modelShort ||
+      before.modelUpstream !== after.modelUpstream ||
+      before.responseModel !== after.responseModel ||
+      before.modelSource !== after.modelSource ||
+      before.costUsd !== after.costUsd ||
+      before.tokPerSec !== after.tokPerSec ||
+      before.ttftSec !== after.ttftSec ||
+      before.outputTokens !== after.outputTokens ||
+      before.inputTokens !== after.inputTokens ||
+      before.cacheReadTokens !== after.cacheReadTokens
+    ) {
+      return false;
+    }
   }
 
   // 5. 比对消费统计所选时间区间、当前会话累计消费与账号全局累计消费
@@ -874,12 +881,30 @@ function isEquivalentTelemetry(prev, next) {
   if (pAcct?.costUsd !== nAcct?.costUsd) return false;
   if (pAcct?.unpricedCalls !== nAcct?.unpricedCalls) return false;
 
-  // 6. 比对历史趋势时间分桶序列
+  // 6. 比对历史趋势时间分桶序列与年度分月序列
   const pTrend = prev.consumption?.trendSeries || [];
   const nTrend = next.consumption?.trendSeries || [];
   if (pTrend.length !== nTrend.length) return false;
   for (let i = 0; i < pTrend.length; i++) {
-    if (pTrend[i]?.tokens !== nTrend[i]?.tokens || pTrend[i]?.label !== nTrend[i]?.label) {
+    if (
+      pTrend[i]?.tokens !== nTrend[i]?.tokens ||
+      pTrend[i]?.calls !== nTrend[i]?.calls ||
+      pTrend[i]?.label !== nTrend[i]?.label ||
+      pTrend[i]?.fullLabel !== nTrend[i]?.fullLabel
+    ) {
+      return false;
+    }
+  }
+  if (prev.consumption?.monthlyYear !== next.consumption?.monthlyYear) return false;
+  const pMonthly = prev.consumption?.monthlySeries || [];
+  const nMonthly = next.consumption?.monthlySeries || [];
+  if (pMonthly.length !== nMonthly.length) return false;
+  for (let i = 0; i < pMonthly.length; i++) {
+    if (
+      pMonthly[i]?.totalTokens !== nMonthly[i]?.totalTokens ||
+      pMonthly[i]?.costUsd !== nMonthly[i]?.costUsd ||
+      pMonthly[i]?.calls !== nMonthly[i]?.calls
+    ) {
       return false;
     }
   }
@@ -918,7 +943,18 @@ function isEquivalentTelemetry(prev, next) {
   }
 
   // 8. 比对账号订阅档位与动态多配额池（活跃池、周汇总及各配额池的 5h/周限额进度与重置时间）
-  if (prev.account?.tierName !== next.account?.tierName || prev.account?.planName !== next.account?.planName) {
+  if (
+    prev.account?.tierName !== next.account?.tierName ||
+    prev.account?.planName !== next.account?.planName ||
+    prev.account?.aiCredits !== next.account?.aiCredits
+  ) {
+    return false;
+  }
+
+  if (
+    prev.quotas?.meta?.refreshFailed !== next.quotas?.meta?.refreshFailed ||
+    prev.quotas?.meta?.isStale !== next.quotas?.meta?.isStale
+  ) {
     return false;
   }
 
@@ -930,6 +966,11 @@ function isEquivalentTelemetry(prev, next) {
   if (pQuot?.weeklyUsedPct !== nQuot?.weeklyUsedPct) return false;
   if (prev.quotas?.weekly?.usedPct !== next.quotas?.weekly?.usedPct) return false;
   if (prev.quotas?.weekly?.remainingPct !== next.quotas?.weekly?.remainingPct) return false;
+  if (prev.quotas?.weekly?.tokens !== next.quotas?.weekly?.tokens) return false;
+  if (prev.quotas?.weekly?.costUsd !== next.quotas?.weekly?.costUsd) return false;
+  if (prev.quotas?.weekly?.calls !== next.quotas?.weekly?.calls) return false;
+  if (prev.quotas?.weekly?.unpricedCalls !== next.quotas?.weekly?.unpricedCalls) return false;
+  if (prev.quotas?.weekly?.resetTime !== next.quotas?.weekly?.resetTime) return false;
 
   const pPools = prev.quotas?.pools || [];
   const nPools = next.quotas?.pools || [];
@@ -956,11 +997,45 @@ function isEquivalentTelemetry(prev, next) {
     if (
       pConvs[i]?.cascadeId !== nConvs[i]?.cascadeId ||
       pConvs[i]?.title !== nConvs[i]?.title ||
+      pConvs[i]?.status !== nConvs[i]?.status ||
       pConvs[i]?.stepCount !== nConvs[i]?.stepCount ||
       pConvs[i]?.subagentCount !== nConvs[i]?.subagentCount ||
       pConvs[i]?.totalStepCount !== nConvs[i]?.totalStepCount
     ) {
       return false;
+    }
+  }
+
+  const pRunning = prev.runningConversations || [];
+  const nRunning = next.runningConversations || [];
+  if (pRunning.length !== nRunning.length) return false;
+  for (let i = 0; i < pRunning.length; i++) {
+    const pr = pRunning[i];
+    const nr = nRunning[i];
+    if (
+      pr?.cascadeId !== nr?.cascadeId ||
+      pr?.title !== nr?.title ||
+      pr?.isCurrentSelected !== nr?.isCurrentSelected ||
+      pr?.isMainRunning !== nr?.isMainRunning ||
+      pr?.subagentCount !== nr?.subagentCount ||
+      pr?.runningSubagentCount !== nr?.runningSubagentCount ||
+      pr?.mainActivity?.signature !== nr?.mainActivity?.signature
+    ) {
+      return false;
+    }
+    const pSubs = pr?.subagents || [];
+    const nSubs = nr?.subagents || [];
+    if (pSubs.length !== nSubs.length) return false;
+    for (let j = 0; j < pSubs.length; j++) {
+      if (
+        pSubs[j]?.cascadeId !== nSubs[j]?.cascadeId ||
+        pSubs[j]?.role !== nSubs[j]?.role ||
+        pSubs[j]?.isRunning !== nSubs[j]?.isRunning ||
+        pSubs[j]?.stepCount !== nSubs[j]?.stepCount ||
+        pSubs[j]?.liveActivity?.signature !== nSubs[j]?.liveActivity?.signature
+      ) {
+        return false;
+      }
     }
   }
 
@@ -1280,6 +1355,16 @@ const TopLongPillNav = defineComponent({
       const { items = [], modelValue } = getProps();
       patchStyleVar(navEl, '--pill-count', Math.max(1, items.length));
 
+      const validValues = new Set(items.map((it) => it.value));
+      for (const [val, entry] of tabButtons.entries()) {
+        if (!validValues.has(val)) {
+          if (entry.btn?.parentNode === navEl) {
+            navEl.removeChild(entry.btn);
+          }
+          tabButtons.delete(val);
+        }
+      }
+
       let activeIdx = 0;
       items.forEach((item, index) => {
         if (item.value === modelValue) {
@@ -1302,8 +1387,13 @@ const TopLongPillNav = defineComponent({
                 if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
                   e.preventDefault();
                   const curItems = getProps().items || [];
+                  if (!curItems.length) return;
+                  const curIndex = Math.max(
+                    0,
+                    curItems.findIndex((it) => it.value === item.value)
+                  );
                   const delta = e.key === 'ArrowRight' ? 1 : -1;
-                  const nextIndex = (index + delta + curItems.length) % curItems.length;
+                  const nextIndex = (curIndex + delta + curItems.length) % curItems.length;
                   const target = curItems[nextIndex];
                   if (target) {
                     selectValue(target.value);
@@ -1499,9 +1589,7 @@ const CustomSelect = defineComponent({
       }
       const selectedOpt =
         options.find((o) => o.value === modelValue) ||
-        (modelValue !== '' && modelValue !== null && modelValue !== undefined
-          ? options[0]
-          : undefined);
+        (!modelValue ? options[0] : undefined);
       patchText(triggerLabel, selectedOpt ? selectedOpt.label : placeholder);
       if (isOpen) {
         renderMenuOptions();
@@ -1515,8 +1603,8 @@ const CustomSelect = defineComponent({
     };
 
     if (typeof document !== 'undefined' && document.addEventListener) {
-      document.addEventListener('click', handleDocClick);
-      onCleanup(() => document.removeEventListener('click', handleDocClick));
+      document.addEventListener('click', handleDocClick, true);
+      onCleanup(() => document.removeEventListener('click', handleDocClick, true));
     }
 
     syncTriggerAndMenu();
@@ -1910,8 +1998,8 @@ const CustomDateTimePicker = defineComponent({
     };
 
     if (typeof document !== 'undefined' && document.addEventListener) {
-      document.addEventListener('click', handleDocClick);
-      onCleanup(() => document.removeEventListener('click', handleDocClick));
+      document.addEventListener('click', handleDocClick, true);
+      onCleanup(() => document.removeEventListener('click', handleDocClick, true));
     }
 
     syncDisplay();
@@ -2076,16 +2164,27 @@ const CustomScrollbar = defineComponent({
       }
     });
 
+    let pendingSync = false;
+    function scheduleSyncThumb() {
+      if (typeof queueMicrotask === 'function') {
+        if (pendingSync) return;
+        pendingSync = true;
+        queueMicrotask(() => {
+          pendingSync = false;
+          syncThumb();
+        });
+      } else {
+        syncThumb();
+      }
+    }
+
     return {
       el: hostEl,
       refs: { contentEl, railEl, thumbEl },
-      onPropsChange: syncThumb,
+      onPropsChange: scheduleSyncThumb,
       methods: {
         refresh() {
-          syncThumb();
-          if (typeof queueMicrotask === 'function') {
-            queueMicrotask(syncThumb);
-          }
+          scheduleSyncThumb();
         },
         scrollToRatio(ratio) {
           const r = Math.max(0, Math.min(1, Number(ratio || 0)));
@@ -2181,11 +2280,10 @@ const SEGMENT_DEFS = [
 const ContextSegmentMeter = defineComponent({
   name: 'ContextSegmentMeter',
   setup({ getProps }) {
-    const segments = SEGMENT_DEFS.map((def, idx) => ({
-      ...def,
-      defaultOrder: idx,
-      el: h('div', { className: `progress-seg ${def.cls}` }),
-    }));
+    // 固定 10 个位置槽位节点，不通过 appendChild 移动 DOM，防止浏览器中断 CSS transition 动画
+    const slotEls = SEGMENT_DEFS.map((def) =>
+      h('div', { className: `progress-seg ${def.cls}` })
+    );
 
     const trackEl = h(
       'div',
@@ -2195,28 +2293,38 @@ const ContextSegmentMeter = defineComponent({
         'aria-valuemin': '0',
         'aria-valuemax': '100',
       },
-      segments.map((s) => s.el)
+      slotEls
     );
 
-    let lastOrderSig = segments.map((s) => s.key).join(',');
+    let lastOrderSig = '';
 
     function syncMeter() {
       const ctx = getProps().context || {};
       const limit = Math.max(1, Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000));
-      const scored = segments.map((seg) => {
-        const val = seg.getVal(ctx);
+      const scored = SEGMENT_DEFS.map((def, defaultOrder) => {
+        const val = def.getVal(ctx);
         const pct = Math.min(100, (val / limit) * 100);
-        patchStyleVar(seg.el, '--seg-w', `${pct.toFixed(2)}%`);
-        return { seg, val };
+        return { def, defaultOrder, val, pct };
       });
 
-      scored.sort((a, b) => b.val - a.val || a.seg.defaultOrder - b.seg.defaultOrder);
-      const nextOrderSig = scored.map((x) => x.seg.key).join(',');
-      if (nextOrderSig !== lastOrderSig) {
-        lastOrderSig = nextOrderSig;
-        for (const { seg } of scored) {
-          trackEl.appendChild(seg.el);
-        }
+      scored.sort((a, b) => b.val - a.val || a.defaultOrder - b.defaultOrder);
+      // 仅关注非零通道的相对顺序变化，决定是否启用 0.05s 先变色再伸缩的衔接延迟
+      const activeOrderSig = scored
+        .filter((x) => x.val > 0)
+        .map((x) => x.def.key)
+        .join(',');
+      const orderChanged = Boolean(lastOrderSig && activeOrderSig && activeOrderSig !== lastOrderSig);
+      if (activeOrderSig) {
+        lastOrderSig = activeOrderSig;
+      }
+
+      patchClasses(trackEl, { 'is-reordering': orderChanged });
+
+      for (let i = 0; i < slotEls.length; i++) {
+        const slotEl = slotEls[i];
+        const item = scored[i];
+        patchAttr(slotEl, 'class', `progress-seg ${item.def.cls}`);
+        patchStyleVar(slotEl, '--seg-w', `${item.pct.toFixed(2)}%`);
       }
 
       patchAttr(trackEl, 'aria-valuenow', Math.round(ctx.compactionUsedPct ?? ctx.usedPct ?? 0));
@@ -2226,7 +2334,7 @@ const ContextSegmentMeter = defineComponent({
 
     return {
       el: trackEl,
-      refs: { segments },
+      refs: { segments: slotEls },
       onPropsChange: syncMeter,
     };
   },
@@ -2282,15 +2390,17 @@ function createFourSegmentBar() {
 
 // --- src/components/charts/TrendAreaChart.js ---
 /**
- * @fileoverview 纯 SVG 三次贝塞尔平滑曲线趋势图组件 (TrendAreaChart).
- * 负责将按时间分桶的 Token 消耗序列渲染为带垂直渐变填充、虚线参考网格、
- * 峰值描点与自适应防溢出的顶部峰值胶囊标签的面积图。
+ * @fileoverview 交互式 SVG 三次贝塞尔平滑曲线趋势图组件 (TrendAreaChart).
+ * 支持：
+ * 1. 自适应整点小时（<=72h）与自然日（>72h）高精度分桶序列渲染；
+ * 2. 鼠标悬停/滑动十字准星探针、高亮圆点与自适应防溢出的悬浮详情卡片（精确日期/小时区间、Token 拆分、费用与调用次数）；
+ * 3. 与 SVG 垂直网格线像素级对齐的多刻度底部时间轴（彻底告别首/中/末简单对半切分）。
  */
 
 
 /**
  * 将二维采样点序列转换为水平张力平滑的三次贝塞尔曲线 SVG 路径 (`M ... C ...`)。
- * 控制点沿 X 轴取相邻点间距的 `0.45` 张力系数，Y 轴与各自端点齐平，
+ * 控制点沿 X 轴取相邻点间距的 `0.42` 张力系数，Y 轴与各自端点齐平，
  * 保证曲线在极值点处平缓过渡且不会产生上下过冲 (Overshoot)。
  *
  * @param {Array<{ x: number, y: number }>} points SVG 坐标系下的采样点数组
@@ -2303,33 +2413,59 @@ function buildSmoothSplinePath(points) {
   for (let i = 0; i < points.length - 1; i++) {
     const p0 = points[i];
     const p1 = points[i + 1];
-    const cpx1 = p0.x + (p1.x - p0.x) * 0.45;
-    const cpx2 = p1.x - (p1.x - p0.x) * 0.45;
+    const cpx1 = p0.x + (p1.x - p0.x) * 0.42;
+    const cpx2 = p1.x - (p1.x - p0.x) * 0.42;
     d += ` C ${cpx1.toFixed(1)} ${p0.y.toFixed(1)}, ${cpx2.toFixed(1)} ${p1.y.toFixed(1)}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
   }
   return d;
 }
 
 /**
- * 创建 SVG 历史趋势平滑面积图组件。
+ * 根据分桶总数与标签平均长度，计算底部 X 轴应当展示的均匀刻度下标列表。
  *
- * SVG 视口坐标系 (`viewBox="0 0 460 116"`) 布局约定：
- * - 水平绘图区：`leftX = 12` 至 `rightX = 448`（总跨度 `spanX = 436`），左右预留边距容纳端点圆点描边；
- * - 垂直绘图区：顶部峰值线 `topY = 26` 至底部零基线 `bottomY = 98`（总跨度 `spanY = 72`），
- *   顶部预留 26px 空间给 HTML 峰值胶囊 (`.trend-peak-pill`)。
+ * @param {Array<{ label?: string }>} slots
+ * @returns {number[]}
+ */
+function computeTickIndices(slots) {
+  const n = slots.length;
+  if (n <= 1) return [0];
+  if (n <= 8) {
+    return Array.from({ length: n }, (_, i) => i);
+  }
+  const sampleLabel = String(slots[Math.floor(n / 2)]?.label || slots[0]?.label || '');
+  const maxTicks = sampleLabel.length > 6 ? 5 : 6;
+  const set = new Set();
+  for (let k = 0; k < maxTicks; k++) {
+    const idx = Math.round((k / (maxTicks - 1)) * (n - 1));
+    set.add(idx);
+  }
+  return Array.from(set).sort((a, b) => a - b);
+}
+
+/**
+ * 创建交互式 SVG 历史趋势平滑面积图组件。
  *
  * @returns {{
  *   el: HTMLElement,
- *   update: (series?: Array<{ label: string, tokens: number }>) => void
- * }} 图表容器节点与序列更新方法
+ *   update: (series?: Array<object>) => void
+ * }}
  */
 function createTrendAreaChart() {
+  const VIEW_W = 460;
+  const VIEW_H = 120;
+  const LEFT_X = 14;
+  const RIGHT_X = 446;
+  const TOP_Y = 24;
+  const BOTTOM_Y = 102;
+  const SPAN_X = RIGHT_X - LEFT_X;
+  const SPAN_Y = BOTTOM_Y - TOP_Y;
+
   const svg = document.createElementNS(SVG_NS, 'svg');
-  svg.setAttribute('viewBox', '0 0 460 116');
+  svg.setAttribute('viewBox', `0 0 ${VIEW_W} ${VIEW_H}`);
   svg.setAttribute('class', 'trend-svg');
   svg.setAttribute('aria-hidden', 'true');
 
-  // 垂直线性渐变：由顶部 36% 不透明度的主题色平滑衰减至底部全透明
+  // 垂直线性渐变
   const defs = document.createElementNS(SVG_NS, 'defs');
   const grad = document.createElementNS(SVG_NS, 'linearGradient');
   grad.setAttribute('id', 'trend-area-grad');
@@ -2341,7 +2477,7 @@ function createTrendAreaChart() {
   const stop1 = document.createElementNS(SVG_NS, 'stop');
   stop1.setAttribute('offset', '0%');
   stop1.setAttribute('stop-color', 'var(--ctx-cached)');
-  stop1.setAttribute('stop-opacity', '0.36');
+  stop1.setAttribute('stop-opacity', '0.34');
 
   const stop2 = document.createElementNS(SVG_NS, 'stop');
   stop2.setAttribute('offset', '100%');
@@ -2353,26 +2489,22 @@ function createTrendAreaChart() {
   defs.appendChild(grad);
   svg.appendChild(defs);
 
-  // 背景辅助参考网格线：3 条水平分位线 + 3 条垂直时间锚点分割线
-  const gridGroup = document.createElementNS(SVG_NS, 'g');
-  gridGroup.setAttribute('class', 'trend-grid');
-  for (const y of [26, 62, 98]) {
+  // 背景水平与垂直参考网格线
+  const hGridGroup = document.createElementNS(SVG_NS, 'g');
+  hGridGroup.setAttribute('class', 'trend-grid');
+  for (const y of [TOP_Y, Math.round((TOP_Y + BOTTOM_Y) / 2), BOTTOM_Y]) {
     const line = document.createElementNS(SVG_NS, 'line');
-    line.setAttribute('x1', '10');
+    line.setAttribute('x1', String(LEFT_X));
     line.setAttribute('y1', String(y));
-    line.setAttribute('x2', '450');
+    line.setAttribute('x2', String(RIGHT_X));
     line.setAttribute('y2', String(y));
-    gridGroup.appendChild(line);
+    hGridGroup.appendChild(line);
   }
-  for (const x of [118, 230, 342]) {
-    const line = document.createElementNS(SVG_NS, 'line');
-    line.setAttribute('x1', String(x));
-    line.setAttribute('y1', '16');
-    line.setAttribute('x2', String(x));
-    line.setAttribute('y2', '98');
-    gridGroup.appendChild(line);
-  }
-  svg.appendChild(gridGroup);
+  svg.appendChild(hGridGroup);
+
+  const vGridGroup = document.createElementNS(SVG_NS, 'g');
+  vGridGroup.setAttribute('class', 'trend-grid trend-v-grid');
+  svg.appendChild(vGridGroup);
 
   const areaPath = document.createElementNS(SVG_NS, 'path');
   areaPath.setAttribute('fill', 'url(#trend-area-grad)');
@@ -2383,25 +2515,157 @@ function createTrendAreaChart() {
   linePath.setAttribute('fill', 'none');
   svg.appendChild(linePath);
 
+  const dotsGroup = document.createElementNS(SVG_NS, 'g');
+  dotsGroup.setAttribute('class', 'trend-dots-group');
+  svg.appendChild(dotsGroup);
+
   const peakDot = document.createElementNS(SVG_NS, 'circle');
   peakDot.setAttribute('r', '3');
   peakDot.setAttribute('class', 'trend-peak-dot');
   svg.appendChild(peakDot);
 
-  const peakPill = h('span', { className: 'trend-peak-pill text-mono', text: '0' });
-  const chartWrap = h('div', { className: 'trend-chart-wrap' }, [peakPill, svg]);
+  // 悬停十字准星与焦点圆点
+  const hoverLine = document.createElementNS(SVG_NS, 'line');
+  hoverLine.setAttribute('class', 'trend-hover-line');
+  hoverLine.setAttribute('y1', '12');
+  hoverLine.setAttribute('y2', String(BOTTOM_Y));
+  hoverLine.setAttribute('hidden', 'true');
+  svg.appendChild(hoverLine);
 
-  let lastLineD = '';
+  const hoverDot = document.createElementNS(SVG_NS, 'circle');
+  hoverDot.setAttribute('r', '3.2');
+  hoverDot.setAttribute('class', 'trend-hover-dot');
+  hoverDot.setAttribute('hidden', 'true');
+  svg.appendChild(hoverDot);
+
+  const peakPill = h('span', { className: 'trend-peak-pill text-mono', text: '0' });
+
+  // 悬停详情浮层卡片
+  const tipTimeEl = h('span', { className: 'trend-tip-time text-mono' });
+  const tipCallsEl = h('span', { className: 'trend-tip-calls text-mono' });
+  const tipTokensEl = h('strong', { className: 'trend-tip-tokens text-mono' });
+  const tipCostEl = h('span', { className: 'trend-tip-cost text-mono' });
+  const tipSubEl = h('div', { className: 'trend-tip-sub text-mono', hidden: true });
+
+  const tooltipEl = h(
+    'div',
+    { className: 'trend-tooltip', hidden: true },
+    [
+      h('div', { className: 'trend-tip-head' }, [tipTimeEl, tipCallsEl]),
+      h('div', { className: 'trend-tip-main' }, [tipTokensEl, tipCostEl]),
+      tipSubEl,
+    ]
+  );
+
+  // 底部对齐刻度轴
+  const xAxisEl = h('div', { className: 'trend-x-axis' });
+
+  const plotStage = h('div', { className: 'trend-plot-stage' }, [peakPill, tooltipEl, svg]);
+  const chartWrap = h('div', { className: 'trend-chart-wrap' }, [plotStage, xAxisEl]);
+
+  let currentSlots = [];
+  let currentPts = [];
+  let tickElsByIdx = new Map();
+  let hoveredIdx = -1;
+  let lastRenderSig = '';
+
+  function showHoverAtIndex(idx) {
+    if (idx < 0 || idx >= currentSlots.length || !currentPts[idx]) {
+      clearHover();
+      return;
+    }
+    hoveredIdx = idx;
+    const slot = currentSlots[idx];
+    const pt = currentPts[idx];
+
+    patchAttr(hoverLine, 'hidden', false);
+    patchAttr(hoverLine, 'x1', pt.x.toFixed(1));
+    patchAttr(hoverLine, 'x2', pt.x.toFixed(1));
+
+    patchAttr(hoverDot, 'hidden', false);
+    patchAttr(hoverDot, 'cx', pt.x.toFixed(1));
+    patchAttr(hoverDot, 'cy', pt.y.toFixed(1));
+
+    patchAttr(peakPill, 'hidden', true);
+    patchAttr(tooltipEl, 'hidden', false);
+
+    patchText(tipTimeEl, slot.fullLabel || slot.label || '--');
+    patchText(tipCallsEl, `${Number(slot.calls || 0)} 次`);
+    patchText(tipTokensEl, `${formatTokensPrecise(Number(slot.tokens || 0))} tok`);
+    patchText(
+      tipCostEl,
+      formatUsd(Number(slot.costUsd || 0), {
+        unpricedCalls: slot.unpricedCalls,
+        precise: Number(slot.costUsd || 0) > 0 && Number(slot.costUsd || 0) < 0.1,
+      })
+    );
+
+    const hasSubBreakdown =
+      Number(slot.tokens || 0) > 0 &&
+      (slot.inputTokens !== undefined ||
+        slot.cacheReadTokens !== undefined ||
+        slot.outputTokens !== undefined);
+    patchAttr(tipSubEl, 'hidden', !hasSubBreakdown);
+    if (hasSubBreakdown) {
+      patchText(
+        tipSubEl,
+        `入 ${formatTokensPrecise(slot.inputTokens || 0)} · 缓 ${formatTokensPrecise(slot.cacheReadTokens || 0)} · 出 ${formatTokensPrecise(slot.outputTokens || 0)}`
+      );
+    }
+
+    const rawPct = (pt.x / VIEW_W) * 100;
+    const clampedPct = Math.max(2, Math.min(98, rawPct));
+    const shiftX = rawPct < 28 ? '0%' : rawPct > 72 ? '-100%' : '-50%';
+    patchStyleVar(tooltipEl, '--tip-x', `${clampedPct.toFixed(1)}%`);
+    patchStyleVar(tooltipEl, '--tip-shift', shiftX);
+
+    for (const [tIdx, el] of tickElsByIdx.entries()) {
+      patchClasses(el, { 'is-hovered': tIdx === idx });
+    }
+  }
+
+  function clearHover() {
+    hoveredIdx = -1;
+    patchAttr(hoverLine, 'hidden', true);
+    patchAttr(hoverDot, 'hidden', true);
+    patchAttr(tooltipEl, 'hidden', true);
+    patchAttr(peakPill, 'hidden', false);
+    for (const el of tickElsByIdx.values()) {
+      patchClasses(el, { 'is-hovered': false });
+    }
+  }
+
+  function handlePointerMove(e) {
+    if (!currentSlots.length) return;
+    const rect = svg.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return;
+    const relX = ((e.clientX - rect.left) / rect.width) * VIEW_W;
+    const ratio = (relX - LEFT_X) / Math.max(1, SPAN_X);
+    const idx = Math.max(
+      0,
+      Math.min(currentSlots.length - 1, Math.round(ratio * (currentSlots.length - 1)))
+    );
+    showHoverAtIndex(idx);
+  }
+
+  plotStage.addEventListener('mousemove', handlePointerMove);
+  plotStage.addEventListener('mouseleave', clearHover);
 
   /**
-   * 根据最新时间分桶序列重绘平滑曲线、闭合渐变区域以及最高峰标记位置。
+   * 根据最新时间分桶序列重绘平滑曲线、渐变区域、峰值气泡与底部对齐刻度。
    */
   function update(series = []) {
-    const slots = series.length >= 2 ? series : [
-      { label: '00:00', tokens: 0 },
-      { label: '06:00', tokens: 0 },
-      { label: '12:00', tokens: 0 },
-    ];
+    const slots =
+      Array.isArray(series) && series.length >= 2
+        ? series
+        : [
+            { label: '00:00', fullLabel: '00:00 - 01:00', tokens: 0, calls: 0, costUsd: 0 },
+            { label: '06:00', fullLabel: '06:00 - 07:00', tokens: 0, calls: 0, costUsd: 0 },
+            { label: '12:00', fullLabel: '12:00 - 13:00', tokens: 0, calls: 0, costUsd: 0 },
+            { label: '18:00', fullLabel: '18:00 - 19:00', tokens: 0, calls: 0, costUsd: 0 },
+          ];
+    currentSlots = slots;
+
     let maxTokens = 0;
     let peakIdx = 0;
     for (let i = 0; i < slots.length; i++) {
@@ -2412,39 +2676,92 @@ function createTrendAreaChart() {
       }
     }
 
-    // SVG 绘图区边界与跨度参数（Y 轴向下递增，因此数值越大对应的 y 坐标越小）
-    const leftX = 12;
-    const rightX = 448;
-    const topY = 26;
-    const bottomY = 98;
-    const spanX = rightX - leftX;
-    const spanY = bottomY - topY;
     const denom = Math.max(1, maxTokens);
-
     const pts = slots.map((s, idx) => {
-      const x = leftX + (idx / Math.max(1, slots.length - 1)) * spanX;
+      const x = LEFT_X + (idx / Math.max(1, slots.length - 1)) * SPAN_X;
       const ratio = maxTokens > 0 ? Number(s.tokens || 0) / denom : 0;
-      const y = bottomY - ratio * spanY;
-      return { x, y };
+      const y = BOTTOM_Y - ratio * SPAN_Y;
+      return { x, y, tokens: Number(s.tokens || 0) };
     });
+    currentPts = pts;
 
-    // 仅在曲线路径发生变化时更新 DOM 属性，避免无意义的 SVG 重绘
-    const lineD = buildSmoothSplinePath(pts);
-    if (lineD !== lastLineD) {
-      lastLineD = lineD;
-      const areaD = `${lineD} L ${pts[pts.length - 1].x.toFixed(1)} ${bottomY} L ${pts[0].x.toFixed(1)} ${bottomY} Z`;
+    const sig = slots
+      .map((s) => `${s.label}:${s.fullLabel || ''}:${s.tokens}:${s.costUsd}:${s.calls}`)
+      .join('|');
+
+    if (sig !== lastRenderSig) {
+      lastRenderSig = sig;
+      const lineD = buildSmoothSplinePath(pts);
+      const areaD = `${lineD} L ${pts[pts.length - 1].x.toFixed(1)} ${BOTTOM_Y} L ${pts[0].x.toFixed(1)} ${BOTTOM_Y} Z`;
       patchAttr(linePath, 'd', lineD);
       patchAttr(areaPath, 'd', areaD);
+
+      // 渲染与底部刻度对齐的垂直参考网格线及底部 X 轴标签
+      const tickIndices = computeTickIndices(slots);
+      while (vGridGroup.firstChild) vGridGroup.removeChild(vGridGroup.firstChild);
+      while (xAxisEl.firstChild) xAxisEl.removeChild(xAxisEl.firstChild);
+      tickElsByIdx = new Map();
+
+      for (let i = 0; i < tickIndices.length; i++) {
+        const tIdx = tickIndices[i];
+        const pt = pts[tIdx];
+        const slot = slots[tIdx];
+        if (!pt || !slot) continue;
+
+        if (i > 0 && i < tickIndices.length - 1) {
+          const vLine = document.createElementNS(SVG_NS, 'line');
+          vLine.setAttribute('x1', pt.x.toFixed(1));
+          vLine.setAttribute('y1', '16');
+          vLine.setAttribute('x2', pt.x.toFixed(1));
+          vLine.setAttribute('y2', String(BOTTOM_Y));
+          vGridGroup.appendChild(vLine);
+        }
+
+        const isFirst = i === 0;
+        const isLast = i === tickIndices.length - 1;
+        const pct = (pt.x / VIEW_W) * 100;
+        const tickEl = h('span', {
+          className: `trend-x-tick text-mono${isFirst ? ' is-start' : isLast ? ' is-end' : ''}`,
+          text: slot.label || '',
+          title: slot.fullLabel || slot.label || '',
+        });
+        patchStyleVar(tickEl, '--tick-x', `${pct.toFixed(2)}%`);
+        tickEl.onclick = () => showHoverAtIndex(tIdx);
+        xAxisEl.appendChild(tickEl);
+        tickElsByIdx.set(tIdx, tickEl);
+      }
+
+      // 渲染采样点小圆点（当点数 <= 36 时展示，突出有消耗的整点/日期）
+      while (dotsGroup.firstChild) dotsGroup.removeChild(dotsGroup.firstChild);
+      if (pts.length <= 36) {
+        for (let i = 0; i < pts.length; i++) {
+          if (pts[i].tokens <= 0) continue;
+          const dot = document.createElementNS(SVG_NS, 'circle');
+          dot.setAttribute('cx', pts[i].x.toFixed(1));
+          dot.setAttribute('cy', pts[i].y.toFixed(1));
+          dot.setAttribute('r', '2');
+          dot.setAttribute('class', 'trend-node-dot');
+          dotsGroup.appendChild(dot);
+        }
+      }
     }
 
-    // 定位峰值圆点，并将顶部峰值气泡水平位置钳制在 [8%, 92%] 区间内以防贴边裁切
-    const peakPt = pts[peakIdx] || { x: 230, y: bottomY };
+    const peakPt = pts[peakIdx] || { x: 230, y: BOTTOM_Y };
     patchAttr(peakDot, 'cx', peakPt.x.toFixed(1));
     patchAttr(peakDot, 'cy', peakPt.y.toFixed(1));
 
-    patchText(peakPill, formatTokensPrecise(maxTokens));
-    const pctLeft = Math.max(8, Math.min(92, (peakPt.x / 460) * 100));
+    const peakSlot = slots[peakIdx];
+    const peakText =
+      maxTokens > 0 && peakSlot?.label
+        ? `峰值 ${peakSlot.label} · ${formatTokensPrecise(maxTokens)}`
+        : formatTokensPrecise(maxTokens);
+    patchText(peakPill, peakText);
+    const pctLeft = Math.max(12, Math.min(88, (peakPt.x / VIEW_W) * 100));
     patchStyleVar(peakPill, '--peak-x', `${pctLeft.toFixed(1)}%`);
+
+    if (hoveredIdx >= 0 && hoveredIdx < slots.length) {
+      showHoverAtIndex(hoveredIdx);
+    }
   }
 
   return { el: chartWrap, update };
@@ -2537,59 +2854,7 @@ const TopSessionHeader = defineComponent({
       h('div', { className: 'session-right' }, [updateBtn, statusTag, refreshBtn]),
     ]);
 
-    // --- 方案 A：顶栏二级主/子代理切换条 (.agent-scope-bar，无子代理时自动隐藏) ---
-    const scopeAllBtnText = h('span', { text: '全部汇总' });
-    const scopeAllBtn = h(
-      'button',
-      {
-        type: 'button',
-        className: 'scope-pill-btn is-active',
-        onClick: () =>
-          uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' }),
-      },
-      [scopeAllBtnText]
-    );
-
-    const scopeMainBtnText = h('span', { text: '主代理' });
-    const scopeMainBtn = h(
-      'button',
-      {
-        type: 'button',
-        className: 'scope-pill-btn',
-        onClick: () => uiStore.setState({ selectedAgentScope: 'main' }),
-      },
-      [scopeMainBtnText]
-    );
-
-    const subagentSelect = CustomSelect({
-      modelValue: '',
-      icon: 'cpu',
-      placeholder: '子代理 (0)',
-      className: 'scope-subagent-select',
-      options: [],
-      onUpdateModelValue: (nextSubId) => {
-        if (nextSubId) {
-          uiStore.setState({ selectedAgentScope: nextSubId });
-        }
-      },
-    });
-
-    const scopeRightText = h('span', { className: 'agent-scope-right text-mono', text: '' });
-
-    const scopeBarEl = h(
-      'div',
-      { className: 'agent-scope-bar', hidden: true },
-      [
-        h('div', { className: 'agent-scope-left' }, [
-          scopeAllBtn,
-          scopeMainBtn,
-          subagentSelect.el,
-        ]),
-        scopeRightText,
-      ]
-    );
-
-    const headerEl = h('header', { className: 'top-session-stack' }, [headerRowEl, scopeBarEl]);
+    const headerEl = h('header', { className: 'top-session-stack' }, [headerRowEl]);
 
     let lastActiveCascadeId = '';
 
@@ -2623,45 +2888,9 @@ const TopSessionHeader = defineComponent({
         options,
       });
 
-      const {
-        hasSubagents,
-        effectiveScope,
-        subagents,
-        mainAgent,
-        aggregated,
-        scopedConv,
-      } = resolveScopedConversation(telemetry, uiSt.selectedAgentScope, uiSt.ctxInspectorAgentId);
-
-      patchAttr(scopeBarEl, 'hidden', !hasSubagents);
-      if (hasSubagents) {
-        patchText(scopeAllBtnText, `全部 (${aggregated?.stepCount ?? 0})`);
-        patchClasses(scopeAllBtn, { 'is-active': effectiveScope === 'all' });
-
-        patchText(scopeMainBtnText, `主代理 (${mainAgent?.stepCount ?? 0})`);
-        patchClasses(scopeMainBtn, { 'is-active': effectiveScope === 'main' });
-
-        const isSubSelected = effectiveScope !== 'all' && effectiveScope !== 'main';
-        patchClasses(subagentSelect.el, { 'is-active-sub': isSubSelected });
-        const subOptions = subagents.map((s) => ({
-          value: s.agentId,
-          label: formatAgentLabel(s),
-          meta: `${s.stepCount || 0}步 · 窗${s.context?.usedPct ?? 0}%`,
-        }));
-        subagentSelect.setProps({
-          modelValue: isSubSelected ? effectiveScope : '',
-          placeholder: `子代理 (${subagents.length})`,
-          options: subOptions,
-        });
-
-        patchText(
-          scopeRightText,
-          formatUsd(scopedConv?.sessionCostUsd || 0, {
-            unpricedCalls: scopedConv?.sessionUnpricedCalls,
-          })
-        );
-      } else {
-        subagentSelect.close();
-      }
+      const actConv = telemetry?.activeConversation;
+      const hasSubagents = Boolean(actConv?.hasSubagents || (actConv?.subagentCount || 0) > 0);
+      const aggregated = actConv?.aggregated;
 
       const cloudStatus = telemetry?.cloudStatus;
       const hasUpdate = Boolean(cloudStatus?.updateAvailable);
@@ -2748,21 +2977,14 @@ const TopSessionHeader = defineComponent({
       () => renderHeaderState()
     );
 
-    const unsubUi = uiStore.subscribe(
-      (st) => st.selectedAgentScope,
-      () => renderHeaderState()
-    );
-
     onCleanup(() => {
       unsubTelemetry();
-      unsubUi();
       convSelect.destroy();
-      subagentSelect.destroy();
     });
 
     return {
       el: headerEl,
-      refs: { convSelect, subagentSelect, statusTag, refreshBtn, scopeBarEl },
+      refs: { convSelect, statusTag, refreshBtn },
     };
   },
 });
@@ -2796,6 +3018,145 @@ function estPillWidth(text) {
 const LiveOverviewView = defineComponent({
   name: 'LiveOverviewView',
   setup({ onCleanup }) {
+    // --- 0. 可用额度下方的多任务实时运行卡片列表 (展示所有正在运行的主进程 + 默认主代理缩略 + 可折叠子代理列表) ---
+    const liveActivityBar = h('div', {
+      className: 'live-activity-list',
+      hidden: true,
+      'aria-live': 'polite',
+    });
+
+    const expandedTaskConvIds = new Set();
+    const activityTimersMap = new Map();
+    let liveTickTimer = null;
+
+    function bindLiveElapsedTimer(timerKey, sig, rawStartMs, targetEl) {
+      const now = Date.now();
+      const prev = activityTimersMap.get(timerKey);
+      let startMs = prev?.startMs || 0;
+      if (!prev || prev.sig !== sig) {
+        const validRaw = Number(rawStartMs || 0);
+        startMs = validRaw > 0 && validRaw <= now + 2000 ? validRaw : now;
+      } else if (startMs <= 0 && Number(rawStartMs) > 0 && Number(rawStartMs) <= now + 2000) {
+        startMs = Number(rawStartMs);
+      }
+      activityTimersMap.set(timerKey, { sig, startMs, el: targetEl });
+      const elapsedSec = Math.max(0, (now - startMs) / 1000);
+      patchText(targetEl, formatElapsedSec(elapsedSec));
+    }
+
+    function updateLiveElapsedDisplay() {
+      const now = Date.now();
+      for (const entry of activityTimersMap.values()) {
+        if (!entry?.el) continue;
+        const elapsedSec = entry.startMs > 0 ? Math.max(0, (now - entry.startMs) / 1000) : 0;
+        patchText(entry.el, formatElapsedSec(elapsedSec));
+      }
+    }
+
+    function stopLiveTicker() {
+      if (liveTickTimer) {
+        clearInterval(liveTickTimer);
+        liveTickTimer = null;
+      }
+      activityTimersMap.clear();
+    }
+
+    function ensureLiveTicker() {
+      if (!liveTickTimer) {
+        liveTickTimer = setInterval(updateLiveElapsedDisplay, 1000);
+      }
+    }
+
+    function createLiveTaskCard() {
+      const dotIcon = createSvgIcon('dot', { size: 9 });
+      patchClasses(dotIcon, { 'is-pulsing': true });
+      const dotWrap = h('span', { className: 'live-activity-dot' }, [dotIcon]);
+      const titleEl = h('strong', { className: 'live-task-title', text: '当前会话' });
+      const subToggleBtn = h('button', {
+        type: 'button',
+        className: 'live-sub-toggle',
+        hidden: true,
+        text: '子代理 (0) ▸',
+      });
+      const elapsedEl = h('span', {
+        className: 'live-activity-elapsed text-mono',
+        text: '0s',
+      });
+
+      const headerEl = h('div', { className: 'live-task-header' }, [
+        h('div', { className: 'live-task-title-wrap' }, [dotWrap, titleEl]),
+        h('div', { className: 'live-task-header-right' }, [subToggleBtn, elapsedEl]),
+      ]);
+
+      const mainBadge = h('span', { className: 'agent-badge badge-main', text: '主' });
+      const mainPhase = h('strong', { className: 'live-activity-phase', text: '推理中' });
+      const mainProgress = h('span', {
+        className: 'live-activity-progress text-mono',
+        hidden: true,
+        text: '',
+      });
+      const mainSep = h('span', { className: 'live-activity-sep', hidden: true, text: '·' });
+      const mainDetail = h('span', {
+        className: 'live-activity-detail',
+        hidden: true,
+        text: '',
+      });
+
+      const mainRowEl = h('div', { className: 'live-task-main-row' }, [
+        mainBadge,
+        mainPhase,
+        mainProgress,
+        mainSep,
+        mainDetail,
+      ]);
+
+      const subListEl = h('div', { className: 'live-sub-list', hidden: true });
+      const cardEl = h('div', { className: 'live-task-card' }, [headerEl, mainRowEl, subListEl]);
+
+      return {
+        el: cardEl,
+        refs: {
+          cardEl,
+          dotIcon,
+          titleEl,
+          subToggleBtn,
+          elapsedEl,
+          mainPhase,
+          mainProgress,
+          mainSep,
+          mainDetail,
+          subListEl,
+        },
+      };
+    }
+
+    function createLiveSubRow() {
+      const subBadge = h('span', { className: 'agent-badge badge-sub-1', text: '子1' });
+      const subRole = h('span', { className: 'live-sub-role', text: '子代理' });
+      const subSummary = h('span', { className: 'live-sub-summary', text: '' });
+      const subElapsed = h('span', { className: 'live-sub-elapsed text-mono', text: '0s' });
+
+      const rowEl = h('div', { className: 'live-sub-row' }, [
+        h('div', { className: 'live-sub-left' }, [
+          subBadge,
+          subRole,
+          subSummary,
+        ]),
+        subElapsed,
+      ]);
+
+      return {
+        el: rowEl,
+        refs: {
+          rowEl,
+          subBadge,
+          subRole,
+          subSummary,
+          subElapsed,
+        },
+      };
+    }
+
     // --- 1. 4 格实时测速矩阵 (实时吞吐 / 首Token / 会话均速 / 本步消费) ---
     const tpsVal = h('strong', { className: 'cell-value accent-speed', text: '—' });
     const tpsSub = h('span', { className: 'cell-sub', text: '模型未知' });
@@ -3020,7 +3381,7 @@ const LiveOverviewView = defineComponent({
       {
         style: 'display: flex; flex-direction: column; gap: var(--space-3); padding-bottom: 2px;',
       },
-      [matrixEl, ctxPanel, quotaPanel]
+      [matrixEl, ctxPanel, quotaPanel, liveActivityBar]
     );
     const viewScrollbar = CustomScrollbar({
       contentEl: overviewInner,
@@ -3126,24 +3487,246 @@ const LiveOverviewView = defineComponent({
       const uiSt = uiStore.getState();
       const {
         hasSubagents,
-        effectiveScope,
         effectiveCtxScope,
         agents,
         aggregated,
         scopedConv,
         ctxAgent,
-      } = resolveScopedConversation(data, uiSt.selectedAgentScope, uiSt.ctxInspectorAgentId);
+      } = resolveScopedConversation(data, 'all', uiSt.ctxInspectorAgentId);
 
       const active = scopedConv || data.activeConversation || {};
       const ctx = ctxAgent?.context || active.context || {};
       const quotas = data.quotas || {};
 
-      // 1. 更新 4 格实时测速矩阵（根据当前代理作用域动态展示全部汇总或单代理指标）
+      // 0. 更新多任务实时运行列表（展示所有正在运行的主进程 + 默认主代理缩略 + 默认收起的子代理列表）
+      const rawRunningList =
+        Array.isArray(data.runningConversations) && data.runningConversations.length > 0
+          ? data.runningConversations
+          : data.activeConversation?.isRunning || aggregated?.isRunning
+            ? [
+                {
+                  cascadeId: data.activeConversation?.cascadeId || 'current',
+                  title: data.activeConversation?.title || '当前会话',
+                  isCurrentSelected: true,
+                  isMainRunning: Boolean(data.activeConversation?.isRunning),
+                  isRunning: true,
+                  mainActivity:
+                    data.activeConversation?.liveActivity || aggregated?.liveActivity || null,
+                  subagentCount: Math.max(0, agents.length - 1),
+                  runningSubagentCount: agents.filter((a) => !a.isMain && a.isRunning).length,
+                  subagents: agents
+                    .filter((a) => !a.isMain)
+                    .map((s, idx) => ({
+                      cascadeId: s.cascadeId || s.agentId,
+                      index: s.index || idx + 1,
+                      badgeText: s.badgeText || `子${idx + 1}`,
+                      shortLabel: s.shortLabel || `子代理 #${idx + 1}`,
+                      role: s.role || `子代理 #${idx + 1}`,
+                      isRunning: Boolean(s.isRunning),
+                      stepCount: Number(s.stepCount || 0),
+                      lastModifiedMs: s.lastModifiedMs || 0,
+                      liveActivity: s.liveActivity || {
+                        phase: s.isRunning ? 'thinking' : 'done',
+                        label: s.isRunning ? '推理中' : '已完成',
+                        detail: '',
+                        stepProgress: '',
+                        startedAtMs: s.lastModifiedMs || 0,
+                        signature: `${s.agentId}:${s.stepCount || 0}`,
+                      },
+                    })),
+                },
+              ]
+            : [];
+
+      const hasRunningTasks = rawRunningList.length > 0;
+      patchAttr(liveActivityBar, 'hidden', !hasRunningTasks);
+      if (!hasRunningTasks) {
+        stopLiveTicker();
+      } else {
+        // 先基于完整运行列表收集所有有效计时器 Key（防止 patchKeyedList 在 sig 未变化跳过 updateRow 时误删计时器）
+        const activeTimerKeys = new Set();
+        for (const item of rawRunningList) {
+          activeTimerKeys.add(`main:${item.cascadeId}`);
+          for (const sub of item.subagents || []) {
+            if (sub?.isRunning) {
+              activeTimerKeys.add(`sub:${sub.cascadeId}`);
+            }
+          }
+        }
+        // 清理已结束会话的展开状态
+        const runningIdsSet = new Set(rawRunningList.map((item) => item.cascadeId));
+        for (const id of [...expandedTaskConvIds]) {
+          if (!runningIdsSet.has(id)) {
+            expandedTaskConvIds.delete(id);
+          }
+        }
+
+        patchKeyedList(liveActivityBar, rawRunningList, {
+          keyFn: (item) => item.cascadeId,
+          sigFn: (item) => {
+            const isExp = expandedTaskConvIds.has(item.cascadeId);
+            const subSig = (item.subagents || [])
+              .map(
+                (s) =>
+                  `${s.cascadeId}:${s.isRunning}:${s.stepCount}:${s.liveActivity?.signature || ''}`
+              )
+              .join('|');
+            return `${item.cascadeId}:${item.title}:${item.isMainRunning}:${item.subagentCount}:${item.runningSubagentCount}:${isExp}:${item.mainActivity?.signature || ''}:${subSig}`;
+          },
+          createRow: createLiveTaskCard,
+          updateRow: (refs, item) => {
+            const act = item.mainActivity || {
+              phase: 'thinking',
+              label: '推理中',
+              detail: '',
+              stepProgress: '',
+              startedAtMs: item.lastModifiedMs || 0,
+              signature: `fallback:${item.lastModifiedMs || 0}`,
+            };
+
+            const isWaiting = act.phase === 'waiting';
+            patchClasses(refs.cardEl, { 'is-waiting': isWaiting });
+            patchClasses(refs.dotIcon, { 'is-pulsing': true });
+
+            const convTitle = item.title || item.cascadeId?.slice(0, 8) || '当前会话';
+            patchText(refs.titleEl, convTitle);
+            patchAttr(refs.titleEl, 'title', `点击切换查看会话：${convTitle}`);
+            refs.titleEl.onclick = () => {
+              if (item.cascadeId && item.cascadeId !== 'current') {
+                uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' });
+                telemetryStore.setState({ selectedConversationId: item.cascadeId });
+                fetchTelemetry({ force: false });
+              }
+            };
+
+            const subCount = Number(item.subagentCount || item.subagents?.length || 0);
+            const runSubCount = Number(item.runningSubagentCount || 0);
+            const isExpanded = expandedTaskConvIds.has(item.cascadeId);
+            patchAttr(refs.subToggleBtn, 'hidden', subCount === 0);
+            if (subCount > 0) {
+              const arrow = isExpanded ? '▾' : '▸';
+              const toggleText =
+                runSubCount > 0
+                  ? `子代理 ${runSubCount}/${subCount} ${arrow}`
+                  : `子代理 (${subCount}) ${arrow}`;
+              patchText(refs.subToggleBtn, toggleText);
+              patchClasses(refs.subToggleBtn, { 'is-expanded': isExpanded });
+              patchAttr(
+                refs.subToggleBtn,
+                'title',
+                isExpanded ? '点击收起子代理列表' : '点击展开查看子代理缩略状态'
+              );
+              refs.subToggleBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (expandedTaskConvIds.has(item.cascadeId)) {
+                  expandedTaskConvIds.delete(item.cascadeId);
+                } else {
+                  expandedTaskConvIds.add(item.cascadeId);
+                }
+                renderData(latestData);
+              };
+            }
+
+            const mainTimerKey = `main:${item.cascadeId}`;
+            activeTimerKeys.add(mainTimerKey);
+            bindLiveElapsedTimer(
+              mainTimerKey,
+              `${item.cascadeId}:${act.signature || act.label}`,
+              act.startedAtMs,
+              refs.elapsedEl
+            );
+
+            patchText(refs.mainPhase, act.label || '推理中');
+            const progText = act.stepProgress ? `[${act.stepProgress}]` : '';
+            patchAttr(refs.mainProgress, 'hidden', !progText);
+            if (progText) {
+              patchText(refs.mainProgress, progText);
+            }
+
+            const detailStr = act.detail || '';
+            patchAttr(refs.mainSep, 'hidden', !detailStr);
+            patchAttr(refs.mainDetail, 'hidden', !detailStr);
+            patchText(refs.mainDetail, detailStr);
+
+            const fullTooltip = `[${convTitle}] 主代理 · ${act.label || ''}${progText ? ` ${progText}` : ''}${detailStr ? ` · ${detailStr}` : ''}`;
+            patchAttr(refs.cardEl, 'title', fullTooltip);
+
+            const showSubs = subCount > 0 && isExpanded;
+            patchAttr(refs.subListEl, 'hidden', !showSubs);
+            if (showSubs) {
+              const subItems = item.subagents || [];
+              patchKeyedList(refs.subListEl, subItems, {
+                keyFn: (sub) => sub.cascadeId,
+                sigFn: (sub) =>
+                  `${sub.cascadeId}:${sub.role}:${sub.isRunning}:${sub.stepCount}:${sub.liveActivity?.signature || ''}:${sub.isRunning ? activityTimersMap.has(`sub:${sub.cascadeId}`) : true}`,
+                createRow: createLiveSubRow,
+                updateRow: (subRefs, sub) => {
+                  const subAct = sub.liveActivity || {
+                    phase: sub.isRunning ? 'thinking' : 'done',
+                    label: sub.isRunning ? '推理中' : '已完成',
+                    detail: '',
+                    stepProgress: '',
+                    startedAtMs: sub.lastModifiedMs || 0,
+                  };
+                  patchClasses(subRefs.rowEl, { 'is-done': !sub.isRunning });
+
+                  const badgeCls = getAgentBadgeClass(sub.index || 1, false);
+                  patchAttr(subRefs.subBadge, 'class', `agent-badge ${badgeCls}`);
+                  patchText(subRefs.subBadge, sub.badgeText || `子${sub.index || 1}`);
+
+                  const roleText = sub.role || sub.shortLabel || '子代理';
+                  patchText(subRefs.subRole, roleText);
+
+                  const rawSubLabel = sub.isRunning ? subAct.label || '' : subAct.label || '已完成';
+                  const subProg = subAct.stepProgress ? ` [${subAct.stepProgress}]` : '';
+                  const summaryStr = [
+                    `${rawSubLabel}${subProg}`.trim(),
+                    subAct.detail || '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ');
+                  patchAttr(subRefs.subSummary, 'hidden', !summaryStr);
+                  patchText(subRefs.subSummary, summaryStr);
+
+                  patchAttr(
+                    subRefs.rowEl,
+                    'title',
+                    `[${sub.badgeText || '子'}] ${roleText}${summaryStr ? ` ${summaryStr}` : ''}`
+                  );
+
+                  if (sub.isRunning) {
+                    const subTimerKey = `sub:${sub.cascadeId}`;
+                    activeTimerKeys.add(subTimerKey);
+                    bindLiveElapsedTimer(
+                      subTimerKey,
+                      `${sub.cascadeId}:${subAct.signature || subAct.label}`,
+                      subAct.startedAtMs,
+                      subRefs.subElapsed
+                    );
+                  } else {
+                    patchText(subRefs.subElapsed, `${sub.stepCount || 0}步`);
+                  }
+                },
+              });
+            }
+          },
+        });
+
+        for (const key of [...activityTimersMap.keys()]) {
+          if (!activeTimerKeys.has(key)) {
+            activityTimersMap.delete(key);
+          }
+        }
+        updateLiveElapsedDisplay();
+        ensureLiveTicker();
+      }
+
+      // 1. 更新 4 格实时测速矩阵（展示当前会话全局汇总指标）
       patchClasses(pulseDot, { 'is-pulsing': Boolean(active.isRunning) });
       patchText(tpsVal, formatMetric(active.latestTokPerSec, ' tok/s'));
       const reason = speedReasonText(active.latestSpeedReason);
       const modelAndAgent =
-        hasSubagents && effectiveScope === 'all' && active.activeAgentBadge
+        hasSubagents && active.activeAgentBadge
           ? `[${active.activeAgentBadge}] ${active.activeModelShort || '模型未知'}`
           : active.activeModelShort || '模型未知';
       patchText(tpsSub, reason ? `${modelAndAgent} · ${reason}` : modelAndAgent);
@@ -3161,7 +3744,7 @@ const LiveOverviewView = defineComponent({
         `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
       );
 
-      // 2. 更新 6 段上下文窗口构成与方案 B 内嵌上下文窗口检视胶囊条
+      // 2. 更新 10 段上下文窗口构成与内嵌上下文窗口检视胶囊条
       patchAttr(ctxAgentBadge, 'hidden', !hasSubagents);
       patchAttr(ctxInspectorBar, 'hidden', !hasSubagents);
       if (hasSubagents && ctxAgent) {
@@ -3171,37 +3754,24 @@ const LiveOverviewView = defineComponent({
         patchText(ctxAgentBadge, badgeFullText);
         patchAttr(ctxAgentBadge, 'title', badgeFullText);
 
-        const pillItems = [];
-        if (effectiveScope === 'all') {
-          pillItems.push({
+        const pillItems = [
+          {
             key: 'auto',
             label: `跟随活跃 (${aggregated?.activeAgentBadge || '主'})`,
             title: '自动展示当前正在运行或最新活跃的代理上下文窗口',
             isActive: effectiveCtxScope === 'auto',
             mode: 'ctx-only',
-          });
-        } else {
-          pillItems.push({
-            key: 'all',
-            label: `全部汇总 (${aggregated?.stepCount ?? 0}步)`,
-            title: '切回全部代理汇总视图',
-            isActive: false,
-            mode: 'scope',
-          });
-        }
+          },
+        ];
 
         const allAgentPills = agents.map((ag) => {
           const agPct = ag.context?.usedPct ?? 0;
-          const isAct =
-            effectiveScope === 'all'
-              ? effectiveCtxScope === ag.agentId
-              : effectiveScope === ag.agentId;
           return {
             key: ag.agentId,
             label: `${ag.badgeText || ag.shortLabel} ${agPct}%`,
             title: `${formatAgentLabel(ag)} (${ag.activeModelShort || '模型未知'} · ${ag.stepCount || 0}步)`,
-            isActive: isAct,
-            mode: effectiveScope === 'all' ? 'ctx-only' : 'scope',
+            isActive: effectiveCtxScope === ag.agentId,
+            mode: 'ctx-only',
           };
         });
 
@@ -3375,6 +3945,15 @@ const LiveOverviewView = defineComponent({
       (data) => {
         latestData = data;
         if (uiStore.getState().activeView !== 'overview') {
+          const stillRunning =
+            (Array.isArray(data?.runningConversations) && data.runningConversations.length > 0) ||
+            Boolean(
+              data?.activeConversation?.isRunning ||
+                data?.activeConversation?.aggregated?.isRunning
+            );
+          if (!stillRunning) {
+            stopLiveTicker();
+          }
           isDirty = true;
           return;
         }
@@ -3383,19 +3962,15 @@ const LiveOverviewView = defineComponent({
       }
     );
 
-    let prevScope = uiStore.getState().selectedAgentScope;
     let prevCtxTarget = uiStore.getState().ctxInspectorAgentId;
 
     const unsubView = uiStore.subscribe(
       (st) => ({
         activeView: st.activeView,
-        selectedAgentScope: st.selectedAgentScope,
         ctxInspectorAgentId: st.ctxInspectorAgentId,
       }),
       (slice) => {
-        const scopeChanged =
-          slice.selectedAgentScope !== prevScope || slice.ctxInspectorAgentId !== prevCtxTarget;
-        prevScope = slice.selectedAgentScope;
+        const scopeChanged = slice.ctxInspectorAgentId !== prevCtxTarget;
         prevCtxTarget = slice.ctxInspectorAgentId;
 
         if (slice.activeView !== 'overview') {
@@ -3426,6 +4001,7 @@ const LiveOverviewView = defineComponent({
     }
 
     onCleanup(() => {
+      stopLiveTicker();
       unsub();
       unsubView();
       if (ro) ro.disconnect();
@@ -3499,7 +4075,20 @@ const ConsumptionView = defineComponent({
         className: 'btn-primary',
         style: 'height: 26px; padding: 0 10px;',
         onClick: () => {
-          telemetryStore.setState({ selectedTimeRange: 'custom' });
+          const st = telemetryStore.getState();
+          const sMs = Number(st.customStartMs || 0);
+          const eMs = Number(st.customEndMs || 0);
+          if (sMs > 0 && eMs > 0 && sMs > eMs) {
+            startPicker.setValue(eMs);
+            endPicker.setValue(sMs);
+            telemetryStore.setState({
+              selectedTimeRange: 'custom',
+              customStartMs: eMs,
+              customEndMs: sMs,
+            });
+          } else {
+            telemetryStore.setState({ selectedTimeRange: 'custom' });
+          }
           fetchTelemetry({ force: true });
         },
       },
@@ -3596,27 +4185,24 @@ const ConsumptionView = defineComponent({
       overviewSegBar.el,
     ]);
 
-    // --- Section 2: 历史趋势 (SVG 三次贝塞尔平滑曲线图 + 首/中/末三时间锚点) ---
+    // --- Section 2: 历史趋势 (交互式 SVG 平滑曲线图 + 悬停精确日期/小时浮层 + 多刻度时间轴) ---
     const trendRangeBadge = h('span', { className: 'cons-badge', text: '全部时间' });
+    const trendGranularityHint = h('span', {
+      className: 'text-muted text-mono',
+      style: 'font-size: 10.5px;',
+      text: '按小时 · 悬停查看明细',
+    });
     const trendChart = createTrendAreaChart();
-    const anchorStartTime = h('span', { className: 'text-muted text-mono', text: '00:00' });
-    const anchorStartVal = h('strong', { className: 'text-mono', text: '0' });
-    const anchorMidTime = h('span', { className: 'text-muted text-mono', text: '06:00' });
-    const anchorMidVal = h('strong', { className: 'text-mono', text: '0' });
-    const anchorEndTime = h('span', { className: 'text-muted text-mono', text: '12:00' });
-    const anchorEndVal = h('strong', { className: 'text-mono', text: '0' });
 
     const trendPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
-        h('span', { className: 'panel-title', text: '用量趋势' }),
-        trendRangeBadge,
+        h('span', { className: 'panel-title' }, [
+          h('span', { text: '用量趋势' }),
+          trendRangeBadge,
+        ]),
+        trendGranularityHint,
       ]),
       trendChart.el,
-      h('div', { className: 'trend-anchors' }, [
-        h('div', { className: 'trend-anchor-col' }, [anchorStartTime, anchorStartVal]),
-        h('div', { className: 'trend-anchor-col is-center' }, [anchorMidTime, anchorMidVal]),
-        h('div', { className: 'trend-anchor-col is-end' }, [anchorEndTime, anchorEndVal]),
-      ]),
     ]);
 
     // --- Section 3: 模型排行列表 ---
@@ -3878,21 +4464,17 @@ const ConsumptionView = defineComponent({
         thinkingTokens,
       });
 
-      // 2. 同步历史趋势 SVG 面积图与首/中/末三时间锚点
+      // 2. 同步历史趋势交互式 SVG 面积图与粒度提示
       patchText(trendRangeBadge, preset?.label || rangeInfo.label || '全部时间');
       const trendSeries = cons.trendSeries || [];
+      const isHourlyTrend =
+        trendSeries[0]?.granularity === 'hour' ||
+        (trendSeries[0]?.label || '').includes(':');
+      patchText(
+        trendGranularityHint,
+        `${isHourlyTrend ? '按小时' : '按日'} (${trendSeries.length || 0}点) · 悬停查看`
+      );
       trendChart.update(trendSeries);
-      if (trendSeries.length > 0) {
-        const first = trendSeries[0];
-        const mid = trendSeries[Math.floor(trendSeries.length / 2)];
-        const last = trendSeries[trendSeries.length - 1];
-        patchText(anchorStartTime, first.label);
-        patchText(anchorStartVal, formatTokensPrecise(first.tokens));
-        patchText(anchorMidTime, mid.label);
-        patchText(anchorMidVal, formatTokensPrecise(mid.tokens));
-        patchText(anchorEndTime, last.label);
-        patchText(anchorEndVal, formatTokensPrecise(last.tokens));
-      }
 
       // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账）
       const models = (slice.modelBreakdown || [])
@@ -4190,15 +4772,15 @@ const StepsDetailView = defineComponent({
         slice.recentSteps ||
         [];
       const models =
-        hasSubagents && Array.isArray(scopedConv?.modelBreakdown)
+        (Array.isArray(scopedConv?.modelBreakdown) && scopedConv.modelBreakdown.length > 0
           ? scopedConv.modelBreakdown
-          : slice.modelBreakdown || [];
+          : slice.sessionModelBreakdown || slice.modelBreakdown) || [];
       const showUpstream = Boolean(slice.showUpstreamModel);
       const modelsTabBadge = hasSubagents
         ? effectiveScope === 'all'
           ? '本会话汇总'
           : scopedConv?.shortLabel || '当前代理'
-        : slice.rangeLabel;
+        : '本会话';
 
       subTabSwitch.setProps({
         options: [
@@ -4354,6 +4936,7 @@ const StepsDetailView = defineComponent({
         activeConversation: st.telemetry?.activeConversation,
         cascadeId: st.telemetry?.activeConversation?.cascadeId,
         recentSteps: st.telemetry?.activeConversation?.recentSteps,
+        sessionModelBreakdown: st.telemetry?.activeConversation?.modelBreakdown,
         modelBreakdown: st.telemetry?.modelBreakdown,
         rangeLabel: st.telemetry?.consumption?.selectedRange?.label || '全部时间',
         showUpstreamModel: Boolean(st.telemetry?.settings?.showUpstreamModel),
@@ -4480,11 +5063,11 @@ const SettingsView = defineComponent({
         statusTimer = null;
       }
       patchText(saveStatusText, text);
-      if (text === '已保存') {
+      if (text === '已保存' || text === '保存失败') {
         statusTimer = setTimeout(() => {
           statusTimer = null;
           patchText(saveStatusText, '');
-        }, 1500);
+        }, text === '保存失败' ? 2500 : 1500);
       }
     }
 
@@ -4526,10 +5109,14 @@ const SettingsView = defineComponent({
           });
         }
         showSaveFeedback('保存中…');
-        await saveSettingsPatch({
-          showUpstreamModel: draftShowUpstreamModel,
-        });
-        showSaveFeedback('已保存');
+        try {
+          await saveSettingsPatch({
+            showUpstreamModel: draftShowUpstreamModel,
+          });
+          showSaveFeedback('已保存');
+        } catch {
+          showSaveFeedback('保存失败');
+        }
       },
     });
 
@@ -4547,10 +5134,14 @@ const SettingsView = defineComponent({
           });
         }
         showCloudFeedback('保存中…', 0);
-        await saveSettingsPatch({
-          autoUpdatePlugin: draftAutoUpdatePlugin,
-        });
-        showCloudFeedback('已保存', 1800);
+        try {
+          await saveSettingsPatch({
+            autoUpdatePlugin: draftAutoUpdatePlugin,
+          });
+          showCloudFeedback('已保存', 1800);
+        } catch {
+          showCloudFeedback('保存失败', 2500);
+        }
       },
     });
 
@@ -4581,14 +5172,18 @@ const SettingsView = defineComponent({
         className: 'btn-primary',
         onClick: async () => {
           showSaveFeedback('保存中…');
-          await saveSettingsPatch({
-            weeklyLimitMode: draftMode,
-            weeklyTokenBudget: draftTokens,
-            weeklyCostBudget: draftCost,
-            showUpstreamModel: draftShowUpstreamModel,
-            autoUpdatePlugin: draftAutoUpdatePlugin,
-          });
-          showSaveFeedback('已保存');
+          try {
+            await saveSettingsPatch({
+              weeklyLimitMode: draftMode,
+              weeklyTokenBudget: draftTokens,
+              weeklyCostBudget: draftCost,
+              showUpstreamModel: draftShowUpstreamModel,
+              autoUpdatePlugin: draftAutoUpdatePlugin,
+            });
+            showSaveFeedback('已保存');
+          } catch {
+            showSaveFeedback('保存失败');
+          }
         },
       },
       [createSvgIcon('check', { size: 13 }), h('span', { text: '保存设置' })]

@@ -141,16 +141,27 @@ export const CustomScrollbar = defineComponent({
       }
     });
 
+    let pendingSync = false;
+    function scheduleSyncThumb() {
+      if (typeof queueMicrotask === 'function') {
+        if (pendingSync) return;
+        pendingSync = true;
+        queueMicrotask(() => {
+          pendingSync = false;
+          syncThumb();
+        });
+      } else {
+        syncThumb();
+      }
+    }
+
     return {
       el: hostEl,
       refs: { contentEl, railEl, thumbEl },
-      onPropsChange: syncThumb,
+      onPropsChange: scheduleSyncThumb,
       methods: {
         refresh() {
-          syncThumb();
-          if (typeof queueMicrotask === 'function') {
-            queueMicrotask(syncThumb);
-          }
+          scheduleSyncThumb();
         },
         scrollToRatio(ratio) {
           const r = Math.max(0, Math.min(1, Number(ratio || 0)));

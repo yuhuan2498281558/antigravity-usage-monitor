@@ -15,14 +15,15 @@ export async function callSidecarApi(path, { method = 'GET', body, abortKey = ''
   }
 
   let signal;
+  let requestController = null;
   if (abortKey && typeof AbortController !== 'undefined') {
     const prev = activeControllers.get(abortKey);
     if (prev) {
       prev.abort();
     }
-    const controller = new AbortController();
-    activeControllers.set(abortKey, controller);
-    signal = controller.signal;
+    requestController = new AbortController();
+    activeControllers.set(abortKey, requestController);
+    signal = requestController.signal;
   }
 
   const runRequest = async () => {
@@ -57,6 +58,9 @@ export async function callSidecarApi(path, { method = 'GET', body, abortKey = ''
   const promise = runRequest().finally(() => {
     if (dedupKey) {
       inFlightGets.delete(dedupKey);
+    }
+    if (abortKey && requestController && activeControllers.get(abortKey) === requestController) {
+      activeControllers.delete(abortKey);
     }
   });
 

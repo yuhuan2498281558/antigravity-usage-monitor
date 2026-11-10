@@ -35,6 +35,16 @@ export const TopLongPillNav = defineComponent({
       const { items = [], modelValue } = getProps();
       patchStyleVar(navEl, '--pill-count', Math.max(1, items.length));
 
+      const validValues = new Set(items.map((it) => it.value));
+      for (const [val, entry] of tabButtons.entries()) {
+        if (!validValues.has(val)) {
+          if (entry.btn?.parentNode === navEl) {
+            navEl.removeChild(entry.btn);
+          }
+          tabButtons.delete(val);
+        }
+      }
+
       let activeIdx = 0;
       items.forEach((item, index) => {
         if (item.value === modelValue) {
@@ -57,8 +67,13 @@ export const TopLongPillNav = defineComponent({
                 if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
                   e.preventDefault();
                   const curItems = getProps().items || [];
+                  if (!curItems.length) return;
+                  const curIndex = Math.max(
+                    0,
+                    curItems.findIndex((it) => it.value === item.value)
+                  );
                   const delta = e.key === 'ArrowRight' ? 1 : -1;
-                  const nextIndex = (index + delta + curItems.length) % curItems.length;
+                  const nextIndex = (curIndex + delta + curItems.length) % curItems.length;
                   const target = curItems[nextIndex];
                   if (target) {
                     selectValue(target.value);

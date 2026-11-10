@@ -413,6 +413,10 @@ export function aggregateMultiWindowUsage({
     ) {
       continue;
     }
+    const extMatch = externalConvos.get(cascadeId) || externalConvos.get(cidLower);
+    if (extMatch && (extMatch.steps?.length || 0) > (entry?.steps?.length || 0)) {
+      continue;
+    }
     const groupCascadeId = String(
       entry?.rootConversationId || entry?.parentConversationId || cascadeId
     ).toLowerCase();
@@ -427,18 +431,14 @@ export function aggregateMultiWindowUsage({
   for (const ext of externalConvos.values()) {
     const extCidLower = String(ext.cascadeId || '').toLowerCase();
     const liveEntry = trajectoryCache[ext.cascadeId] || trajectoryCache[extCidLower];
-    if (
-      ext.appSource === 'standalone' &&
-      liveEntry &&
-      (liveEntry.steps?.length || 0) >= ext.steps.length
-    ) {
+    if (liveEntry && (liveEntry.steps?.length || 0) >= (ext.steps?.length || 0)) {
       continue;
     }
     allEntriesToAggregate.push({
       cascadeId: `${ext.appSource}:${extCidLower}`,
       appSource: ext.appSource || 'ide',
       steps: ext.steps || [],
-      isCurrentConv: familySet.has(extCidLower) && !liveEntry,
+      isCurrentConv: familySet.has(extCidLower),
     });
   }
 
@@ -501,6 +501,10 @@ export function aggregateMultiWindowUsage({
           selectedWindowSteps.push({
             tMs,
             tokens: stepTotalTokens,
+            inputTokens: st.inputTokens || 0,
+            cacheReadTokens: st.cacheReadTokens || 0,
+            outputTokens:
+              (st.responseTokens || 0) + (st.thinkingTokens || 0) || st.outputTokens || 0,
             costUsd: stepCost ?? 0,
             unpricedCalls: unpriced,
           });
@@ -533,46 +537,190 @@ export function aggregateMultiWindowUsage({
     }
   }
 
-  // 构建当前选定时间窗口的 12 段等宽趋势序列 (trendSeries)
-  const trendSlotsCount = 12;
-  const trendEndMs = Number.isFinite(selectedWindow.endMs) ? selectedWindow.endMs : nowMs;
+  // 构建当前选定时间窗口的自适应自然整点/整日趋势序列 (trendSeries)
+  const MAX_SAFE_MS = 8_640_000_000_000_000;
+  const safeMs = (val, fallback) =>
+    Number.isFinite(val) && val > 0 && val <= MAX_SAFE_MS ? val : fallback;
+  let latestSelectedStepMs = 0;
+  for (const item of selectedWindowSteps) {
+    if (item.tMs > latestSelectedStepMs && item.tMs <= MAX_SAFE_MS) {
+      latestSelectedStepMs = item.tMs;
+    }
+  }
+  const baseEndMs = safeMs(selectedWindow.endMs, Math.max(nowMs, latestSelectedStepMs || nowMs));
+  const trendEndMs = Math.max(baseEndMs, latestSelectedStepMs || 0);
   const rawTrendStartMs =
     selectedWindow.key === 'all'
-      ? Number.isFinite(earliestSelectedStepMs)
-        ? earliestSelectedStepMs
-        : nowMs - 24 * 3600 * 1000
-      : selectedWindow.startMs;
-  const trendStartMs = Math.min(rawTrendStartMs, trendEndMs - 60 * 1000);
-  const trendSpanMs = Math.max(60 * 1000, trendEndMs - trendStartMs);
-  const slotWidthMs = trendSpanMs / trendSlotsCount;
-  const isShortSpan = trendSpanMs <= 36 * 3600 * 1000;
+      ? safeMs(earliestSelectedStepMs, trendEndMs - 24 * 3600 * 1000)
+      : safeMs(selectedWindow.startMs, trendEndMs - 24 * 3600 * 1000);
+  const effectiveStartMs =
+    selectedWindow.key === 'all'
+      ? Math.min(
+          rawTrendStartMs,
+          earliestSelectedStepMs < Infinity
+            ? safeMs(earliestSelectedStepMs, rawTrendStartMs)
+            : rawTrendStartMs,
+          trendEndMs - 3600 * 1000
+        )
+      : Math.min(rawTrendStartMs, trendEndMs);
+  const trendStartMs = effectiveStartMs;
+  const rawSpanMs = Math.max(3600 * 1000, trendEndMs - effectiveStartMs);
   const pad2 = (n) => String(n).padStart(2, '0');
-  const formatTrendLabel = (ms) => {
-    const d = new Date(ms);
-    if (isShortSpan) {
-      return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+  // 72 小时（3 天）以内按自然整点小时分桶；超过 72 小时按本地自然日分桶
+  const useHourly =
+    selectedWindow.key === 'today' ||
+    selectedWindow.key === '24h' ||
+    selectedWindow.key === '5h' ||
+    rawSpanMs <= 72 * 3600 * 1000;
+
+  const trendSeries = [];
+  if (useHourly) {
+    const startHourD = new Date(effectiveStartMs);
+    startHourD.setMinutes(0, 0, 0);
+    const endHourD = new Date(trendEndMs);
+    endHourD.setMinutes(0, 0, 0);
+
+    let firstHourMs = startHourD.getTime();
+    let lastHourMs = endHourD.getTime();
+    if (selectedWindow.key === 'today') {
+      const minTodayEndMs = firstHourMs + 5 * 3600 * 1000;
+      if (lastHourMs < minTodayEndMs) {
+        lastHourMs = minTodayEndMs;
+      }
+    } else if (lastHourMs - firstHourMs < 5 * 3600 * 1000) {
+      firstHourMs = lastHourMs - 5 * 3600 * 1000;
     }
-    return `${d.getMonth() + 1}/${d.getDate()}`;
-  };
 
-  const trendSeries = Array.from({ length: trendSlotsCount }, (_, idx) => {
-    const sMs = trendStartMs + idx * slotWidthMs;
-    return {
-      index: idx,
-      label: formatTrendLabel(sMs),
-      tokens: 0,
-      costUsd: 0,
-      calls: 0,
-    };
-  });
+    const totalHours = Math.max(2, Math.round((lastHourMs - firstHourMs) / (3600 * 1000)) + 1);
+    const stepHours = totalHours > 72 ? Math.ceil(totalHours / 48) : 1;
+    const slotMs = stepHours * 3600 * 1000;
+    const slotCount = Math.max(2, Math.ceil((lastHourMs - firstHourMs + 3600 * 1000) / slotMs));
 
-  for (const item of selectedWindowSteps) {
-    const rawIdx = Math.floor((item.tMs - trendStartMs) / slotWidthMs);
-    const idx = Math.max(0, Math.min(trendSlotsCount - 1, rawIdx));
-    trendSeries[idx].tokens += item.tokens;
-    trendSeries[idx].costUsd = +(trendSeries[idx].costUsd + item.costUsd).toFixed(4);
-    trendSeries[idx].unpricedCalls = (trendSeries[idx].unpricedCalls || 0) + item.unpricedCalls;
-    trendSeries[idx].calls += 1;
+    const firstD = new Date(firstHourMs);
+    const lastD = new Date(firstHourMs + (slotCount - 1) * slotMs);
+    const isSameDay =
+      firstD.getFullYear() === lastD.getFullYear() &&
+      firstD.getMonth() === lastD.getMonth() &&
+      firstD.getDate() === lastD.getDate();
+
+    for (let idx = 0; idx < slotCount; idx++) {
+      const sMs = firstHourMs + idx * slotMs;
+      const eMs = sMs + slotMs;
+      const sd = new Date(sMs);
+      const ed = new Date(eMs);
+      if (Number.isNaN(sd.getTime())) continue;
+      const hh = `${pad2(sd.getHours())}:00`;
+      const endHh = `${pad2(ed.getHours())}:00`;
+      const dateStr = `${sd.getMonth() + 1}/${pad2(sd.getDate())}`;
+      const axisLabel = isSameDay ? hh : `${dateStr} ${hh}`;
+      const fullLabel = `${sd.getMonth() + 1}月${sd.getDate()}日 ${hh} - ${endHh}`;
+      trendSeries.push({
+        index: idx,
+        startMs: sMs,
+        endMs: eMs,
+        granularity: 'hour',
+        label: axisLabel,
+        fullLabel,
+        tokens: 0,
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+        unpricedCalls: 0,
+        calls: 0,
+      });
+    }
+  } else {
+    const firstDayMs = getStartOfLocalDayMs(effectiveStartMs);
+    const lastDayMs = getStartOfLocalDayMs(trendEndMs);
+    const dayStarts = [];
+    const cursor = new Date(firstDayMs);
+    cursor.setHours(0, 0, 0, 0);
+    let safety = 0;
+    while (cursor.getTime() <= lastDayMs && safety < 3660) {
+      dayStarts.push(cursor.getTime());
+      cursor.setDate(cursor.getDate() + 1);
+      cursor.setHours(0, 0, 0, 0);
+      safety++;
+    }
+    while (dayStarts.length < 2) {
+      const prev = new Date(dayStarts[0] || firstDayMs);
+      prev.setDate(prev.getDate() - 1);
+      prev.setHours(0, 0, 0, 0);
+      dayStarts.unshift(prev.getTime());
+    }
+
+    const stepDays = dayStarts.length > 60 ? Math.ceil(dayStarts.length / 45) : 1;
+    let bucketIdx = 0;
+    for (let i = 0; i < dayStarts.length; i += stepDays) {
+      const sMs = dayStarts[i];
+      const endDayStartMs = dayStarts[Math.min(dayStarts.length - 1, i + stepDays - 1)];
+      const endCursor = new Date(endDayStartMs);
+      endCursor.setDate(endCursor.getDate() + 1);
+      endCursor.setHours(0, 0, 0, 0);
+      const eMs = endCursor.getTime();
+
+      const sd = new Date(sMs);
+      const ed = new Date(endDayStartMs);
+      const axisLabel = `${sd.getMonth() + 1}/${pad2(sd.getDate())}`;
+      const fullLabel =
+        stepDays === 1
+          ? `${sd.getMonth() + 1}月${sd.getDate()}日 (${WEEKDAY_NAMES[sd.getDay()]})`
+          : `${sd.getMonth() + 1}月${sd.getDate()}日 - ${ed.getMonth() + 1}月${ed.getDate()}日`;
+
+      trendSeries.push({
+        index: bucketIdx++,
+        startMs: sMs,
+        endMs: eMs,
+        granularity: 'day',
+        label: axisLabel,
+        fullLabel,
+        tokens: 0,
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+        unpricedCalls: 0,
+        calls: 0,
+      });
+    }
+  }
+
+  if (trendSeries.length > 0) {
+    const firstBucketStart = trendSeries[0].startMs;
+    const lastIdx = trendSeries.length - 1;
+    for (const item of selectedWindowSteps) {
+      let targetIdx = lastIdx;
+      if (item.tMs <= firstBucketStart) {
+        targetIdx = 0;
+      } else {
+        // 二分查找匹配的时间桶 [startMs, endMs)
+        let lo = 0;
+        let hi = lastIdx;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          const b = trendSeries[mid];
+          if (item.tMs < b.startMs) {
+            hi = mid - 1;
+          } else if (item.tMs >= b.endMs && mid < lastIdx) {
+            lo = mid + 1;
+          } else {
+            targetIdx = mid;
+            break;
+          }
+        }
+      }
+      const bucket = trendSeries[targetIdx];
+      bucket.tokens += item.tokens;
+      bucket.inputTokens += item.inputTokens || 0;
+      bucket.cacheReadTokens += item.cacheReadTokens || 0;
+      bucket.outputTokens += item.outputTokens || 0;
+      bucket.costUsd = +(bucket.costUsd + item.costUsd).toFixed(4);
+      bucket.unpricedCalls = (bucket.unpricedCalls || 0) + item.unpricedCalls;
+      bucket.calls += 1;
+    }
   }
 
   const finalizedPresets = {};

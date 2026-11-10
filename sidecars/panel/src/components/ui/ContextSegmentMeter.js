@@ -5,7 +5,7 @@
  */
 
 import { defineComponent } from '../../core/component.js';
-import { h, patchAttr, patchStyleVar } from '../../core/domPatch.js';
+import { h, patchAttr, patchClasses, patchStyleVar } from '../../core/domPatch.js';
 
 const SEGMENT_DEFS = [
   { key: 'assistant', cls: 'seg-assistant', getVal: (c) => Number(c.assistantTokens || 0) },
@@ -27,11 +27,10 @@ const SEGMENT_DEFS = [
 export const ContextSegmentMeter = defineComponent({
   name: 'ContextSegmentMeter',
   setup({ getProps }) {
-    const segments = SEGMENT_DEFS.map((def, idx) => ({
-      ...def,
-      defaultOrder: idx,
-      el: h('div', { className: `progress-seg ${def.cls}` }),
-    }));
+    // 固定 10 个位置槽位节点，不通过 appendChild 移动 DOM，防止浏览器中断 CSS transition 动画
+    const slotEls = SEGMENT_DEFS.map((def) =>
+      h('div', { className: `progress-seg ${def.cls}` })
+    );
 
     const trackEl = h(
       'div',
@@ -41,28 +40,38 @@ export const ContextSegmentMeter = defineComponent({
         'aria-valuemin': '0',
         'aria-valuemax': '100',
       },
-      segments.map((s) => s.el)
+      slotEls
     );
 
-    let lastOrderSig = segments.map((s) => s.key).join(',');
+    let lastOrderSig = '';
 
     function syncMeter() {
       const ctx = getProps().context || {};
       const limit = Math.max(1, Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000));
-      const scored = segments.map((seg) => {
-        const val = seg.getVal(ctx);
+      const scored = SEGMENT_DEFS.map((def, defaultOrder) => {
+        const val = def.getVal(ctx);
         const pct = Math.min(100, (val / limit) * 100);
-        patchStyleVar(seg.el, '--seg-w', `${pct.toFixed(2)}%`);
-        return { seg, val };
+        return { def, defaultOrder, val, pct };
       });
 
-      scored.sort((a, b) => b.val - a.val || a.seg.defaultOrder - b.seg.defaultOrder);
-      const nextOrderSig = scored.map((x) => x.seg.key).join(',');
-      if (nextOrderSig !== lastOrderSig) {
-        lastOrderSig = nextOrderSig;
-        for (const { seg } of scored) {
-          trackEl.appendChild(seg.el);
-        }
+      scored.sort((a, b) => b.val - a.val || a.defaultOrder - b.defaultOrder);
+      // 仅关注非零通道的相对顺序变化，决定是否启用 0.05s 先变色再伸缩的衔接延迟
+      const activeOrderSig = scored
+        .filter((x) => x.val > 0)
+        .map((x) => x.def.key)
+        .join(',');
+      const orderChanged = Boolean(lastOrderSig && activeOrderSig && activeOrderSig !== lastOrderSig);
+      if (activeOrderSig) {
+        lastOrderSig = activeOrderSig;
+      }
+
+      patchClasses(trackEl, { 'is-reordering': orderChanged });
+
+      for (let i = 0; i < slotEls.length; i++) {
+        const slotEl = slotEls[i];
+        const item = scored[i];
+        patchAttr(slotEl, 'class', `progress-seg ${item.def.cls}`);
+        patchStyleVar(slotEl, '--seg-w', `${item.pct.toFixed(2)}%`);
       }
 
       patchAttr(trackEl, 'aria-valuenow', Math.round(ctx.compactionUsedPct ?? ctx.usedPct ?? 0));
@@ -72,7 +81,7 @@ export const ContextSegmentMeter = defineComponent({
 
     return {
       el: trackEl,
-      refs: { segments },
+      refs: { segments: slotEls },
       onPropsChange: syncMeter,
     };
   },

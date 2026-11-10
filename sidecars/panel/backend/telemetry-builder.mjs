@@ -12,6 +12,7 @@
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  extractLiveActivity,
   parseIsoMs,
   speedMetric,
   summarizeSpeed,
@@ -30,6 +31,7 @@ import { callLsRpc, diagnostics, getOfficialQuotaSummary } from './ls-rpc.mjs';
 import {
   computeStepCost,
   isArgonModelIdentifier,
+  isCarbonModelIdentifier,
   resolveModelInfo,
 } from './model-pricing.mjs';
 import { getCloudStatus } from './pricing-catalog.mjs';
@@ -268,6 +270,7 @@ function buildAgentUnitTelemetry({
   agentLabel,
   status,
   rawSteps,
+  liveActivity = null,
   fallbackLastModMs,
   dynamicModelMap,
   knownUpstreamByModelKey,
@@ -297,6 +300,11 @@ function buildAgentUnitTelemetry({
   const modelBreakdown = buildScopedModelBreakdown(taggedSteps, dynamicModelMap);
   const lastModifiedMs =
     enrichedRes.latestEnriched?.createdAtMs || fallbackLastModMs || 0;
+  const isRunning = status === 'CASCADE_RUN_STATUS_RUNNING';
+  const resolvedLiveActivity = isRunning
+    ? liveActivity ||
+      extractLiveActivity([], true, lastModifiedMs || fallbackLastModMs || 0)
+    : null;
 
   return {
     enrichedRes,
@@ -311,8 +319,9 @@ function buildAgentUnitTelemetry({
       badgeText,
       role,
       typeName,
-      isRunning: status === 'CASCADE_RUN_STATUS_RUNNING',
+      isRunning,
       status: status || 'IDLE',
+      liveActivity: resolvedLiveActivity,
       stepCount: taggedSteps.length,
       latestTokPerSec: enrichedRes.latestEnriched?.tokPerSec ?? null,
       latestTtftSec: enrichedRes.latestEnriched?.ttftSec ?? null,
@@ -359,15 +368,18 @@ export async function buildTelemetryPayloadInternal(
   const currentAccountName = userStatus?.email || userStatus?.name || '';
   let officialQuotaInfo = initialOfficialQuotaInfo;
 
-  // 若检测到登录账号在 10 秒缓存期内发生切换，立即强制刷新配额摘要
-  if (
+  // 若检测到登录账号在 10 秒缓存期内发生切换，先清空旧账号配额缓存再立即强制刷新，防止刷新失败时串号
+  const accountChanged = Boolean(
     currentAccountName &&
-    quotaSummaryCache.accountName &&
-    quotaSummaryCache.accountName !== currentAccountName
-  ) {
+      quotaSummaryCache.accountName &&
+      quotaSummaryCache.accountName !== currentAccountName
+  );
+  if (accountChanged) {
+    quotaSummaryCache.data = null;
+    quotaSummaryCache.ts = 0;
+    quotaSummaryCache.accountName = currentAccountName;
     officialQuotaInfo = await getOfficialQuotaSummary(true);
-  }
-  if (currentAccountName && officialQuotaInfo?.data) {
+  } else if (currentAccountName && officialQuotaInfo?.data && !officialQuotaInfo.refreshFailed) {
     quotaSummaryCache.accountName = currentAccountName;
   }
 
@@ -404,6 +416,7 @@ export async function buildTelemetryPayloadInternal(
     agentLabel: '主代理',
     status: activeConvSummary?.status || 'IDLE',
     rawSteps: activeSteps,
+    liveActivity: activeConvSummary?.liveActivity || null,
     fallbackLastModMs: activeConvSummary?.lastModifiedMs || activeEntry?.lastModifiedMs || 0,
     dynamicModelMap,
     knownUpstreamByModelKey,
@@ -464,6 +477,7 @@ export async function buildTelemetryPayloadInternal(
       agentLabel: rawRole ? `${shortLabel} · ${rawRole}` : shortLabel,
       status: subSum.status || 'IDLE',
       rawSteps: subRawSteps,
+      liveActivity: subSum.liveActivity || null,
       fallbackLastModMs: subSum.lastModifiedMs || subEntry?.lastModifiedMs || 0,
       dynamicModelMap,
       knownUpstreamByModelKey,
@@ -528,6 +542,25 @@ export async function buildTelemetryPayloadInternal(
         ? Math.round((totalFamilyCacheReadTokens / totalFamilyPromptTokens) * 100)
         : 0;
 
+    const runningSubs = subAgentTelemetries.filter((a) => a.isRunning);
+    const primaryRunningSub = runningSubs
+      .slice()
+      .sort((a, b) => (b.lastModifiedMs || 0) - (a.lastModifiedMs || 0))[0];
+    const activeActivityAgent =
+      primaryRunningSub || (mainAgentTelemetry.isRunning ? mainAgentTelemetry : null);
+    const aggregatedLiveActivity = activeActivityAgent?.liveActivity
+      ? {
+          ...activeActivityAgent.liveActivity,
+          agentId: activeActivityAgent.agentId,
+          agentBadge: activeActivityAgent.badgeText,
+          agentShortLabel: activeActivityAgent.shortLabel,
+          agentRole: activeActivityAgent.role,
+          agentIndex: activeActivityAgent.index,
+          isMain: Boolean(activeActivityAgent.isMain),
+          parallelCount: runningSubs.length > 1 ? runningSubs.length : 1,
+        }
+      : null;
+
     aggregatedTelemetry = {
       agentId: 'all',
       cascadeId: activeCascadeId,
@@ -543,6 +576,7 @@ export async function buildTelemetryPayloadInternal(
       activeAgentRole: latestActiveAgent.role,
       isRunning: allAgents.some((a) => a.isRunning),
       status: allAgents.some((a) => a.isRunning) ? 'CASCADE_RUN_STATUS_RUNNING' : 'IDLE',
+      liveActivity: aggregatedLiveActivity,
       stepCount: allCombinedEnrichedSteps.length,
       latestTokPerSec: latestMetricAgent.latestTokPerSec,
       latestTtftSec: latestMetricAgent.latestTtftSec,
@@ -568,6 +602,14 @@ export async function buildTelemetryPayloadInternal(
     allCombinedEnrichedSteps.length > 0
       ? allCombinedEnrichedSteps[allCombinedEnrichedSteps.length - 1]
       : latestEnriched;
+  const latestIsCarbon = latestFamilyStep
+    ? isCarbonModelIdentifier(
+        latestFamilyStep.modelKey,
+        latestFamilyStep.responseModel,
+        latestFamilyStep.modelUpstream,
+        latestFamilyStep.modelLabel
+      )
+    : false;
   const latestIsArgon = latestFamilyStep
     ? isArgonModelIdentifier(
         latestFamilyStep.modelKey,
@@ -578,13 +620,15 @@ export async function buildTelemetryPayloadInternal(
     : false;
   const rawActiveFamily = latestFamilyStep?.family || 'Other';
   const activePoolKey =
-    latestIsArgon && quotaPoolsMap.has('Argon')
-      ? 'Argon'
-      : rawActiveFamily === 'Gemini'
-        ? 'Gemini'
-        : ['Claude', 'GPT'].includes(rawActiveFamily)
-          ? 'Claude & GPT'
-          : 'Unknown';
+    latestIsCarbon && quotaPoolsMap.has('Carbon')
+      ? 'Carbon'
+      : latestIsArgon && quotaPoolsMap.has('Argon')
+        ? 'Argon'
+        : rawActiveFamily === 'Gemini'
+          ? 'Gemini'
+          : ['Claude', 'GPT'].includes(rawActiveFamily)
+            ? 'Claude & GPT'
+            : 'Unknown';
   const matchedActivePool = quotaPoolsMap.get(activePoolKey) || null;
   const activeLive5h = matchedActivePool?.has5h
     ? {
@@ -638,13 +682,15 @@ export async function buildTelemetryPayloadInternal(
     poolKey: activePoolKey,
     poolLabel: activePoolKey === 'Unknown' ? '未知' : activePoolKey,
     poolName:
-      activePoolKey === 'Argon'
-        ? 'Gemini 4 Argon 模型池'
-        : activePoolKey === 'Gemini'
-          ? 'Gemini 模型池'
-          : activePoolKey === 'Claude & GPT'
-            ? 'Claude & GPT 模型池'
-            : '模型池未知',
+      activePoolKey === 'Carbon'
+        ? 'Gemini 4 Carbon 模型池'
+        : activePoolKey === 'Argon'
+          ? 'Gemini 4 Argon 模型池'
+          : activePoolKey === 'Gemini'
+            ? 'Gemini 模型池'
+            : activePoolKey === 'Claude & GPT'
+              ? 'Claude & GPT 模型池'
+              : '模型池未知',
     family: activePoolKey,
     isAvailable: Boolean(activeLive5h || activeLiveWeekly),
     has5h: Boolean(activeLive5h),
@@ -706,6 +752,130 @@ export async function buildTelemetryPayloadInternal(
     // 忽略 stat 异常
   }
 
+  // 7. 构建所有正在运行的主进程（根会话）及其子代理缩略状态列表
+  const runningConversations = [];
+  for (const rootConv of conversations) {
+    const isMainRunning = rootConv.status === 'CASCADE_RUN_STATUS_RUNNING';
+    const rawSubs = Array.isArray(rootConv.subagents) ? rootConv.subagents : [];
+    const hasRunningSub = rawSubs.some((s) => s.status === 'CASCADE_RUN_STATUS_RUNNING');
+    if (!isMainRunning && !hasRunningSub) {
+      continue;
+    }
+
+    const rootEntry = trajectoryCache[rootConv.cascadeId] || null;
+    const rootFallbackMs =
+      rootConv.lastModifiedMs || rootEntry?.lastModifiedMs || rootConv.createdTimeMs || 0;
+
+    const subItems = rawSubs.map((subSum, idx) => {
+      const subCid = subSum.cascadeId;
+      const subEntry = trajectoryCache[subCid] || null;
+      const subSpec = subSum.subagentSpec || subEntry?.subagentSpec || null;
+      const rawRole =
+        subSpec?.role ||
+        subSum.agentScriptName ||
+        subEntry?.agentScriptName ||
+        subSpec?.typeName ||
+        '';
+      const subIndex = idx + 1;
+      const badgeText = `子${subIndex}`;
+      const shortLabel = `子代理 #${subIndex}`;
+      const role = rawRole || shortLabel;
+      const isSubRunning = subSum.status === 'CASCADE_RUN_STATUS_RUNNING';
+      const stepCount = Number(subSum.stepCount ?? subEntry?.steps?.length ?? 0);
+      const subModMs = subSum.lastModifiedMs || subEntry?.lastModifiedMs || 0;
+      const liveActivity = isSubRunning
+        ? subSum.liveActivity || extractLiveActivity([], true, subModMs)
+        : {
+            phase: 'done',
+            label: '已完成',
+            detail: '',
+            stepProgress: '',
+            startedAtMs: subModMs,
+            signature: `done:${stepCount}`,
+          };
+      return {
+        cascadeId: subCid,
+        index: subIndex,
+        badgeText,
+        shortLabel,
+        role,
+        typeName: subSpec?.typeName || '',
+        isRunning: isSubRunning,
+        status: subSum.status || 'IDLE',
+        stepCount,
+        lastModifiedMs: subModMs,
+        liveActivity,
+      };
+    });
+
+    const mainLiveAct = isMainRunning
+      ? rootConv.liveActivity || extractLiveActivity([], true, rootFallbackMs)
+      : null;
+
+    // 若主代理正在调用 invoke_subagent 但新子代理轨迹尚未出现在 rawSubs 中，生成临时子代理占位项
+    const runningSubCount = subItems.filter((s) => s.isRunning).length;
+    if (
+      isMainRunning &&
+      (mainLiveAct?.toolName === 'invoke_subagent' || mainLiveAct?.label === '调用子代理') &&
+      runningSubCount === 0
+    ) {
+      const pendingIndex = subItems.length + 1;
+      const pendingRole = mainLiveAct.detail || '子代理';
+      subItems.push({
+        cascadeId: `${rootConv.cascadeId}:pending-sub-${pendingIndex}`,
+        index: pendingIndex,
+        badgeText: `子${pendingIndex}`,
+        shortLabel: `子代理 #${pendingIndex}`,
+        role: pendingRole,
+        typeName: '',
+        isRunning: true,
+        status: 'CASCADE_RUN_STATUS_RUNNING',
+        stepCount: 0,
+        lastModifiedMs: rootFallbackMs,
+        liveActivity: {
+          phase: 'thinking',
+          label: '启动中',
+          detail: '',
+          stepProgress: '',
+          startedAtMs: mainLiveAct.startedAtMs || 0,
+          signature: `spawning-sub:${pendingIndex}:${pendingRole}`,
+        },
+      });
+    }
+
+    const runningSubList = subItems.filter((s) => s.isRunning);
+    const resolvedMainActivity =
+      mainLiveAct ||
+      (runningSubList.length > 0
+        ? {
+            phase: 'waiting',
+            label: '等待子代理',
+            detail: runningSubList.map((s) => s.role).join(', '),
+            stepProgress: '',
+            startedAtMs: runningSubList[0]?.liveActivity?.startedAtMs || rootFallbackMs,
+            signature: `wait-subs:${runningSubList.length}:${runningSubList[0]?.cascadeId || ''}`,
+          }
+        : extractLiveActivity([], true, rootFallbackMs));
+
+    runningConversations.push({
+      cascadeId: rootConv.cascadeId,
+      title: rootConv.title || rootConv.cascadeId.slice(0, 8),
+      isCurrentSelected:
+        Boolean(activeCascadeId) &&
+        rootConv.cascadeId.toLowerCase() === String(activeCascadeId).toLowerCase(),
+      isMainRunning,
+      isRunning: true,
+      status: isMainRunning ? rootConv.status : 'CASCADE_RUN_STATUS_RUNNING',
+      stepCount: Number(rootConv.stepCount || 0),
+      totalStepCount: Number(rootConv.totalStepCount || rootConv.stepCount || 0),
+      lastModifiedMs: rootConv.groupLastModifiedMs || rootConv.lastModifiedMs || 0,
+      mainActivity: resolvedMainActivity,
+      subagentCount: subItems.length,
+      runningSubagentCount: runningSubList.length,
+      subagents: subItems,
+    });
+  }
+
   return {
     timestamp: new Date().toISOString(),
     uiBundleVersion,
@@ -719,6 +889,7 @@ export async function buildTelemetryPayloadInternal(
       aiCredits: realAiCredits > 0 ? realAiCredits : null,
       totalConversations: conversations.length,
     },
+    runningConversations,
     conversations: conversations.slice(0, MAX_RECENT_CONVERSATIONS).map((c) => ({
       cascadeId: c.cascadeId,
       title: c.title,
@@ -734,6 +905,7 @@ export async function buildTelemetryPayloadInternal(
       title: activeConvSummary?.title || '当前会话',
       isRunning: activeConvSummary?.status === 'CASCADE_RUN_STATUS_RUNNING',
       status: activeConvSummary?.status || 'IDLE',
+      liveActivity: mainAgentTelemetry.liveActivity || null,
       stepCount: enrichedActiveSteps.length,
       hasSubagents: subAgentTelemetries.length > 0,
       subagentCount: subAgentTelemetries.length,
@@ -785,7 +957,7 @@ export async function buildTelemetryPayloadInternal(
       },
       activePool: activePoolQuota,
       pools: Array.from(quotaPoolsMap.values()).sort((a, b) => {
-        const order = { Gemini: 0, Argon: 1, 'Claude & GPT': 2 };
+        const order = { Gemini: 0, Argon: 1, Carbon: 2, 'Claude & GPT': 3 };
         return (order[a.family] ?? 99) - (order[b.family] ?? 99);
       }),
       models: modelQuotas.sort((a, b) => String(a.label).localeCompare(String(b.label))),

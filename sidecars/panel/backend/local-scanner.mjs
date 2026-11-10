@@ -8,10 +8,11 @@
  *    拉取新增或 Schema 过期的会话轨迹步骤，持久化至 `trajectory_usage_cache.json`。
  */
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { extractModelSteps, parseIsoMs } from '../speed-metrics.mjs';
+import { extractLiveActivity, extractModelSteps, parseIsoMs } from '../speed-metrics.mjs';
 import {
+  BRAIN_DIR,
   CACHE_FILE,
   CACHE_SCHEMA_VERSION,
   CONVERSATIONS_DIR,
@@ -171,7 +172,176 @@ const MAX_CONCURRENT_RPC = 4;
 const LEGACY_MIGRATION_BATCH_SIZE = 8;
 const MAX_SUBAGENT_RECONCILE_DEPTH = 4;
 const FAILED_RPC_COOLDOWN_MS = 60_000;
+const TRANSCRIPT_TAIL_MAX_BYTES = 96 * 1024;
+const MAX_TRANSCRIPT_MEMO_ENTRIES = 64;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const failedFetchCooldownMap = new Map();
+const liveActivityMemo = new Map();
+const transcriptTailMemo = new Map();
+
+/**
+ * 读取指定会话在本地 `brain/<cascadeId>/.system_generated/logs/transcript.jsonl` 的尾部步骤。
+ * 采用 `mtimeMs + size` 签名缓存与尾部 96KB 定长切片读取，避免长会话大文件全量读取阻塞事件循环。
+ *
+ * @param {string} cascadeId
+ * @param {number} [maxLines=24]
+ * @returns {object[]}
+ */
+function readTranscriptTailSteps(cascadeId, maxLines = 24) {
+  if (!cascadeId) return [];
+  const normId = String(cascadeId).trim().toLowerCase();
+  if (!UUID_RE.test(normId)) return [];
+  const transcriptPath = join(
+    BRAIN_DIR,
+    normId,
+    '.system_generated',
+    'logs',
+    'transcript.jsonl'
+  );
+  if (!existsSync(transcriptPath)) return [];
+  try {
+    const st = statSync(transcriptPath);
+    const mtimeMs = Number(st?.mtimeMs || 0);
+    const size = Number(st?.size || 0);
+    const cached = transcriptTailMemo.get(normId);
+    if (cached && cached.mtimeMs === mtimeMs && cached.size === size && size > 0) {
+      return cached.steps;
+    }
+
+    let raw = '';
+    if (
+      size > TRANSCRIPT_TAIL_MAX_BYTES &&
+      typeof openSync === 'function' &&
+      typeof readSync === 'function' &&
+      typeof closeSync === 'function'
+    ) {
+      const fd = openSync(transcriptPath, 'r');
+      try {
+        const buf = Buffer.allocUnsafe(TRANSCRIPT_TAIL_MAX_BYTES);
+        const bytesRead = readSync(
+          fd,
+          buf,
+          0,
+          TRANSCRIPT_TAIL_MAX_BYTES,
+          size - TRANSCRIPT_TAIL_MAX_BYTES
+        );
+        raw = buf.toString('utf8', 0, bytesRead);
+        const trimmedRaw = raw.replace(/[\r\n]+$/, '');
+        const firstNewline = trimmedRaw.indexOf('\n');
+        if (firstNewline >= 0 && !trimmedRaw.trimStart().startsWith('{')) {
+          raw = trimmedRaw.slice(firstNewline + 1);
+        } else {
+          raw = trimmedRaw;
+        }
+      } finally {
+        try {
+          closeSync(fd);
+        } catch {
+          // 忽略关闭异常
+        }
+      }
+    } else {
+      raw = readFileSync(transcriptPath, 'utf8');
+    }
+
+    if (typeof raw !== 'string' || !raw.trim()) {
+      transcriptTailMemo.set(normId, { mtimeMs, size, steps: [] });
+      return [];
+    }
+    const lines = raw.trim().split(/\r?\n/);
+    const tail = lines.slice(-maxLines);
+    const steps = [];
+    for (const line of tail) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === 'object') {
+          steps.push(parsed);
+        }
+      } catch {
+        // 忽略头部被截断或末尾正在写入的半行 JSON
+      }
+    }
+    if (transcriptTailMemo.size >= MAX_TRANSCRIPT_MEMO_ENTRIES && !transcriptTailMemo.has(normId)) {
+      const oldestKey = transcriptTailMemo.keys().next().value;
+      if (oldestKey !== undefined) transcriptTailMemo.delete(oldestKey);
+    }
+    transcriptTailMemo.set(normId, { mtimeMs, size, steps });
+    return steps;
+  } catch {
+    return [];
+  }
+}
+
+function scoreLiveActivitySpecificity(act) {
+  if (!act || typeof act !== 'object') return 0;
+  const sig = String(act.signature || '');
+  if (
+    sig.startsWith('planner-tool:') ||
+    sig.startsWith('step-run:') ||
+    sig.startsWith('pending-tool:')
+  ) {
+    return 4;
+  }
+  if (
+    sig.startsWith('compacting:') ||
+    sig.startsWith('responding:') ||
+    sig.startsWith('thinking:') ||
+    sig.startsWith('responding-done:') ||
+    sig.startsWith('thinking-done:')
+  ) {
+    return 3;
+  }
+  if (
+    sig.startsWith('post-tool-think:') ||
+    sig.startsWith('post-step-tool:')
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+function extractActivityStepOrd(act) {
+  const m = String(act?.signature || '').match(/^[a-z0-9-]+:(\d+)(?::|$)/i);
+  return m ? Number(m[1]) : -1;
+}
+
+function resolveBestLiveActivity(cascadeId, rpcRawSteps, isRunning, fallbackMs) {
+  if (!isRunning) return null;
+  const rpcAct =
+    Array.isArray(rpcRawSteps) && rpcRawSteps.length > 0
+      ? extractLiveActivity(rpcRawSteps, true, fallbackMs)
+      : null;
+  const transcriptSteps = readTranscriptTailSteps(cascadeId);
+  const transcriptAct =
+    transcriptSteps.length > 0 ? extractLiveActivity(transcriptSteps, true, fallbackMs) : null;
+
+  if (rpcAct && transcriptAct) {
+    const rpcMs = Number(rpcAct.startedAtMs || 0);
+    const transMs = Number(transcriptAct.startedAtMs || 0);
+    if (rpcMs > 0 && transMs > 0 && rpcMs !== transMs) {
+      return rpcMs > transMs ? rpcAct : transcriptAct;
+    }
+    const rpcOrd = extractActivityStepOrd(rpcAct);
+    const transOrd = extractActivityStepOrd(transcriptAct);
+    if (rpcOrd >= 0 && transOrd >= 0 && rpcOrd !== transOrd) {
+      return rpcOrd > transOrd ? rpcAct : transcriptAct;
+    }
+    const rpcScore = scoreLiveActivitySpecificity(rpcAct);
+    const transScore = scoreLiveActivitySpecificity(transcriptAct);
+    if (transScore > rpcScore) return transcriptAct;
+    if (rpcScore > transScore) return rpcAct;
+    // 同步骤、同优先级下优先采用包含完整 tool_calls 参数的 transcript.jsonl 解析结果
+    return transcriptAct;
+  }
+  return (
+    transcriptAct ||
+    rpcAct ||
+    liveActivityMemo.get(String(cascadeId || '').toLowerCase()) ||
+    extractLiveActivity([], true, fallbackMs)
+  );
+}
 
 /**
  * 清洗并裁剪 `subagentSpec`，仅保留 UI 与分组所需的 `typeName` 和 `role`，
@@ -327,6 +497,12 @@ export async function enumerateAndSyncConversations({
   currentAccountName = '',
   requestedConvId = '',
 }) {
+  const nowSweepMs = Date.now();
+  for (const [k, ts] of failedFetchCooldownMap.entries()) {
+    if (nowSweepMs - ts >= FAILED_RPC_COOLDOWN_MS) {
+      failedFetchCooldownMap.delete(k);
+    }
+  }
   const diskConvMap = discoverLocalConversationFiles();
   const allCascadeIds = new Set([
     ...Object.keys(summariesObj),
@@ -551,9 +727,23 @@ export async function enumerateAndSyncConversations({
             conv.lastModifiedMs = resolvedLastModMs;
             conv.stepCount = steps.length;
 
+            const liveAct = resolveBestLiveActivity(
+              conv.cascadeId,
+              rawSteps,
+              isRunning,
+              resolvedLastModMs || conv.createdTimeMs || 0
+            );
+            if (liveAct) {
+              conv.liveActivity = liveAct;
+              liveActivityMemo.set(conv.cascadeId.toLowerCase(), liveAct);
+            } else {
+              conv.liveActivity = null;
+              liveActivityMemo.delete(conv.cascadeId.toLowerCase());
+            }
+
             const cacheEntry = {
               signature: sig,
-              accountName: currentAccountName || prev?.accountName || '',
+              accountName: prev?.accountName || currentAccountName || '',
               title: conv.title,
               lastModifiedMs: resolvedLastModMs,
               diskMtimeMs: conv.diskMtimeMs || 0,
@@ -589,6 +779,18 @@ export async function enumerateAndSyncConversations({
             console.error(`Failed loading trajectory ${conv.cascadeId}: ${err.message}`);
             if (!isRunning) {
               failedFetchCooldownMap.set(cooldownKey, nowPollMs);
+              liveActivityMemo.delete(conv.cascadeId.toLowerCase());
+            } else {
+              const fallbackLive = resolveBestLiveActivity(
+                conv.cascadeId,
+                [],
+                true,
+                conv.lastModifiedMs || conv.createdTimeMs || 0
+              );
+              conv.liveActivity = fallbackLive;
+              if (fallbackLive) {
+                liveActivityMemo.set(conv.cascadeId.toLowerCase(), fallbackLive);
+              }
             }
             if (
               prev &&
@@ -818,6 +1020,23 @@ export async function enumerateAndSyncConversations({
     cacheState.needsSave = !saveJson(CACHE_FILE, trajectoryCache);
   }
 
+  // 确保所有处于 RUNNING 状态的会话（含本轮未触发 RPC 拉取的会话）都同步了最新的实时动作摘要
+  for (const conv of rawConversations) {
+    if (conv.status === 'CASCADE_RUN_STATUS_RUNNING') {
+      if (!conv.liveActivity) {
+        const fallbackMs = conv.lastModifiedMs || conv.createdTimeMs || 0;
+        const resolved = resolveBestLiveActivity(conv.cascadeId, [], true, fallbackMs);
+        conv.liveActivity = resolved;
+        if (resolved) {
+          liveActivityMemo.set(conv.cascadeId.toLowerCase(), resolved);
+        }
+      }
+    } else {
+      conv.liveActivity = null;
+      liveActivityMemo.delete(conv.cascadeId.toLowerCase());
+    }
+  }
+
   // 按最终收敛的 rootConversationId 将所有层级的子代理挂载至对应顶层根会话下
   const subagentsByRoot = new Map();
   const conversations = [];
@@ -831,7 +1050,7 @@ export async function enumerateAndSyncConversations({
         subagentsByRoot.set(rootId, []);
       }
       subagentsByRoot.get(rootId).push(conv);
-    } else if (!conv.isSubagent || !rootTarget) {
+    } else {
       conversations.push(conv);
     }
   }
@@ -884,7 +1103,9 @@ export async function enumerateAndSyncConversations({
         ))) ||
     conversations[0] ||
     null;
-  const activeCascadeId = activeConvSummary?.cascadeId || requestedConvId || null;
+  const safeReqId =
+    requestedConvId && !/[\\/]|\.\./.test(String(requestedConvId)) ? requestedConvId : null;
+  const activeCascadeId = activeConvSummary?.cascadeId || safeReqId || null;
 
   return {
     conversations,

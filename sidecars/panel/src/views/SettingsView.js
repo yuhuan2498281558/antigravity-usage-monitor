@@ -75,11 +75,11 @@ export const SettingsView = defineComponent({
         statusTimer = null;
       }
       patchText(saveStatusText, text);
-      if (text === '已保存') {
+      if (text === '已保存' || text === '保存失败') {
         statusTimer = setTimeout(() => {
           statusTimer = null;
           patchText(saveStatusText, '');
-        }, 1500);
+        }, text === '保存失败' ? 2500 : 1500);
       }
     }
 
@@ -121,10 +121,14 @@ export const SettingsView = defineComponent({
           });
         }
         showSaveFeedback('保存中…');
-        await saveSettingsPatch({
-          showUpstreamModel: draftShowUpstreamModel,
-        });
-        showSaveFeedback('已保存');
+        try {
+          await saveSettingsPatch({
+            showUpstreamModel: draftShowUpstreamModel,
+          });
+          showSaveFeedback('已保存');
+        } catch {
+          showSaveFeedback('保存失败');
+        }
       },
     });
 
@@ -142,10 +146,14 @@ export const SettingsView = defineComponent({
           });
         }
         showCloudFeedback('保存中…', 0);
-        await saveSettingsPatch({
-          autoUpdatePlugin: draftAutoUpdatePlugin,
-        });
-        showCloudFeedback('已保存', 1800);
+        try {
+          await saveSettingsPatch({
+            autoUpdatePlugin: draftAutoUpdatePlugin,
+          });
+          showCloudFeedback('已保存', 1800);
+        } catch {
+          showCloudFeedback('保存失败', 2500);
+        }
       },
     });
 
@@ -176,14 +184,18 @@ export const SettingsView = defineComponent({
         className: 'btn-primary',
         onClick: async () => {
           showSaveFeedback('保存中…');
-          await saveSettingsPatch({
-            weeklyLimitMode: draftMode,
-            weeklyTokenBudget: draftTokens,
-            weeklyCostBudget: draftCost,
-            showUpstreamModel: draftShowUpstreamModel,
-            autoUpdatePlugin: draftAutoUpdatePlugin,
-          });
-          showSaveFeedback('已保存');
+          try {
+            await saveSettingsPatch({
+              weeklyLimitMode: draftMode,
+              weeklyTokenBudget: draftTokens,
+              weeklyCostBudget: draftCost,
+              showUpstreamModel: draftShowUpstreamModel,
+              autoUpdatePlugin: draftAutoUpdatePlugin,
+            });
+            showSaveFeedback('已保存');
+          } catch {
+            showSaveFeedback('保存失败');
+          }
         },
       },
       [createSvgIcon('check', { size: 13 }), h('span', { text: '保存设置' })]
