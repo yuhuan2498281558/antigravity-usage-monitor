@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {extractModelSteps, normalizeCachedStep, speedMetric, summarizeSpeed, summarizeTtft} from '../speed-metrics.mjs';
+import {extractLiveActivity, extractModelSteps, normalizeCachedStep, speedMetric, summarizeSpeed, summarizeTtft} from '../speed-metrics.mjs';
 
 function sample({total=12,ttft='2s',stream='10s',output=1100,thinking=100,response=1000,
   thinkingDuration='4s',tools=false,text=true,status='CORTEX_STEP_STATUS_DONE'}={}) {
@@ -154,4 +154,130 @@ test('compaction displays a valid rate and retains billing but is excluded from 
   assert.equal(step.outputTokens,1100);assert.equal(speedMetric(step).value,1100/12);
   assert.equal(summarizeSpeed([step]).sampleCount,0);
   assert.equal(summarizeTtft([step]).sampleCount,0);
+});
+
+test('extractLiveActivity covers thinking, partial streaming tool args, multi-tool batch progress, waiting, and post-tool reasoning',()=>{
+  // 1. Idle conversation returns null
+  assert.equal(extractLiveActivity([], false), null);
+
+  // 2. Streaming thinking
+  const thinkingStep = {
+    type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+    status: 'CORTEX_STEP_STATUS_GENERATING',
+    metadata: { createdAt: '2026-01-01T00:00:10Z' },
+    plannerResponse: { thinking: 'Analyzing the telemetry pipeline\nChecking LiveOverviewView layout' },
+  };
+  const actThink = extractLiveActivity([thinkingStep], true);
+  assert.equal(actThink.phase, 'thinking');
+  assert.equal(actThink.label, '推理中');
+  assert.match(actThink.detail, /Checking LiveOverviewView layout/);
+
+  // 3. Partial JSON tool call while streaming edit_file
+  const streamingToolStep = {
+    type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+    status: 'CORTEX_STEP_STATUS_STREAMING',
+    metadata: { createdAt: '2026-01-01T00:00:12Z' },
+    plannerResponse: {
+      thinking: 'done thinking',
+      toolCalls: [{ name: 'edit_file', argumentsJson: '{"Path":"f:\\\\ppt\\\\sidecars\\\\panel\\\\src\\\\views\\\\LiveOverviewView.js","Replacement":"const a = 1;' }],
+    },
+  };
+  const actPartialTool = extractLiveActivity([streamingToolStep], true);
+  assert.equal(actPartialTool.phase, 'tool');
+  assert.equal(actPartialTool.label, '修改文件');
+  assert.equal(actPartialTool.detail, 'LiveOverviewView.js');
+
+  // 4. Multi-tool batch execution progress ([1/3] -> [2/3] -> post-tool thinking)
+  const completedPlannerWith3Tools = {
+    type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+    status: 'CORTEX_STEP_STATUS_DONE',
+    metadata: { createdAt: '2026-01-01T00:00:10Z', finishedGeneratingAt: '2026-01-01T00:00:12Z' },
+    plannerResponse: {
+      toolCalls: [
+        { name: 'read_file', argumentsJson: JSON.stringify({ Path: '/repo/plugin.json' }) },
+        { name: 'run_command', argumentsJson: JSON.stringify({ CommandLine: 'npm test', toolSummary: '运行单元测试' }) },
+        { name: 'edit_file', argumentsJson: JSON.stringify({ Path: '/repo/main.mjs' }) },
+      ],
+    },
+  };
+  const toolResult1Done = {
+    type: 'CORTEX_STEP_TYPE_GENERIC',
+    status: 'CORTEX_STEP_STATUS_DONE',
+    metadata: { createdAt: '2026-01-01T00:00:12Z', completedAt: '2026-01-01T00:00:13Z' },
+  };
+  // After 1st tool finishes, 2nd tool (run_command) is active -> [2/3] 执行命令 · 运行单元测试 (npm test)
+  const actBatch2 = extractLiveActivity([completedPlannerWith3Tools, toolResult1Done], true);
+  assert.equal(actBatch2.phase, 'tool');
+  assert.equal(actBatch2.label, '执行命令');
+  assert.equal(actBatch2.stepProgress, '2/3');
+  assert.equal(actBatch2.detail, '运行单元测试 (npm test)');
+
+  // When all 3 tools are done and conversation is still running -> shows last completed tool & actual file/command
+  const toolResult2Done = { ...toolResult1Done, metadata: { completedAt: '2026-01-01T00:00:15Z' } };
+  const toolResult3Done = { ...toolResult1Done, metadata: { completedAt: '2026-01-01T00:00:16Z' } };
+  const actPostTools = extractLiveActivity(
+    [completedPlannerWith3Tools, toolResult1Done, toolResult2Done, toolResult3Done],
+    true
+  );
+  assert.equal(actPostTools.phase, 'thinking');
+  assert.equal(actPostTools.label, '修改文件');
+  assert.equal(actPostTools.detail, 'main.mjs');
+
+  // 5. Waiting for user confirmation on command step
+  const waitingStep = {
+    type: 'CORTEX_STEP_TYPE_RUN_COMMAND',
+    status: 'CORTEX_STEP_STATUS_WAITING',
+    metadata: {
+      createdAt: '2026-01-01T00:00:20Z',
+      toolCall: { name: 'run_command', argumentsJson: JSON.stringify({ toolSummary: '安装依赖包' }) },
+    },
+  };
+  const actWait = extractLiveActivity([waitingStep], true);
+  assert.equal(actWait.phase, 'waiting');
+  assert.equal(actWait.label, '等待确认 · 执行命令');
+  assert.equal(actWait.detail, '安装依赖包');
+
+  // 6. transcript.jsonl format (snake_case tool_calls + JSON-encoded string args + DONE status)
+  const transcriptPlannerStep = {
+    step_index: 7,
+    source: 'MODEL',
+    type: 'PLANNER_RESPONSE',
+    status: 'DONE',
+    created_at: '2026-11-10T10:29:49Z',
+    thinking: 'Inspecting project files',
+    tool_calls: [
+      {
+        name: 'read_file',
+        args: {
+          Path: '"f:\\\\ppt\\\\1111\\\\antigravity-usage-monitor\\\\plugin.json"',
+        },
+      },
+      {
+        name: 'run_command',
+        args: {
+          CommandLine: '"Get-ChildItem -Path \\"f:\\\\ppt\\""',
+          toolSummary: '"列出插件项目全部源文件"',
+        },
+      },
+    ],
+  };
+  const transcriptGenericDone = {
+    step_index: 8,
+    source: 'MODEL',
+    type: 'GENERIC',
+    status: 'DONE',
+    created_at: '2026-11-10T10:29:57Z',
+    content: 'Showing lines 1-12 of 12',
+  };
+  const actTranscript1 = extractLiveActivity([transcriptPlannerStep], true);
+  assert.equal(actTranscript1.phase, 'tool');
+  assert.equal(actTranscript1.label, '读取文件');
+  assert.equal(actTranscript1.stepProgress, '1/2');
+  assert.equal(actTranscript1.detail, 'plugin.json');
+
+  const actTranscript2 = extractLiveActivity([transcriptPlannerStep, transcriptGenericDone], true);
+  assert.equal(actTranscript2.phase, 'tool');
+  assert.equal(actTranscript2.label, '执行命令');
+  assert.equal(actTranscript2.stepProgress, '2/2');
+  assert.equal(actTranscript2.detail, '列出插件项目全部源文件 (Get-ChildItem -Path "f:\\ppt")');
 });

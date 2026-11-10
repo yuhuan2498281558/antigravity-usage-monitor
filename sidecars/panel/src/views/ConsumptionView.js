@@ -79,7 +79,20 @@ export const ConsumptionView = defineComponent({
         className: 'btn-primary',
         style: 'height: 26px; padding: 0 10px;',
         onClick: () => {
-          telemetryStore.setState({ selectedTimeRange: 'custom' });
+          const st = telemetryStore.getState();
+          const sMs = Number(st.customStartMs || 0);
+          const eMs = Number(st.customEndMs || 0);
+          if (sMs > 0 && eMs > 0 && sMs > eMs) {
+            startPicker.setValue(eMs);
+            endPicker.setValue(sMs);
+            telemetryStore.setState({
+              selectedTimeRange: 'custom',
+              customStartMs: eMs,
+              customEndMs: sMs,
+            });
+          } else {
+            telemetryStore.setState({ selectedTimeRange: 'custom' });
+          }
           fetchTelemetry({ force: true });
         },
       },
@@ -176,27 +189,24 @@ export const ConsumptionView = defineComponent({
       overviewSegBar.el,
     ]);
 
-    // --- Section 2: 历史趋势 (SVG 三次贝塞尔平滑曲线图 + 首/中/末三时间锚点) ---
+    // --- Section 2: 历史趋势 (交互式 SVG 平滑曲线图 + 悬停精确日期/小时浮层 + 多刻度时间轴) ---
     const trendRangeBadge = h('span', { className: 'cons-badge', text: '全部时间' });
+    const trendGranularityHint = h('span', {
+      className: 'text-muted text-mono',
+      style: 'font-size: 10.5px;',
+      text: '按小时 · 悬停查看明细',
+    });
     const trendChart = createTrendAreaChart();
-    const anchorStartTime = h('span', { className: 'text-muted text-mono', text: '00:00' });
-    const anchorStartVal = h('strong', { className: 'text-mono', text: '0' });
-    const anchorMidTime = h('span', { className: 'text-muted text-mono', text: '06:00' });
-    const anchorMidVal = h('strong', { className: 'text-mono', text: '0' });
-    const anchorEndTime = h('span', { className: 'text-muted text-mono', text: '12:00' });
-    const anchorEndVal = h('strong', { className: 'text-mono', text: '0' });
 
     const trendPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
-        h('span', { className: 'panel-title', text: '用量趋势' }),
-        trendRangeBadge,
+        h('span', { className: 'panel-title' }, [
+          h('span', { text: '用量趋势' }),
+          trendRangeBadge,
+        ]),
+        trendGranularityHint,
       ]),
       trendChart.el,
-      h('div', { className: 'trend-anchors' }, [
-        h('div', { className: 'trend-anchor-col' }, [anchorStartTime, anchorStartVal]),
-        h('div', { className: 'trend-anchor-col is-center' }, [anchorMidTime, anchorMidVal]),
-        h('div', { className: 'trend-anchor-col is-end' }, [anchorEndTime, anchorEndVal]),
-      ]),
     ]);
 
     // --- Section 3: 模型排行列表 ---
@@ -458,21 +468,17 @@ export const ConsumptionView = defineComponent({
         thinkingTokens,
       });
 
-      // 2. 同步历史趋势 SVG 面积图与首/中/末三时间锚点
+      // 2. 同步历史趋势交互式 SVG 面积图与粒度提示
       patchText(trendRangeBadge, preset?.label || rangeInfo.label || '全部时间');
       const trendSeries = cons.trendSeries || [];
+      const isHourlyTrend =
+        trendSeries[0]?.granularity === 'hour' ||
+        (trendSeries[0]?.label || '').includes(':');
+      patchText(
+        trendGranularityHint,
+        `${isHourlyTrend ? '按小时' : '按日'} (${trendSeries.length || 0}点) · 悬停查看`
+      );
       trendChart.update(trendSeries);
-      if (trendSeries.length > 0) {
-        const first = trendSeries[0];
-        const mid = trendSeries[Math.floor(trendSeries.length / 2)];
-        const last = trendSeries[trendSeries.length - 1];
-        patchText(anchorStartTime, first.label);
-        patchText(anchorStartVal, formatTokensPrecise(first.tokens));
-        patchText(anchorMidTime, mid.label);
-        patchText(anchorMidVal, formatTokensPrecise(mid.tokens));
-        patchText(anchorEndTime, last.label);
-        patchText(anchorEndVal, formatTokensPrecise(last.tokens));
-      }
 
       // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账）
       const models = (slice.modelBreakdown || [])

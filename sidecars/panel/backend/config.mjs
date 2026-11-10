@@ -38,6 +38,7 @@ export const REMOTE_CATALOG_CACHE_FILE = join(DATA_DIR, 'remote_pricing_cache.js
  * 本地对话记录目录与跨端深层统计缓存路径候选列表。
  */
 export const CONVERSATIONS_DIR = join(homedir(), '.gemini', 'antigravity', 'conversations');
+export const BRAIN_DIR = join(homedir(), '.gemini', 'antigravity', 'brain');
 export const DEEP_STATS_CACHE_CANDIDATES = [
   join(homedir(), '.gemini', 'antigravity-ide', 'brain', '.deep_stats_cache.json'),
   join(homedir(), '.gemini', 'antigravity', 'brain', '.deep_stats_cache.json'),
@@ -108,7 +109,9 @@ export function loadJson(filePath, fallback) {
 export function saveJson(filePath, data) {
   try {
     mkdirSync(DATA_DIR, { recursive: true });
-    writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+    const serialized =
+      filePath === CACHE_FILE ? JSON.stringify(data) : JSON.stringify(data, null, 2);
+    writeFileSync(filePath, serialized, 'utf8');
     return true;
   } catch (err) {
     console.error(`Failed writing ${filePath}: ${err.message}`);
@@ -116,16 +119,39 @@ export function saveJson(filePath, data) {
   }
 }
 
+const VALID_WEEKLY_MODES = new Set(['official', 'tokens', 'cost']);
+
+function sanitizeSettingNumber(val, fallback) {
+  const num = Number(val);
+  return Number.isFinite(num) && num > 0 ? num : fallback;
+}
+
 /**
- * 读取用户设置并与默认设置合并，同时剔除已废弃的历史字段 `speedMode`。
+ * 读取用户设置并与默认设置合并，同时剔除已废弃的历史字段 `speedMode` 并兜底非法数值。
  *
  * @returns {typeof DEFAULT_SETTINGS}
  */
 export function loadSettings() {
-  const { speedMode: _legacySpeedMode, ...settings } = loadJson(SETTINGS_FILE, {});
+  const raw = loadJson(SETTINGS_FILE, {});
+  const { speedMode: _legacySpeedMode, ...settings } =
+    raw && typeof raw === 'object' ? raw : {};
   const merged = { ...DEFAULT_SETTINGS, ...settings };
+  const mode = String(merged.weeklyLimitMode || '').trim();
   return {
     ...merged,
+    contextWindowLimit: sanitizeSettingNumber(
+      merged.contextWindowLimit,
+      DEFAULT_SETTINGS.contextWindowLimit
+    ),
+    weeklyTokenBudget: sanitizeSettingNumber(
+      merged.weeklyTokenBudget,
+      DEFAULT_SETTINGS.weeklyTokenBudget
+    ),
+    weeklyCostBudget: sanitizeSettingNumber(
+      merged.weeklyCostBudget,
+      DEFAULT_SETTINGS.weeklyCostBudget
+    ),
+    weeklyLimitMode: VALID_WEEKLY_MODES.has(mode) ? mode : DEFAULT_SETTINGS.weeklyLimitMode,
     showUpstreamModel: merged.showUpstreamModel === true,
     autoUpdatePlugin: merged.autoUpdatePlugin === true,
   };
@@ -146,25 +172,41 @@ export function roundMetric(value) {
 // ---------------------------------------------------------------------------
 
 const loadedTrajectoryCache = loadJson(CACHE_FILE, {});
+let initialCacheMigrated = false;
 
 /**
  * 内存中的会话轨迹步骤缓存：`cascadeId -> { signature, accountName, title, lastModifiedMs, diskMtimeMs, wasRunning, steps }`
  */
 export const trajectoryCache = Object.fromEntries(
-  Object.entries(loadedTrajectoryCache).map(([id, entry]) => [
-    id,
-    {
-      ...entry,
-      steps: inferCompactionStepModels((entry.steps || []).map(normalizeCachedStep)),
-    },
-  ])
+  Object.entries(loadedTrajectoryCache).map(([id, entry]) => {
+    const rawSteps = Array.isArray(entry?.steps) ? entry.steps : [];
+    const normalizedSteps = rawSteps.map((s) => {
+      const norm = normalizeCachedStep(s);
+      if (norm !== s) initialCacheMigrated = true;
+      return norm;
+    });
+    const finalSteps = inferCompactionStepModels(normalizedSteps);
+    for (let i = 0; i < finalSteps.length; i++) {
+      if (finalSteps[i] !== normalizedSteps[i]) {
+        initialCacheMigrated = true;
+        break;
+      }
+    }
+    return [
+      id,
+      {
+        ...entry,
+        steps: finalSteps,
+      },
+    ];
+  })
 );
 
 /**
  * 缓存状态与外部深层统计缓存 Memo。
  */
 export const cacheState = {
-  needsSave: JSON.stringify(trajectoryCache) !== JSON.stringify(loadedTrajectoryCache),
+  needsSave: initialCacheMigrated,
 };
 
 export const externalDeepStatsMemo = {

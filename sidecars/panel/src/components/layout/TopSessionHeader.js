@@ -6,12 +6,9 @@
 
 import { defineComponent } from '../../core/component.js';
 import { h, patchAttr, patchClasses, patchText } from '../../core/domPatch.js';
-import { formatUsd } from '../../core/formatters.js';
 import { createSvgIcon, patchSvgIcon } from '../../icons/SvgIcon.js';
 import {
   fetchTelemetry,
-  formatAgentLabel,
-  resolveScopedConversation,
   telemetryStore,
   triggerPluginUpdate,
 } from '../../store/telemetryStore.js';
@@ -97,59 +94,7 @@ export const TopSessionHeader = defineComponent({
       h('div', { className: 'session-right' }, [updateBtn, statusTag, refreshBtn]),
     ]);
 
-    // --- 方案 A：顶栏二级主/子代理切换条 (.agent-scope-bar，无子代理时自动隐藏) ---
-    const scopeAllBtnText = h('span', { text: '全部汇总' });
-    const scopeAllBtn = h(
-      'button',
-      {
-        type: 'button',
-        className: 'scope-pill-btn is-active',
-        onClick: () =>
-          uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' }),
-      },
-      [scopeAllBtnText]
-    );
-
-    const scopeMainBtnText = h('span', { text: '主代理' });
-    const scopeMainBtn = h(
-      'button',
-      {
-        type: 'button',
-        className: 'scope-pill-btn',
-        onClick: () => uiStore.setState({ selectedAgentScope: 'main' }),
-      },
-      [scopeMainBtnText]
-    );
-
-    const subagentSelect = CustomSelect({
-      modelValue: '',
-      icon: 'cpu',
-      placeholder: '子代理 (0)',
-      className: 'scope-subagent-select',
-      options: [],
-      onUpdateModelValue: (nextSubId) => {
-        if (nextSubId) {
-          uiStore.setState({ selectedAgentScope: nextSubId });
-        }
-      },
-    });
-
-    const scopeRightText = h('span', { className: 'agent-scope-right text-mono', text: '' });
-
-    const scopeBarEl = h(
-      'div',
-      { className: 'agent-scope-bar', hidden: true },
-      [
-        h('div', { className: 'agent-scope-left' }, [
-          scopeAllBtn,
-          scopeMainBtn,
-          subagentSelect.el,
-        ]),
-        scopeRightText,
-      ]
-    );
-
-    const headerEl = h('header', { className: 'top-session-stack' }, [headerRowEl, scopeBarEl]);
+    const headerEl = h('header', { className: 'top-session-stack' }, [headerRowEl]);
 
     let lastActiveCascadeId = '';
 
@@ -183,45 +128,9 @@ export const TopSessionHeader = defineComponent({
         options,
       });
 
-      const {
-        hasSubagents,
-        effectiveScope,
-        subagents,
-        mainAgent,
-        aggregated,
-        scopedConv,
-      } = resolveScopedConversation(telemetry, uiSt.selectedAgentScope, uiSt.ctxInspectorAgentId);
-
-      patchAttr(scopeBarEl, 'hidden', !hasSubagents);
-      if (hasSubagents) {
-        patchText(scopeAllBtnText, `全部 (${aggregated?.stepCount ?? 0})`);
-        patchClasses(scopeAllBtn, { 'is-active': effectiveScope === 'all' });
-
-        patchText(scopeMainBtnText, `主代理 (${mainAgent?.stepCount ?? 0})`);
-        patchClasses(scopeMainBtn, { 'is-active': effectiveScope === 'main' });
-
-        const isSubSelected = effectiveScope !== 'all' && effectiveScope !== 'main';
-        patchClasses(subagentSelect.el, { 'is-active-sub': isSubSelected });
-        const subOptions = subagents.map((s) => ({
-          value: s.agentId,
-          label: formatAgentLabel(s),
-          meta: `${s.stepCount || 0}步 · 窗${s.context?.usedPct ?? 0}%`,
-        }));
-        subagentSelect.setProps({
-          modelValue: isSubSelected ? effectiveScope : '',
-          placeholder: `子代理 (${subagents.length})`,
-          options: subOptions,
-        });
-
-        patchText(
-          scopeRightText,
-          formatUsd(scopedConv?.sessionCostUsd || 0, {
-            unpricedCalls: scopedConv?.sessionUnpricedCalls,
-          })
-        );
-      } else {
-        subagentSelect.close();
-      }
+      const actConv = telemetry?.activeConversation;
+      const hasSubagents = Boolean(actConv?.hasSubagents || (actConv?.subagentCount || 0) > 0);
+      const aggregated = actConv?.aggregated;
 
       const cloudStatus = telemetry?.cloudStatus;
       const hasUpdate = Boolean(cloudStatus?.updateAvailable);
@@ -308,21 +217,14 @@ export const TopSessionHeader = defineComponent({
       () => renderHeaderState()
     );
 
-    const unsubUi = uiStore.subscribe(
-      (st) => st.selectedAgentScope,
-      () => renderHeaderState()
-    );
-
     onCleanup(() => {
       unsubTelemetry();
-      unsubUi();
       convSelect.destroy();
-      subagentSelect.destroy();
     });
 
     return {
       el: headerEl,
-      refs: { convSelect, subagentSelect, statusTag, refreshBtn, scopeBarEl },
+      refs: { convSelect, statusTag, refreshBtn },
     };
   },
 });

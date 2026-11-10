@@ -87,10 +87,15 @@ export function formatCompactDateTime(ms) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export function escapeHtml(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+export function formatElapsedSec(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const remS = s % 60;
+  if (m < 60) {
+    return `${m}m ${String(remS).padStart(2, '0')}s`;
+  }
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return `${h}h ${remM}m`;
 }

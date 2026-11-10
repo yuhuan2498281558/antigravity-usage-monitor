@@ -73,8 +73,7 @@
   padding-right: 0;
 }
 
-.cons-col.is-bordered-col,
-.cons-col.is-right-col {
+.cons-col.is-bordered-col {
   border-left: 1px solid var(--border-hairline);
 }
 
@@ -184,16 +183,25 @@
   height: 5px;
 }
 
-/* --- 4. 历史趋势 SVG 平滑曲线图 (Historical Trend SVG Chart) --- */
+/* --- 4. 历史趋势交互式 SVG 平滑曲线图 (Interactive Historical Trend SVG Chart) --- */
 .trend-chart-wrap {
   position: relative;
   width: 100%;
-  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.trend-plot-stage {
+  position: relative;
+  width: 100%;
+  padding-top: 6px;
+  cursor: crosshair;
 }
 
 .trend-svg {
   width: 100%;
-  height: 112px;
+  height: 118px;
   display: block;
   overflow: visible;
 }
@@ -210,10 +218,31 @@
   stroke-linecap: round;
 }
 
+.trend-node-dot {
+  fill: var(--surface-panel);
+  stroke: var(--ctx-cached);
+  stroke-width: 1.4;
+}
+
 .trend-peak-dot {
   fill: var(--ctx-cached);
   stroke: var(--surface-panel);
   stroke-width: 1.5;
+}
+
+.trend-hover-line {
+  stroke: var(--accent-primary);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.trend-hover-dot {
+  fill: var(--accent-primary);
+  stroke: var(--surface-panel);
+  stroke-width: 1.8;
+  pointer-events: none;
 }
 
 .trend-peak-pill {
@@ -226,31 +255,113 @@
   padding: 1px 6px;
   color: var(--text-primary);
   background: color-mix(in srgb, var(--ctx-cached) 16%, var(--surface-panel));
-  border: none;
+  border: 1px solid color-mix(in srgb, var(--ctx-cached) 30%, var(--border-hairline));
   border-radius: var(--radius-xs);
   pointer-events: none;
   white-space: nowrap;
+  z-index: 2;
 }
 
-.trend-anchors {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  padding-top: 2px;
-  font-size: 11px;
-}
-
-.trend-anchor-col {
+.trend-tooltip {
+  position: absolute;
+  top: 0;
+  left: var(--tip-x, 50%);
+  transform: translateX(var(--tip-shift, -50%));
+  min-width: 148px;
+  max-width: 240px;
+  padding: 5px 8px;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+  pointer-events: none;
+  z-index: 15;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
 }
 
-.trend-anchor-col.is-center {
+.trend-tip-head {
+  display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
 }
 
-.trend-anchor-col.is-end {
-  align-items: flex-end;
+.trend-tip-time {
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.trend-tip-calls {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.trend-tip-main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.trend-tip-tokens {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-primary);
+}
+
+.trend-tip-cost {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.trend-tip-sub {
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  border-top: 1px solid var(--border-hairline);
+  padding-top: 2px;
+  margin-top: 1px;
+}
+
+.trend-x-axis {
+  position: relative;
+  width: 100%;
+  height: 18px;
+  user-select: none;
+}
+
+.trend-x-tick {
+  position: absolute;
+  top: 0;
+  left: var(--tick-x, 0%);
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  line-height: 16px;
+  cursor: pointer;
+  transition: color var(--dur-instant) var(--ease-fast);
+}
+
+.trend-x-tick.is-start {
+  transform: translateX(0);
+}
+
+.trend-x-tick.is-end {
+  transform: translateX(-100%);
+}
+
+.trend-x-tick:hover,
+.trend-x-tick.is-hovered {
+  color: var(--accent-primary);
+  font-weight: 600;
 }
 
 /* --- 5. 模型与数据来源明细行容器 (Popular Models & Sources Item Rows) --- */
