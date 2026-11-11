@@ -1,14 +1,14 @@
 /*
  * 全景消耗统计视图样式表 (views-consumption.css).
  * 包含：
- * 1. 消费概览顶栏与 3+2 统一指标矩阵 (.cons-overview-head, .cons-unified-matrix, .cons-split-*, .cons-col)
+ * 1. 消费概览顶栏与 3+3 统一指标矩阵 (.cons-overview-head, .cons-unified-matrix, .cons-split-3, .cons-col)
  * 2. 4 段比例条与圆点色块 (.dot-swatch, .cons-seg-bar)
  * 3. 热门模型与数据来源列表项样式 (.cons-row-*, .cons-share-pill, .cons-item-*)
  * 4. 历史趋势纯 SVG 平滑曲线图与峰值胶囊 (.trend-*)
  * 5. 12 个月垂直堆叠柱状图与月度图例 (.monthly-*, .month-*)
  */
 
-/* --- 1. 消费概览顶栏与 3+2 组合指标矩阵 (Consumption Overview Matrix) --- */
+/* --- 1. 消费概览顶栏与 3+3 组合指标矩阵 (Consumption Overview Matrix) --- */
 .cons-overview-head {
   flex-wrap: wrap;
   gap: 6px;
@@ -48,13 +48,26 @@
   grid-template-columns: repeat(3, 1fr);
 }
 
-.cons-split-2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-}
-
 .cons-matrix-bottom {
   border-top: 1px solid var(--border-hairline);
+}
+
+.cons-matrix-bottom .cons-col {
+  gap: 4px;
+}
+
+@media (max-width: 350px) {
+  .cons-matrix-bottom.cons-split-3 {
+    grid-template-columns: 1fr;
+  }
+  .cons-matrix-bottom .cons-col {
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .cons-matrix-bottom .cons-col.is-bordered-col {
+    border-left: none;
+    border-top: 1px solid var(--border-hairline);
+  }
 }
 
 .cons-col {
@@ -105,10 +118,34 @@
   letter-spacing: -0.02em;
 }
 
-.cons-mid-num {
-  font-size: 13px;
-  font-weight: 700;
+.cons-sub-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cons-sub-head > span {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.cons-sub-label {
+  font-size: 11.5px;
+  font-weight: 600;
   color: var(--text-primary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.cons-mid-num {
+  font-size: 14.5px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--text-primary);
+  letter-spacing: -0.015em;
+  white-space: nowrap;
 }
 
 /* --- 2. 4 段比例条与圆点色块 (Four-Segment Bar & Dot Swatches) --- */

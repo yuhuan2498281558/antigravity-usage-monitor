@@ -51,6 +51,22 @@ export const App = defineComponent({
       stageEl,
     ]);
 
+    function syncStepsBadge() {
+      const uiSt = uiStore.getState();
+      const scopeForBadge = uiSt.activeView === 'steps' ? uiSt.selectedAgentScope : 'all';
+      const { scopedConv } = resolveScopedConversation(
+        telemetryStore.getState().telemetry,
+        scopeForBadge,
+        uiSt.ctxInspectorAgentId
+      );
+      const stepCount = scopedConv?.stepCount ?? 0;
+      topPillNav.setProps({
+        items: VIEW_TABS.map((t) =>
+          t.value === 'steps' ? { ...t, badge: stepCount > 0 ? stepCount : '' } : t
+        ),
+      });
+    }
+
     const unsubUi = uiStore.subscribe(
       (st) => st.activeView,
       (activeView) => {
@@ -65,23 +81,12 @@ export const App = defineComponent({
         } else if (activeView === 'steps') {
           stepsView.refs?.stepsScroll?.refresh();
           stepsView.refs?.modelsScroll?.refresh();
+        } else if (activeView === 'settings') {
+          settingsView.refs?.viewScrollbar?.refresh();
         }
+        syncStepsBadge();
       }
     );
-
-    function syncStepsBadge() {
-      const { scopedConv } = resolveScopedConversation(
-        telemetryStore.getState().telemetry,
-        uiStore.getState().selectedAgentScope,
-        uiStore.getState().ctxInspectorAgentId
-      );
-      const stepCount = scopedConv?.stepCount ?? 0;
-      topPillNav.setProps({
-        items: VIEW_TABS.map((t) =>
-          t.value === 'steps' ? { ...t, badge: stepCount > 0 ? stepCount : '' } : t
-        ),
-      });
-    }
 
     const unsubStepCount = telemetryStore.subscribe(
       (st) => ({

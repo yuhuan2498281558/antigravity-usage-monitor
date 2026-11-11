@@ -8,7 +8,7 @@ import { h, patchAttr, patchClasses, patchKeyedList, patchText } from '../../cor
 
 export const SegmentedControl = defineComponent({
   name: 'SegmentedControl',
-  setup({ getProps, emit }) {
+  setup({ getProps, setProps, emit }) {
     const rootEl = h('div', {
       className: 'segmented',
       role: 'group',
@@ -27,6 +27,7 @@ export const SegmentedControl = defineComponent({
             onClick: (e) => {
               e.stopPropagation();
               if (getProps().modelValue !== opt.value) {
+                setProps({ modelValue: opt.value });
                 emit('update:modelValue', opt.value);
               }
             },

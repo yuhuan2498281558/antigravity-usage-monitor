@@ -4,7 +4,14 @@
  */
 
 import { defineComponent } from '../../core/component.js';
-import { h, patchAttr, patchClasses, patchKeyedList, patchText } from '../../core/domPatch.js';
+import {
+  h,
+  isEventInside,
+  patchAttr,
+  patchClasses,
+  patchKeyedList,
+  patchText,
+} from '../../core/domPatch.js';
 import { formatCompactDateTime } from '../../core/formatters.js';
 import { createSvgIcon } from '../../icons/SvgIcon.js';
 
@@ -118,9 +125,9 @@ export const CustomDateTimePicker = defineComponent({
     function adjustTime(part, delta) {
       const cur = new Date(getProps().modelValue || Date.now());
       if (part === 'hour') {
-        cur.setHours((cur.getHours() + delta + 24) % 24);
+        cur.setHours(cur.getHours() + delta);
       } else {
-        cur.setMinutes((cur.getMinutes() + delta + 60) % 60);
+        cur.setMinutes(cur.getMinutes() + delta);
       }
       const nextMs = cur.getTime();
       viewYear = cur.getFullYear();
@@ -251,7 +258,7 @@ export const CustomDateTimePicker = defineComponent({
     }
 
     const handleDocClick = (e) => {
-      if (isOpen && !rootEl.contains(e.target)) {
+      if (isOpen && !isEventInside(e, rootEl)) {
         togglePopover(false);
       }
     };
@@ -267,16 +274,6 @@ export const CustomDateTimePicker = defineComponent({
       el: rootEl,
       refs: { triggerBtn, triggerText, popoverEl, daysGrid, hourValSpan, minValSpan },
       onPropsChange: syncDisplay,
-      getValue: () => Number(getProps().modelValue || 0),
-      methods: {
-        open: () => togglePopover(true),
-        close: () => togglePopover(false),
-        selectDayByOffset: (daysDelta) => {
-          const cur = new Date(getProps().modelValue || Date.now());
-          cur.setDate(cur.getDate() + daysDelta);
-          emit('update:modelValue', cur.getTime());
-        },
-      },
     };
   },
 });

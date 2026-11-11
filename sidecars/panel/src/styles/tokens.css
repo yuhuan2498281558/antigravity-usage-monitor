@@ -4,26 +4,24 @@
  * eliminating hardcoded hex colors across components and views.
  */
 
-:root {
+:root,
+:host {
   /* Architectural Geometry: Only Top Nav uses --radius-pill */
   --radius-pill: 999px;
   --radius-sm: 4px;
   --radius-xs: 2px;
 
-  /* Host-Bridged Surfaces (Clean, zero-muddy-gray light mode) */
+  /* Host-Bridged Surfaces (Clean, zero-muddy-gray light mode & safe dark fallback) */
   --surface-bg: var(--background, hsl(0 0% 100%));
-  --surface-panel: var(--card, hsl(0 0% 100%));
+  --surface-panel: var(--card, var(--background, hsl(0 0% 100%)));
   --surface-subtle: color-mix(in srgb, var(--surface-panel) 97%, var(--text-primary) 3%);
   --surface-track: color-mix(in srgb, var(--border-hairline) 42%, var(--surface-panel));
-  --surface-elevated: var(--surface-panel);
   --surface-hover: color-mix(in srgb, var(--accent-primary) 6%, var(--surface-panel));
   --surface-active: color-mix(in srgb, var(--accent-primary) 12%, var(--surface-panel));
-  --surface-backdrop: color-mix(in srgb, var(--surface-bg) 78%, transparent);
 
   /* Crisp 1px Hairline Borders */
   --border-hairline: color-mix(in srgb, var(--border, hsl(214 18% 88%)) 82%, var(--surface-panel));
   --border-strong: color-mix(in srgb, var(--border-hairline) 72%, var(--text-primary) 28%);
-  --border-focus: var(--accent-primary);
 
   /* Typography Hierarchy */
   --text-primary: var(--foreground, hsl(215 22% 15%));
@@ -46,10 +44,8 @@
   --metric-warn-soft: color-mix(in srgb, var(--metric-warn) 15%, transparent);
 
   --metric-danger: var(--destructive, hsl(0 74% 50%));
-  --metric-danger-soft: color-mix(in srgb, var(--metric-danger) 15%, transparent);
 
   /* Context Window 10-Channel Palette */
-  --ctx-messages: hsl(217 82% 51%);
   --ctx-assistant: hsl(217 82% 54%);
   --ctx-tool-results: hsl(192 82% 43%);
   --ctx-user-input: hsl(245 72% 62%);
@@ -69,7 +65,7 @@
 
   /* Elevation & Shadows */
   --shadow-popover: 0 4px 12px rgb(0 0 0 / 0.22);
-  --shadow-glider: 0 1px 2px rgb(0 0 0 / 0.14);
+  --shadow-overlay: 0 16px 38px rgb(0 0 0 / 0.38), 0 3px 10px rgb(0 0 0 / 0.22);
 
   /* Fast Hardware-Accelerated Motion Tokens */
   --ease-fast: cubic-bezier(0.22, 1, 0.36, 1);
@@ -78,10 +74,8 @@
   --dur-normal: 180ms;
 
   /* Spacing & Density */
-  --space-1: 4px;
   --space-2: 6px;
   --space-3: 8px;
   --space-4: 10px;
   --space-5: 12px;
-  --space-6: 14px;
 }

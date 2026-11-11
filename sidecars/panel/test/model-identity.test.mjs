@@ -158,7 +158,7 @@ test('old ambiguous Argon cache is persisted as unresolved while retaining moder
   await h.buildTelemetryPayloadInternal('test');
   assert.equal(h.state.saves.length,1,'do not rewrite identical migrated cache every poll');
   h.state.trajectories.test = {trajectory:{steps:[step(211,FLASH,true)]}};
-  const restored = await h.buildTelemetryPayloadInternal('test');
+  const restored = await h.buildTelemetryPayloadInternal('test', true);
   assert.equal(restored.activeConversation.activeModelShort,'flash-3.8-high·压缩');
   assert.equal(restored.consumption.account.unpricedCalls,0);
 });

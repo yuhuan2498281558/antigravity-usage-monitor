@@ -1,7 +1,7 @@
 /**
  * @fileoverview Bespoke custom scrollbar component (零原生滚动条).
  * Hides native OS scrollbars completely and renders a precision 4px floating
- * rail + GPU-translated thumb with drag, track-jump, and modelValue ratio emit.
+ * rail + GPU-translated thumb with drag and track-jump support.
  */
 
 import { defineComponent } from '../../core/component.js';
@@ -9,7 +9,7 @@ import { h, patchClasses, patchStyleVar } from '../../core/domPatch.js';
 
 export const CustomScrollbar = defineComponent({
   name: 'CustomScrollbar',
-  setup({ getProps, emit, onCleanup }) {
+  setup({ getProps, onCleanup }) {
     const contentEl = getProps().contentEl || h('div');
     contentEl.classList.add('custom-scroll-content');
 
@@ -61,11 +61,6 @@ export const CustomScrollbar = defineComponent({
 
     function onContentScroll() {
       syncThumb();
-      const overflow = (contentEl.scrollHeight || 0) - (contentEl.clientHeight || 0);
-      if (overflow > 1) {
-        const ratio = +Math.max(0, Math.min(1, (contentEl.scrollTop || 0) / overflow)).toFixed(3);
-        emit('update:modelValue', ratio);
-      }
     }
 
     function onDocMouseMove(e) {
@@ -162,12 +157,6 @@ export const CustomScrollbar = defineComponent({
       methods: {
         refresh() {
           scheduleSyncThumb();
-        },
-        scrollToRatio(ratio) {
-          const r = Math.max(0, Math.min(1, Number(ratio || 0)));
-          const overflow = Math.max(0, (contentEl.scrollHeight || 0) - (contentEl.clientHeight || 0));
-          contentEl.scrollTop = Math.round(r * overflow);
-          syncThumb();
         },
       },
     };

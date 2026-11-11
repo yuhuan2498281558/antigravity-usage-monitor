@@ -8,15 +8,6 @@ export function defineComponent({ name, setup }) {
   return function createInstance(initialProps = {}) {
     let props = { ...initialProps };
     const cleanups = [];
-    const eventHandlers = new Map();
-
-    function on(event, fn) {
-      if (!eventHandlers.has(event)) {
-        eventHandlers.set(event, new Set());
-      }
-      eventHandlers.get(event).add(fn);
-      return () => eventHandlers.get(event)?.delete(fn);
-    }
 
     function emit(event, payload) {
       // Support Vue-style onUpdateModelValue / onChange prop callbacks
@@ -28,12 +19,6 @@ export function defineComponent({ name, setup }) {
           props.onChange(payload);
         }
       }
-      const handlers = eventHandlers.get(event);
-      if (handlers) {
-        for (const fn of handlers) {
-          fn(payload);
-        }
-      }
     }
 
     function onCleanup(fn) {
@@ -42,15 +27,11 @@ export function defineComponent({ name, setup }) {
       }
     }
 
-    const setupResult = setup({
-      getProps: () => props,
-      emit,
-      onCleanup,
-    });
+    let setupResult = null;
 
     function setProps(nextProps = {}) {
       props = { ...props, ...nextProps };
-      if (typeof setupResult.onPropsChange === 'function') {
+      if (setupResult && typeof setupResult.onPropsChange === 'function') {
         setupResult.onPropsChange(props);
       }
     }
@@ -59,11 +40,12 @@ export function defineComponent({ name, setup }) {
       setProps({ modelValue: nextValue });
     }
 
-    function getValue() {
-      return typeof setupResult.getValue === 'function'
-        ? setupResult.getValue()
-        : props.modelValue;
-    }
+    setupResult = setup({
+      getProps: () => props,
+      setProps,
+      emit,
+      onCleanup,
+    });
 
     function destroy() {
       for (const fn of cleanups.splice(0)) {
@@ -73,7 +55,6 @@ export function defineComponent({ name, setup }) {
           console.error(`[${name}] cleanup error:`, err);
         }
       }
-      eventHandlers.clear();
       if (setupResult.el?.parentNode) {
         setupResult.el.parentNode.removeChild(setupResult.el);
       }
@@ -83,11 +64,8 @@ export function defineComponent({ name, setup }) {
       name,
       el: setupResult.el,
       refs: setupResult.refs || {},
-      on,
-      emit,
       setProps,
       setValue,
-      getValue,
       destroy,
       ...setupResult.methods,
     };

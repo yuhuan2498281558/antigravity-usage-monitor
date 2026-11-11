@@ -1,0 +1,589 @@
+/*
+ * 双栖模式顶栏胶囊与悬浮面板样式表 (overlay.css).
+ * 严格遵循单层微边框与语义变量规范（零硬编码色值、零 Emoji、硬件加速合成层动画）。
+ */
+
+/* --- 1. 顶栏胶囊宿主容器 (Titlebar Capsule Host) --- */
+:host(.wm-capsule-host) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  flex-shrink: 0;
+  vertical-align: middle;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+  user-select: none;
+  font-family: "Google Sans Flex", "Google Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 12px;
+  font-weight: 450;
+  font-stretch: 100%;
+  font-variation-settings: normal;
+  line-height: 18px;
+  letter-spacing: 0.015em;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  color: var(--text-primary);
+  z-index: 2147482900;
+}
+
+:host(.wm-capsule-host[data-dock="flow"]) {
+  position: relative;
+  margin-right: 4px;
+}
+
+:host(.wm-capsule-host[data-dock="fixed"]) {
+  position: fixed;
+  top: 6px;
+  right: 144px;
+}
+
+@keyframes wm-dot-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.38;
+  }
+}
+
+/* 左侧多会话实时状态触发器（无边框、与宿主顶栏按钮同高 28px、整数行高防压扁） */
+.wm-multi-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  margin: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  outline: none;
+  box-shadow: none;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 450;
+  line-height: 18px;
+  letter-spacing: 0.015em;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  white-space: nowrap;
+  contain: layout style;
+  transition:
+    background-color var(--dur-instant) var(--ease-fast),
+    color var(--dur-instant) var(--ease-fast);
+}
+
+.wm-multi-btn[hidden],
+.wm-cap-slot[hidden],
+.wm-sep[hidden] {
+  display: none !important;
+}
+
+.wm-multi-btn:hover {
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  color: var(--text-primary);
+}
+
+.wm-multi-btn.is-open {
+  background: color-mix(in srgb, var(--text-primary) 11%, transparent);
+  color: var(--text-primary);
+}
+
+.wm-multi-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--text-secondary) 44%, transparent);
+  flex-shrink: 0;
+}
+
+.wm-multi-btn.is-running .wm-multi-dot {
+  background: var(--accent-primary);
+  animation: wm-dot-pulse 1.5s ease-in-out infinite;
+}
+
+.wm-multi-btn.is-waiting .wm-multi-dot {
+  background: var(--metric-warn);
+  animation: wm-dot-pulse 1.5s ease-in-out infinite;
+}
+
+.wm-multi-label {
+  display: inline-block;
+  min-width: 46px;
+  line-height: 18px;
+  text-align: left;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.wm-multi-btn.is-running .wm-multi-label,
+.wm-multi-btn.is-waiting .wm-multi-label {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.wm-capsule-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 9px;
+  margin: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  outline: none;
+  box-shadow: none;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 450;
+  line-height: 18px;
+  letter-spacing: 0.015em;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  white-space: nowrap;
+  contain: layout style;
+  transition:
+    background-color var(--dur-instant) var(--ease-fast),
+    color var(--dur-instant) var(--ease-fast);
+}
+
+.wm-capsule-btn:hover {
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  color: var(--text-primary);
+}
+
+.wm-capsule-btn.is-open {
+  background: color-mix(in srgb, var(--text-primary) 11%, transparent);
+  color: var(--text-primary);
+}
+
+/* 右侧胶囊通用槽位容器与按指标预占定宽（严格防止动态数值跳动，保留舒展字间距） */
+.wm-cap-slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  line-height: 18px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.wm-slot-text {
+  display: inline-block;
+  line-height: 18px;
+  letter-spacing: 0.015em;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* 环形上下文指示器（固定预占宽度 50px：14px 环 + 5px 间距 + 31px 百分比槽位） */
+.wm-ctx-seg {
+  justify-content: center;
+  gap: 5px;
+  width: 50px;
+}
+
+.wm-ring-svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  transform: rotate(-90deg);
+}
+
+.wm-ring-track {
+  fill: none;
+  stroke: color-mix(in srgb, var(--text-secondary) 24%, transparent);
+  stroke-width: 2;
+}
+
+.wm-ring-fill {
+  fill: none;
+  stroke: var(--accent-primary);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition:
+    stroke-dashoffset var(--dur-normal) var(--ease-fast),
+    stroke var(--dur-fast) var(--ease-fast);
+}
+
+.wm-ring-fill.tone-warn {
+  stroke: var(--metric-warn);
+}
+
+.wm-ring-fill.tone-danger {
+  stroke: var(--metric-danger);
+}
+
+.wm-ctx-pct {
+  min-width: 27px;
+  max-width: 31px;
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.wm-sep {
+  width: 1px;
+  height: 12px;
+  background: color-mix(in srgb, var(--text-secondary) 26%, transparent);
+  flex-shrink: 0;
+}
+
+/* 速度槽位（固定预占宽度 58px 居中对齐） */
+.wm-seg-speed {
+  width: 58px;
+}
+
+.wm-speed-text {
+  width: 58px;
+  text-align: center;
+}
+
+.wm-seg-speed.state-running {
+  color: var(--metric-speed);
+  font-weight: 500;
+}
+
+/* 首字延迟槽位（固定预占宽度 46px 居中对齐，覆盖 0.85s ~ 105s） */
+.wm-seg-ttft {
+  width: 46px;
+}
+
+.wm-ttft-text {
+  width: 46px;
+  text-align: center;
+}
+
+/* 本次费用槽位（固定预占宽度 52px 居中对齐，覆盖 <$0.001 ~ $99.99） */
+.wm-seg-cost {
+  width: 52px;
+}
+
+.wm-cost-text {
+  width: 52px;
+  text-align: center;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* 配额槽位（固定预占宽度 52px 居中对齐，完整容纳 余 100% / 余 --% 且在任意槽位对称） */
+.wm-seg-quota {
+  width: 52px;
+}
+
+.wm-quota-text {
+  width: 52px;
+  text-align: center;
+}
+
+.wm-cap-slot.tone-warn,
+.wm-cap-slot.tone-warn .wm-slot-text {
+  color: var(--metric-warn);
+  font-weight: 500;
+}
+
+.wm-cap-slot.tone-danger,
+.wm-cap-slot.tone-danger .wm-slot-text {
+  color: var(--metric-danger);
+  font-weight: 500;
+}
+
+/* 右上角绝对定位更新圆点，不参与文档流，零宽度抖动 */
+.wm-update-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--metric-ok);
+  pointer-events: none;
+}
+
+/* 四级响应式迟滞折叠（基于可见槽位次序 data-vis-rank 与分隔线次序 data-sep-for-rank 动态折叠） */
+:host(.wm-capsule-host[data-layout="compact"]) .wm-cap-slot[data-vis-rank="3"],
+:host(.wm-capsule-host[data-layout="compact"]) .wm-sep[data-sep-for-rank="3"] {
+  display: none !important;
+}
+
+:host(.wm-capsule-host[data-layout="minimal"]) .wm-cap-slot[data-vis-rank="2"],
+:host(.wm-capsule-host[data-layout="minimal"]) .wm-cap-slot[data-vis-rank="3"],
+:host(.wm-capsule-host[data-layout="minimal"]) .wm-sep[data-sep-for-rank="2"],
+:host(.wm-capsule-host[data-layout="minimal"]) .wm-sep[data-sep-for-rank="3"],
+:host(.wm-capsule-host[data-layout="minimal"]) .wm-multi-label {
+  display: none !important;
+}
+
+:host(.wm-capsule-host[data-layout="minimal"]) .wm-multi-btn,
+:host(.wm-capsule-host[data-layout="ring-only"]) .wm-multi-btn {
+  padding: 0 7px;
+}
+
+:host(.wm-capsule-host[data-layout="ring-only"]) .wm-cap-slot[data-vis-rank="2"],
+:host(.wm-capsule-host[data-layout="ring-only"]) .wm-cap-slot[data-vis-rank="3"],
+:host(.wm-capsule-host[data-layout="ring-only"]) .wm-sep[data-sep-for-rank="2"],
+:host(.wm-capsule-host[data-layout="ring-only"]) .wm-sep[data-sep-for-rank="3"],
+:host(.wm-capsule-host[data-layout="ring-only"]) .wm-cap-slot[data-vis-rank="1"] .wm-ctx-pct,
+:host(.wm-capsule-host[data-layout="ring-only"]) .wm-multi-label {
+  display: none !important;
+}
+
+:host(.wm-capsule-host[data-layout="ring-only"]) .wm-capsule-btn {
+  padding: 0 6px;
+}
+
+:host(.wm-capsule-host[data-layout="ring-only"]) .wm-cap-slot[data-vis-rank="1"].wm-ctx-seg {
+  width: 14px;
+}
+
+/* --- 2. 顶层浮层传送门宿主 (Body Portal Host: Multi-Session HUD, Tooltip & Full 4-Tab Popover) --- */
+:host(.wm-portal-host) {
+  position: fixed;
+  inset: 0;
+  width: 0;
+  height: 0;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 2147483000;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+  font-size: 12.5px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  color: var(--text-primary);
+}
+
+@keyframes wm-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.wm-popover-panel {
+  position: fixed;
+  top: 42px;
+  left: 12px;
+  width: min(492px, calc(100vw - 24px));
+  height: min(588px, calc(100vh - 54px));
+  max-height: calc(100vh - 54px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-overlay);
+  pointer-events: auto;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+  transform-origin: top right;
+  animation: wm-popover-in var(--dur-fast) var(--ease-fast);
+}
+
+.wm-popover-panel .app-shell {
+  height: 100%;
+  max-height: 100%;
+  max-width: none;
+}
+
+/* 顶栏胶囊悬停全景概览浮层（复用实时概览三卡片架构，全槽位预占，仅就地更新节点不跳动） */
+.wm-hover-tip {
+  position: fixed;
+  top: 42px;
+  left: 12px;
+  width: min(492px, calc(100vw - 24px));
+  max-height: calc(100vh - 54px);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: var(--surface-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-overlay);
+  pointer-events: none;
+  overflow: hidden;
+  contain: layout style;
+  z-index: 2147483001;
+  transform-origin: top right;
+  animation: wm-popover-in var(--dur-instant) var(--ease-fast);
+}
+
+/* 左侧在线多会话实时看板浮层（单层无套娃细线卡片，仅显示在线运行会话，留足呼吸感） */
+.wm-multi-panel {
+  position: fixed;
+  top: 42px;
+  left: 12px;
+  width: min(484px, calc(100vw - 24px));
+  max-height: calc(100vh - 54px);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: var(--surface-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-overlay);
+  pointer-events: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-app-region: no-drag;
+  contain: layout style;
+  z-index: 2147483002;
+  transform-origin: top left;
+  animation: wm-popover-in var(--dur-instant) var(--ease-fast);
+}
+
+.wm-popover-panel.is-instant,
+.wm-hover-tip.is-instant,
+.wm-multi-panel.is-instant {
+  animation: none !important;
+}
+
+.wm-hover-tip .cell-label,
+.wm-hover-tip .legend-item,
+.wm-hover-tip .legend-left,
+.wm-hover-tip .panel-header > span {
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.wm-hover-tip .panel-header > span:first-child:not(.panel-title) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wm-hover-quota-pools {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.wm-hover-quota-foot {
+  font-size: 11px;
+  padding-top: 2px;
+}
+
+.wm-pin-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent-primary);
+  background: var(--accent-primary-soft);
+  border-radius: var(--radius-xs);
+  flex-shrink: 0;
+}
+
+.wm-session-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  border-radius: var(--radius-xs);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.wm-session-tag.is-here {
+  color: var(--accent-primary);
+  background: var(--accent-primary-soft);
+}
+
+.wm-task-metrics {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.wm-multi-header {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+/* 多会话单层面板内去除重复边框与底色，留足行距与段落呼吸感，仅靠左侧圆点闪烁表达状态 */
+.wm-multi-panel .live-activity-list {
+  gap: 0;
+}
+
+.wm-multi-panel .live-task-card {
+  gap: 8px;
+  padding: 12px 2px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.wm-multi-panel .live-task-card:first-child {
+  padding-top: 11px;
+}
+
+.wm-multi-panel .live-task-card:last-child {
+  padding-bottom: 2px;
+}
+
+.wm-multi-panel .live-task-card + .live-task-card {
+  border-top: 1px solid var(--border-hairline);
+}
+
+.wm-multi-panel .live-task-title {
+  font-size: 12.5px;
+}
+
+.wm-multi-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 36px;
+  padding: 12px 2px 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.wm-multi-empty-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wm-idle-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--text-secondary) 38%, transparent);
+  flex-shrink: 0;
+}
+
+.wm-multi-empty-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}

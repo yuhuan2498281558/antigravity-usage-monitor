@@ -5,15 +5,15 @@
  * 1. `syncCloudCatalog`：定期或手动从 GitHub 主干拉取最新 `pricing-catalog.json`，
  *    经 Schema 与可信域名白名单清洗后落盘至 `DATA_DIR/remote_pricing_cache.json` 并热更新内存价格字典；
  * 2. `performPluginUpdate` 严格执行以下防降级与防损坏门禁：
- *    - 开发仓库自动更新隔离：非 `.gemini/config/plugins/` 目录一律禁止后台自动更新（`dev_repo_auto_disabled`）；
+ *    - 开发仓库自动更新隔离：非 `.gemini/config/plugins/` 目录一律禁止后台自动更新（`dev_repo_auto_disabled`），
+ *      且若手动更新撞上正在进行的后台自动检查，等待自动检查结束后再执行手动更新；
  *    - 全量工作区干净度门禁（含未跟踪文件）：执行 `git status --porcelain`（不带 `--untracked-files=no`），
  *      只要存在任何已修改或未跟踪文件（`??`），立即终止（`dirty_worktree`），绝不执行 `git stash`；
- *    - 分支门禁：通过 `git rev-parse --abbrev-ref HEAD` 校验当前必须处于 `main` 分支（`not_on_main_branch`），防止污染特性分支或游离 HEAD；
- *    - 强制远端版本门禁（Git 通道）：必须且只能从 `git show origin/main:plugin.json` 解析出合法 SemVer，
+ *    - 分支门禁：仅允许 `main` 或 `release/*` 发布分支执行快进更新（`not_on_main_branch`），防止污染特性分支或游离 HEAD；
+ *    - 强制远端版本门禁（Git 通道）：必须且只能从 `git show origin/<branch>:plugin.json` 解析出合法 SemVer，
  *      严禁回退使用缓存的 `cloudSyncState.latestPluginVersion`；仅当 `remoteVersion > previousVersion` 时才继续；
- *    - 提交拓扑与核心文件门禁：通过 `git merge-base --is-ancestor HEAD origin/main` 确认本地无分叉提交（`diverged_worktree`）；
- *    - ZIP 通道安全覆盖：下载前与解压后双重校验 `compareSemver > 0`，覆盖前对 `main.mjs`/`app.js` 执行 `node --check` 语法预检，
- *      使用 `cpSync` 过滤器严格保护 `.git`/`.data`/`node_modules`，并在覆盖前备份关键文件以支持异常回滚。
+ *    - 提交拓扑与核心文件门禁：通过 `git merge-base --is-ancestor HEAD origin/<branch>` 确认本地无分叉提交（`diverged_worktree`）；
+ *    - ZIP 通道安全覆盖与多余旧文件裁剪：覆盖前备份关键文件，覆盖后清理新版已删除的旧源码文件，异常回滚时同步删除残留新文件。
  */
 
 import { execFile } from 'node:child_process';
@@ -52,7 +52,7 @@ import {
  * @param {object} [opts] `execFile` 附加选项
  * @returns {Promise<{stdout: string, stderr: string}>}
  */
-export function runExecFile(cmd, args, opts = {}) {
+function runExecFile(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
     if (typeof execFile !== 'function') {
       reject(new Error('execFile unavailable in current environment'));
@@ -71,12 +71,12 @@ export function runExecFile(cmd, args, opts = {}) {
 
 /**
  * 更新完成后调度 Sidecar 进程平滑退出，让宿主进程监督器自动重启新代码。
- * 在单元测试环境（`LS_ADDR === 'test.invalid'`）下自动跳过。
+ * 在单元测试环境（`!LS_ADDR || LS_ADDR === 'test.invalid'`）下自动跳过。
  *
  * @param {number} [delayMs=350] 延迟毫秒数，确保当前 HTTP 响应先发回前端
  */
 export function scheduleSidecarRestart(delayMs = 350) {
-  if (LS_ADDR === 'test.invalid' || typeof process?.exit !== 'function') return;
+  if (!LS_ADDR || LS_ADDR === 'test.invalid' || typeof process?.exit !== 'function') return;
   setTimeout(() => {
     try {
       process.exit(0);
@@ -92,7 +92,7 @@ export function scheduleSidecarRestart(delayMs = 350) {
  * @param {string} extractDir 解压目标目录
  * @returns {string|null}
  */
-export function locateExtractedPluginRoot(extractDir) {
+function locateExtractedPluginRoot(extractDir) {
   if (existsSync(join(extractDir, 'plugin.json'))) return extractDir;
   try {
     for (const name of readdirSync(extractDir)) {
@@ -108,7 +108,7 @@ export function locateExtractedPluginRoot(extractDir) {
 }
 
 /**
- * `cpSync` 安全过滤函数：严格禁止覆盖 `.git`、`.data`、`node_modules` 或临时更新目录。
+ * `cpSync` 安全过滤函数：严格禁止覆盖 `.git`、`.data`、`node_modules`、`plan` 或临时更新目录。
  *
  * @param {string} srcPath
  * @returns {boolean}
@@ -119,6 +119,7 @@ function isSafeCopyPath(srcPath) {
     name === '.git' ||
     name === '.data' ||
     name === 'node_modules' ||
+    name === 'plan' ||
     name.startsWith('.update-staging-')
   ) {
     return false;
@@ -127,12 +128,43 @@ function isSafeCopyPath(srcPath) {
 }
 
 /**
+ * 递归清理 `targetDir` 中在 `referenceDir` 已不存在的多余文件/目录（保护 `.git`/`.data`/`node_modules`/`plan`）。
+ * 用于 ZIP 升级后清理旧版废弃源码文件，以及在覆盖中途异常回滚时清除半途写入的新增文件。
+ *
+ * @param {string} targetDir
+ * @param {string} referenceDir
+ */
+function pruneExtraneousFiles(targetDir, referenceDir) {
+  if (!existsSync(targetDir) || !existsSync(referenceDir)) return;
+  let names = [];
+  try {
+    names = readdirSync(targetDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const targetChild = join(targetDir, name);
+    if (!isSafeCopyPath(targetChild)) continue;
+    const refChild = join(referenceDir, name);
+    if (!existsSync(refChild)) {
+      try {
+        rmSync(targetChild, { recursive: true, force: true });
+      } catch {
+        // 忽略单项删除异常
+      }
+    } else {
+      pruneExtraneousFiles(targetChild, refChild);
+    }
+  }
+}
+
+/**
  * 在真实运行环境下对目标目录的核心 JS 文件执行 `node --check` 语法预检。
  *
  * @param {string} rootDir 插件根目录或解压目录
  */
 async function verifyPluginJsSyntax(rootDir) {
-  if (LS_ADDR === 'test.invalid') return;
+  if (!LS_ADDR || LS_ADDR === 'test.invalid') return;
   const nodeBin = process?.execPath || 'node';
   const filesToCheck = [
     join(rootDir, 'sidecars', 'panel', 'main.mjs'),
@@ -152,7 +184,18 @@ async function verifyPluginJsSyntax(rootDir) {
  * @returns {Promise<object>} 更新结果对象
  */
 export async function performPluginUpdate({ isAuto = false } = {}) {
-  if (pluginUpdateState.inFlight) return pluginUpdateState.inFlight;
+  if (pluginUpdateState.inFlight) {
+    if (isAuto || !pluginUpdateState.inFlightIsAuto) {
+      return pluginUpdateState.inFlight;
+    }
+    // 若用户点击手动更新时恰好有一轮后台自动更新检查正在运行，等待其收尾后再按手动模式继续执行
+    await pluginUpdateState.inFlight.catch(() => {});
+    if (pluginUpdateState.inFlight) {
+      return pluginUpdateState.inFlight;
+    }
+  }
+
+  pluginUpdateState.inFlightIsAuto = Boolean(isAuto);
   pluginUpdateState.inFlight = (async () => {
     pluginUpdateState.isUpdating = true;
     pluginUpdateState.lastError = null;
@@ -201,7 +244,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
           return pluginUpdateState.lastResult;
         }
 
-        // 2. 分支检查：仅当处于 main 分支时才允许拉取 origin/main，防止污染特性分支或游离 HEAD
+        // 2. 分支检查：仅当处于 main 或 release/* 发布分支时才允许快进拉取，防止污染特性分支或游离 HEAD
         const branchRes = await runExecFile('git', [
           '-C',
           PLUGIN_ROOT,
@@ -210,7 +253,11 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
           'HEAD',
         ]);
         const currentBranch = branchRes.stdout.trim();
-        if (currentBranch && currentBranch !== 'main') {
+        const isAllowedBranch =
+          !currentBranch ||
+          currentBranch === 'main' ||
+          /^release\/[0-9A-Za-z._-]+$/.test(currentBranch);
+        if (!isAllowedBranch) {
           const msg = `当前分支为 ${currentBranch}，已跳过更新`;
           pluginUpdateState.lastError = isAuto ? null : msg;
           pluginUpdateState.lastResult = {
@@ -227,8 +274,11 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
           return pluginUpdateState.lastResult;
         }
 
-        // 3. 只读拉取远端分支引用，并严格从 origin/main:plugin.json 读取远端版本号（严禁回退使用缓存版本）
-        await runExecFile('git', ['-C', PLUGIN_ROOT, 'fetch', 'origin', 'main', '--tags']);
+        const targetBranch = currentBranch || 'main';
+        const remoteRef = `origin/${targetBranch}`;
+
+        // 3. 只读拉取远端分支引用，并严格从 origin/<branch>:plugin.json 读取远端版本号（严禁回退使用缓存版本）
+        await runExecFile('git', ['-C', PLUGIN_ROOT, 'fetch', 'origin', targetBranch, '--tags']);
 
         let remoteVersion = '';
         try {
@@ -236,7 +286,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
             '-C',
             PLUGIN_ROOT,
             'show',
-            'origin/main:plugin.json',
+            `${remoteRef}:plugin.json`,
           ]);
           const parsedManifest = JSON.parse(showRes.stdout || '{}');
           const rawVer =
@@ -267,7 +317,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
           return result;
         }
 
-        // 5. 提交拓扑预检：确保当前 HEAD 是 origin/main 的祖先提交（无本地超前或分叉提交）
+        // 5. 提交拓扑预检：确保当前 HEAD 是远端分支的祖先提交（无本地超前或分叉提交）
         try {
           await runExecFile('git', [
             '-C',
@@ -275,7 +325,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
             'merge-base',
             '--is-ancestor',
             'HEAD',
-            'origin/main',
+            remoteRef,
           ]);
         } catch {
           const msg = '本地分支存在未推送提交，已跳过更新';
@@ -294,7 +344,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
         }
 
         // 6. 确认全部门禁通过后，执行快进合并并校验 JS 语法
-        await runExecFile('git', ['-C', PLUGIN_ROOT, 'pull', '--ff-only', 'origin', 'main']);
+        await runExecFile('git', ['-C', PLUGIN_ROOT, 'pull', '--ff-only', 'origin', targetBranch]);
         await verifyPluginJsSyntax(PLUGIN_ROOT);
         rebuildActiveCatalog();
         const currentVersion = readInstalledPluginVersion();
@@ -406,7 +456,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
           // 覆盖前先对解压目录执行 JS 语法预检，防止损坏代码覆盖现有安装
           await verifyPluginJsSyntax(extractedRoot);
 
-          // 备份当前插件根目录关键文件，若覆盖途中异常则自动回滚
+          // 备份当前插件根目录关键文件，覆盖后清理已废弃旧文件；若覆盖途中异常则完整回滚并移除残留新文件
           mkdirSync(backupDir, { recursive: true });
           cpSync(PLUGIN_ROOT, backupDir, { recursive: true, force: true, filter: isSafeCopyPath });
           try {
@@ -415,6 +465,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
               force: true,
               filter: isSafeCopyPath,
             });
+            pruneExtraneousFiles(PLUGIN_ROOT, extractedRoot);
           } catch (copyErr) {
             try {
               cpSync(backupDir, PLUGIN_ROOT, {
@@ -422,6 +473,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
                 force: true,
                 filter: isSafeCopyPath,
               });
+              pruneExtraneousFiles(PLUGIN_ROOT, backupDir);
             } catch {
               // 忽略回滚二级异常
             }
@@ -473,6 +525,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
       return result;
     } finally {
       pluginUpdateState.isUpdating = false;
+      pluginUpdateState.inFlightIsAuto = false;
       pluginUpdateState.inFlight = null;
     }
   })();

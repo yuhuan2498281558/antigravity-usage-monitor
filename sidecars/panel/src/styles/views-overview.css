@@ -3,7 +3,7 @@
  * 包含：
  * 1. 通用面板容器与标题头 (.panel, .panel-header, .panel-title, .panel-meta)
  * 2. 4 格实时测速指标矩阵 (.telemetry-matrix, .matrix-cell, .cell-*)
- * 3. 6 段上下文窗口进度条与配额填充条 (.progress-track, .progress-seg, .progress-fill)
+ * 3. 10 段上下文窗口进度条与配额填充条 (.progress-track, .progress-seg, .progress-fill)
  * 4. 上下文双列图例网格与色块 (.ctx-legend-grid, .legend-*, .swatch)
  * 5. 双栏布局网格与窄屏响应式断点 (.dual-grid)
  */
@@ -57,50 +57,42 @@
 .live-activity-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
   min-width: 0;
-}
-
-.live-activity-list[hidden] {
-  display: none !important;
 }
 
 .live-task-card {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 7px 10px;
-  border: 1px solid var(--accent-primary-border);
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-hairline);
   border-radius: var(--radius-xs);
-  background: color-mix(in srgb, var(--accent-primary) 5%, var(--surface-panel));
+  background: var(--surface-panel);
   min-width: 0;
-}
-
-.live-task-card.is-waiting {
-  border-color: color-mix(in srgb, var(--metric-warn) 42%, var(--border-hairline));
-  background: color-mix(in srgb, var(--metric-warn) 7%, var(--surface-panel));
 }
 
 .live-task-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: var(--space-3);
   min-width: 0;
 }
 
 .live-task-title-wrap {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 7px;
   min-width: 0;
   flex: 1;
 }
 
 .live-task-title {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
+  line-height: 1.45;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
@@ -116,7 +108,7 @@
 .live-task-header-right {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
 }
 
@@ -151,16 +143,13 @@
   background: var(--accent-primary-soft);
 }
 
-.live-sub-toggle[hidden] {
-  display: none !important;
-}
-
 .live-task-main-row {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   min-width: 0;
-  padding-left: 1px;
+  padding-left: 18px;
+  line-height: 1.45;
 }
 
 .live-activity-dot {
@@ -174,37 +163,37 @@
   color: var(--metric-warn);
 }
 
+.live-task-card.is-compacting .live-activity-dot {
+  color: var(--ctx-checkpoint);
+}
+
 .live-activity-phase {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
   flex-shrink: 0;
 }
 
-.live-task-card.is-waiting .live-activity-phase {
-  color: var(--metric-warn);
-}
-
 .live-activity-progress {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 600;
   color: var(--accent-primary);
   background: var(--accent-primary-soft);
-  padding: 0 4px;
+  padding: 0 5px;
   border-radius: var(--radius-xs);
   white-space: nowrap;
   flex-shrink: 0;
 }
 
 .live-activity-sep {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-muted);
   flex-shrink: 0;
 }
 
 .live-activity-detail {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -214,38 +203,35 @@
 }
 
 .live-activity-elapsed {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--accent-primary);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
   white-space: nowrap;
+  min-width: 28px;
+  text-align: right;
   flex-shrink: 0;
-}
-
-.live-task-card.is-waiting .live-activity-elapsed {
-  color: var(--metric-warn);
 }
 
 .live-sub-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding-top: 5px;
-  margin-top: 1px;
+  gap: 8px;
+  padding-top: 9px;
+  margin-top: 3px;
+  margin-left: 18px;
   border-top: 1px dashed var(--border-hairline);
   min-width: 0;
-}
-
-.live-sub-list[hidden] {
-  display: none !important;
 }
 
 .live-sub-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: 10px;
+  min-height: 22px;
   min-width: 0;
-  font-size: 10.5px;
+  font-size: 11.5px;
+  line-height: 1.45;
 }
 
 .live-sub-row.is-done {
@@ -255,7 +241,7 @@
 .live-sub-left {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 7px;
   min-width: 0;
   flex: 1;
 }
@@ -266,7 +252,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 110px;
+  max-width: 148px;
   flex-shrink: 0;
 }
 
@@ -280,9 +266,11 @@
 }
 
 .live-sub-elapsed {
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-secondary);
   white-space: nowrap;
+  min-width: 28px;
+  text-align: right;
   flex-shrink: 0;
 }
 
@@ -339,7 +327,7 @@
   text-overflow: ellipsis;
 }
 
-/* --- 3. 6 段上下文进度条与配额池填充条 (Context Segment Meter & Quota Progress Bars) --- */
+/* --- 3. 10 段上下文进度条与配额池填充条 (Context Segment Meter & Quota Progress Bars) --- */
 .progress-track {
   width: 100%;
   height: 6px;
@@ -444,6 +432,7 @@
   align-items: center;
   gap: 5px;
   color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .swatch {
@@ -463,10 +452,6 @@
 .swatch.seg-skills { background: var(--ctx-skills); }
 .swatch.seg-system-prompt { background: var(--ctx-system-prompt); }
 .swatch.seg-user-rules { background: var(--ctx-user-rules); }
-.swatch.seg-cached { background: var(--ctx-cached); }
-.swatch.seg-input { background: var(--ctx-input); }
-.swatch.seg-thinking { background: var(--ctx-thinking); }
-.swatch.seg-output { background: var(--ctx-output); }
 
 /* --- 5. 双栏网格与窄视口响应式折叠 (Dual Grid & Responsive Breakpoints) --- */
 .dual-grid {

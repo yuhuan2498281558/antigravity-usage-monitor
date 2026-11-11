@@ -1,3 +1,6 @@
+(() => {
+'use strict';
+
 // --- src/icons/svgRegistry.js ---
 /**
  * @fileoverview Pure vector SVG icon registry (16x16 grid).
@@ -74,10 +77,18 @@ const SVG_ICON_DEFS = Object.freeze({
     { tag: 'path', attrs: { d: 'M3.5 8h9' } },
   ],
   dot: [
-    { tag: 'circle', attrs: { cx: '8', cy: '8', r: '3.2', fill: 'currentColor', stroke: 'none' } },
+    { tag: 'circle', attrs: { cx: '8', cy: '8', r: '5', fill: 'currentColor', stroke: 'none' } },
   ],
   'arrow-down': [
     { tag: 'path', attrs: { d: 'M8 2.8v10.4M4.2 9.4L8 13.2l3.8-3.8' } },
+  ],
+  dock: [
+    { tag: 'rect', attrs: { x: '1.8', y: '2.5', width: '12.4', height: '11', rx: '1.5' } },
+    { tag: 'path', attrs: { d: 'M1.8 6h12.4' } },
+    { tag: 'path', attrs: { d: 'M9.2 4.25h3.2' } },
+  ],
+  close: [
+    { tag: 'path', attrs: { d: 'M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6' } },
   ],
 });
 
@@ -186,6 +197,19 @@ function createReactiveStore(initialState) {
     return state;
   }
 
+  function notifyAll() {
+    for (const sub of Array.from(subscribers)) {
+      if (!subscribers.has(sub)) continue;
+      const nextSlice = sub.selector(state);
+      const equal = sub.compare(sub.lastSlice, nextSlice);
+      if (!equal) {
+        const prevSlice = sub.lastSlice;
+        sub.lastSlice = nextSlice;
+        sub.listener(nextSlice, prevSlice);
+      }
+    }
+  }
+
   function setState(patchOrUpdater, { sync = false } = {}) {
     const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(state) : patchOrUpdater;
     if (!patch || typeof patch !== 'object') return;
@@ -202,18 +226,6 @@ function createReactiveStore(initialState) {
       return;
     }
     state = nextState;
-
-    const notifyAll = () => {
-      for (const sub of subscribers) {
-        const nextSlice = sub.selector(state);
-        const equal = sub.compare(sub.lastSlice, nextSlice);
-        if (!equal) {
-          const prevSlice = sub.lastSlice;
-          sub.lastSlice = nextSlice;
-          sub.listener(nextSlice, prevSlice);
-        }
-      }
-    };
 
     if (sync) {
       notifyAll();
@@ -302,18 +314,28 @@ function patchText(el, nextValue) {
 function patchAttr(el, attrName, nextValue) {
   if (!el) return false;
   if (nextValue === null || nextValue === undefined || nextValue === false) {
-    if (!el.hasAttribute(attrName)) {
-      return false;
+    let mutated = false;
+    if (el.hasAttribute(attrName)) {
+      el.removeAttribute(attrName);
+      mutated = true;
     }
-    el.removeAttribute(attrName);
-    return true;
+    if (attrName === 'value' && 'value' in el && el.value !== '') {
+      el.value = '';
+      mutated = true;
+    }
+    return mutated;
   }
   const strVal = nextValue === true ? '' : String(nextValue);
-  if (el.getAttribute(attrName) === strVal) {
-    return false;
+  let mutated = false;
+  if (el.getAttribute(attrName) !== strVal) {
+    el.setAttribute(attrName, strVal);
+    mutated = true;
   }
-  el.setAttribute(attrName, strVal);
-  return true;
+  if (attrName === 'value' && 'value' in el && el.value !== strVal) {
+    el.value = strVal;
+    mutated = true;
+  }
+  return mutated;
 }
 
 function patchClasses(el, classMap) {
@@ -321,11 +343,14 @@ function patchClasses(el, classMap) {
   let mutated = false;
   for (const [cls, active] of Object.entries(classMap)) {
     if (!cls) continue;
-    const has = el.classList.contains(cls);
     const shouldHave = Boolean(active);
-    if (has !== shouldHave) {
-      el.classList.toggle(cls, shouldHave);
-      mutated = true;
+    const tokens = String(cls).split(/\s+/).filter(Boolean);
+    for (const tok of tokens) {
+      const has = el.classList.contains(tok);
+      if (has !== shouldHave) {
+        el.classList.toggle(tok, shouldHave);
+        mutated = true;
+      }
     }
   }
   return mutated;
@@ -340,6 +365,25 @@ function patchStyleVar(el, varName, nextValue) {
   }
   el.style.setProperty(varName, strVal);
   return true;
+}
+
+/**
+ * 判断事件是否发生在目标节点内部（兼容 Shadow DOM 的 `composedPath()` 穿透）。
+ *
+ * @param {Event|null|undefined} event
+ * @param {Node|null|undefined} element
+ * @returns {boolean}
+ */
+function isEventInside(event, element) {
+  if (!event || !element) return false;
+  if (typeof event.composedPath === 'function') {
+    const path = event.composedPath();
+    if (Array.isArray(path) && path.includes(element)) {
+      return true;
+    }
+  }
+  const target = event.target;
+  return Boolean(target && typeof element.contains === 'function' && element.contains(target));
 }
 
 const keyedListState = new WeakMap();
@@ -357,11 +401,15 @@ function patchKeyedList(container, items, { keyFn, sigFn, createRow, updateRow }
   }
 
   const nextKeys = new Set();
+  const seenInPass = new Map();
   const orderedNodes = [];
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const key = String(keyFn(item, i));
+    const rawKey = String(keyFn(item, i));
+    const dupIdx = seenInPass.get(rawKey) || 0;
+    seenInPass.set(rawKey, dupIdx + 1);
+    const key = dupIdx === 0 ? rawKey : `${rawKey}__dup_${dupIdx}`;
     const sig = sigFn ? String(sigFn(item, i)) : JSON.stringify(item);
     nextKeys.add(key);
 
@@ -413,15 +461,6 @@ function defineComponent({ name, setup }) {
   return function createInstance(initialProps = {}) {
     let props = { ...initialProps };
     const cleanups = [];
-    const eventHandlers = new Map();
-
-    function on(event, fn) {
-      if (!eventHandlers.has(event)) {
-        eventHandlers.set(event, new Set());
-      }
-      eventHandlers.get(event).add(fn);
-      return () => eventHandlers.get(event)?.delete(fn);
-    }
 
     function emit(event, payload) {
       // Support Vue-style onUpdateModelValue / onChange prop callbacks
@@ -433,12 +472,6 @@ function defineComponent({ name, setup }) {
           props.onChange(payload);
         }
       }
-      const handlers = eventHandlers.get(event);
-      if (handlers) {
-        for (const fn of handlers) {
-          fn(payload);
-        }
-      }
     }
 
     function onCleanup(fn) {
@@ -447,15 +480,11 @@ function defineComponent({ name, setup }) {
       }
     }
 
-    const setupResult = setup({
-      getProps: () => props,
-      emit,
-      onCleanup,
-    });
+    let setupResult = null;
 
     function setProps(nextProps = {}) {
       props = { ...props, ...nextProps };
-      if (typeof setupResult.onPropsChange === 'function') {
+      if (setupResult && typeof setupResult.onPropsChange === 'function') {
         setupResult.onPropsChange(props);
       }
     }
@@ -464,11 +493,12 @@ function defineComponent({ name, setup }) {
       setProps({ modelValue: nextValue });
     }
 
-    function getValue() {
-      return typeof setupResult.getValue === 'function'
-        ? setupResult.getValue()
-        : props.modelValue;
-    }
+    setupResult = setup({
+      getProps: () => props,
+      setProps,
+      emit,
+      onCleanup,
+    });
 
     function destroy() {
       for (const fn of cleanups.splice(0)) {
@@ -478,7 +508,6 @@ function defineComponent({ name, setup }) {
           console.error(`[${name}] cleanup error:`, err);
         }
       }
-      eventHandlers.clear();
       if (setupResult.el?.parentNode) {
         setupResult.el.parentNode.removeChild(setupResult.el);
       }
@@ -488,11 +517,8 @@ function defineComponent({ name, setup }) {
       name,
       el: setupResult.el,
       refs: setupResult.refs || {},
-      on,
-      emit,
       setProps,
       setValue,
-      getValue,
       destroy,
       ...setupResult.methods,
     };
@@ -539,15 +565,15 @@ function formatDateSpanBadge(startMs, endMs) {
   return `${s.getMonth() + 1}月${s.getDate()}日 ~ ${e.getMonth() + 1}月${e.getDate()}日`;
 }
 
-function formatUsd(amount, { precise = false, estimated = false, unpricedCalls = 0 } = {}) {
+function formatUsd(amount, { precise = false, unpricedCalls = 0, compactPending = false } = {}) {
   if (amount == null || !Number.isFinite(Number(amount))) return '待定';
   const val = Number(amount || 0);
-  const prefix = estimated ? '≈$' : '$';
-  const suffix = unpricedCalls > 0 ? ' + 待定' : '';
+  const suffix = unpricedCalls > 0 ? (compactPending ? '+' : ' + 待定') : '';
   if (precise) {
-    return (val >= 1 ? `${prefix}${val.toFixed(2)}` : `${prefix}${val.toFixed(3)}`) + suffix;
+    if (val > 0 && val < 0.001) return `<$0.001${suffix}`;
+    return (val >= 1 ? `$${val.toFixed(2)}` : `$${val.toFixed(3)}`) + suffix;
   }
-  return `${prefix}${val.toFixed(2)}${suffix}`;
+  return `$${val.toFixed(2)}${suffix}`;
 }
 
 function speedReasonText(reason) {
@@ -555,6 +581,7 @@ function speedReasonText(reason) {
     incomplete_or_invalid_timing: '生成未完成',
     invalid_output_tokens: '无有效输出',
     inconsistent_timing: '耗时数据异常',
+    short_timing: '耗时过短 (<0.5s)',
     legacy_cache: '旧版缓存记录',
   })[reason] || '';
 }
@@ -568,9 +595,10 @@ function sampleSummary(summary) {
 function formatCountdown(isoTime, nowMs = Date.now()) {
   if (!isoTime) return '未知重置时间';
   const targetMs = Date.parse(isoTime);
-  if (!targetMs || Number.isNaN(targetMs)) return '未知重置时间';
+  if (!Number.isFinite(targetMs) || targetMs <= 0) return '未知重置时间';
   const diffMs = targetMs - nowMs;
   if (diffMs <= 0) return '即将重置';
+  if (diffMs < 60_000) return '<1分钟后重置';
 
   const totalMinutes = Math.floor(diffMs / 60000);
   const days = Math.floor(totalMinutes / (60 * 24));
@@ -605,11 +633,123 @@ function formatElapsedSec(seconds) {
 // --- src/core/httpClient.js ---
 /**
  * @fileoverview Async HTTP client with AbortController cancellation for stale
- * polling requests and concurrent GET deduplication.
+ * polling requests, concurrent GET deduplication, and dual-mode transport
+ * (Sidecar Webview `window.sidecar.fetch` + Main Window Loopback Bridge).
  */
 
 const inFlightGets = new Map();
 const activeControllers = new Map();
+
+/**
+ * 读取主窗口双栖模式下注入的本地桥接配置（`port`、`token`、`bundleVersion`、`stylesCss`）。
+ *
+ * @returns {{ port: number, token: string, bundleVersion?: string, stylesCss?: string } | null}
+ */
+function getWindowBridgeConfig() {
+  if (typeof window === 'undefined') return null;
+  const br = window.__AGUsageMonitorBridge;
+  const port = Number(br?.port || 0);
+  if (br && Number.isInteger(port) && port > 0 && typeof br.token === 'string' && br.token) {
+    return br;
+  }
+  return null;
+}
+
+/**
+ * 判断当前脚本是否以双栖悬浮模式运行在宿主主聊天窗口内（而非右侧辅助栏 Webview）。
+ *
+ * @returns {boolean}
+ */
+function isWindowOverlayMode() {
+  if (typeof window === 'undefined') return false;
+  if (window.sidecar?.fetch) return false;
+  return Boolean(getWindowBridgeConfig());
+}
+
+/**
+ * 接收 Sidecar 通过 CDP `Runtime.evaluate` 批量投递的 RPC 响应，完成因 CSP/代理解除 HTTP 直连时的兜底请求。
+ *
+ * @param {Array<{ id: string, ok: boolean, status?: number, data?: any, error?: string }>} responses
+ * @returns {number}
+ */
+function deliverCdpBridgeResponses(responses) {
+  const br = getWindowBridgeConfig();
+  if (!br || !(br.rpcPending instanceof Map) || !Array.isArray(responses)) return 0;
+  let delivered = 0;
+  for (const item of responses) {
+    const entry = br.rpcPending.get(item?.id);
+    if (!entry) continue;
+    br.rpcPending.delete(item.id);
+    delivered += 1;
+    if (item.ok) {
+      entry.resolve(item.data);
+    } else {
+      entry.reject(new Error(item.error || `HTTP ${item.status || 500}`));
+    }
+  }
+  return delivered;
+}
+
+function callViaCdpBridge(bridge, path, { method, body, signal }) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      const abortErr = new Error('Request aborted');
+      abortErr.name = 'AbortError';
+      reject(abortErr);
+      return;
+    }
+    if (!Array.isArray(bridge.rpcQueue)) bridge.rpcQueue = [];
+    if (!(bridge.rpcPending instanceof Map)) bridge.rpcPending = new Map();
+
+    const reqId = `rpc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const cleanupQueueItem = () => {
+      if (!Array.isArray(bridge.rpcQueue)) return;
+      const idx = bridge.rpcQueue.findIndex((item) => item?.id === reqId);
+      if (idx >= 0) bridge.rpcQueue.splice(idx, 1);
+    };
+
+    const timeoutId = setTimeout(() => {
+      bridge.rpcPending.delete(reqId);
+      cleanupQueueItem();
+      reject(new Error('CDP bridge timeout'));
+    }, 8000);
+
+    const onAbort = () => {
+      clearTimeout(timeoutId);
+      bridge.rpcPending.delete(reqId);
+      cleanupQueueItem();
+      const abortErr = new Error('Request aborted');
+      abortErr.name = 'AbortError';
+      reject(abortErr);
+    };
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    bridge.rpcPending.set(reqId, {
+      resolve: (data) => {
+        clearTimeout(timeoutId);
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve(data);
+      },
+      reject: (err) => {
+        clearTimeout(timeoutId);
+        if (signal) signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    });
+
+    if (bridge.rpcQueue.length >= 16) {
+      const dropped = bridge.rpcQueue.shift();
+      if (dropped?.id) {
+        const stale = bridge.rpcPending.get(dropped.id);
+        bridge.rpcPending.delete(dropped.id);
+        stale?.reject(new Error('CDP queue superseded'));
+      }
+    }
+    bridge.rpcQueue.push({ id: reqId, path, method, body });
+  });
+}
 
 async function callSidecarApi(path, { method = 'GET', body, abortKey = '' } = {}) {
   const upperMethod = method.toUpperCase();
@@ -633,16 +773,41 @@ async function callSidecarApi(path, { method = 'GET', body, abortKey = '' } = {}
 
   const runRequest = async () => {
     const sidecar = typeof window !== 'undefined' ? window.sidecar : null;
+    const bridge = !sidecar?.fetch ? getWindowBridgeConfig() : null;
     const fetchFn = sidecar?.fetch
       ? sidecar.fetch.bind(sidecar)
-      : globalThis.fetch.bind(globalThis);
+      : typeof window !== 'undefined' && typeof window.fetch === 'function'
+        ? window.fetch.bind(window)
+        : globalThis.fetch.bind(globalThis);
 
-    const res = await fetchFn(path, {
-      method: upperMethod,
-      headers: { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal,
-    });
+    const requestUrl = bridge ? `http://127.0.0.1:${bridge.port}${path}` : path;
+    const headers = {};
+    if (body !== undefined || !bridge) {
+      headers['Content-Type'] = 'application/json';
+    }
+    if (bridge) {
+      headers['X-Usage-Monitor-Token'] = bridge.token;
+      if (bridge.transportMode === 'cdp') {
+        return callViaCdpBridge(bridge, path, { method: upperMethod, body, signal });
+      }
+    }
+
+    let res;
+    try {
+      res = await fetchFn(requestUrl, {
+        method: upperMethod,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal,
+      });
+    } catch (fetchErr) {
+      if (!bridge || signal?.aborted || fetchErr?.name === 'AbortError') {
+        throw fetchErr;
+      }
+      // 当宿主环境的 CSP connect-src、混合内容策略或本地代理阻断 HTTP 直连时，无缝切至 CDP 通道
+      bridge.transportMode = 'cdp';
+      return callViaCdpBridge(bridge, path, { method: upperMethod, body, signal });
+    }
     if (signal?.aborted) {
       const abortErr = new Error('Request aborted');
       abortErr.name = 'AbortError';
@@ -702,15 +867,29 @@ const uiStore = createReactiveStore({
  */
 
 
+/**
+ * 在主窗口双栖模式下，从宿主页面路径 `/c/<uuid>` 提取当前正在浏览的会话 ID。
+ *
+ * @returns {string}
+ */
+function extractHostRouteCascadeId() {
+  if (typeof window === 'undefined' || !isWindowOverlayMode()) return '';
+  const pathname = String(window.location?.pathname || '');
+  const m = pathname.match(/^\/c\/([a-f0-9-]{36})(?:\/|$)/i);
+  return m ? m[1] : '';
+}
+
 const initialConversationId =
   (typeof window !== 'undefined' && window.sidecar?.conversationId) || '';
 
 const telemetryStore = createReactiveStore({
   selectedConversationId: initialConversationId,
+  hostRouteConversationId: extractHostRouteCascadeId(),
   selectedTimeRange: 'today',
   customStartMs: Date.now() - 24 * 3600 * 1000,
   customEndMs: Date.now(),
   syncState: 'idle', // 'idle' | 'syncing' | 'synced' | 'error'
+  minuteTick: 0,
   telemetry: null,
 });
 
@@ -718,12 +897,49 @@ let pollTimer = null;
 let feedbackTimer = null;
 let activeBundleVersion = 0;
 let latestRequestSeq = 0;
+let activeForceCount = 0;
+let loopActive = false;
+let loopIntervalMs = 2000;
+let loopTickFn = null;
+
+const CLIENT_TOPBAR_SLOT_KEYS = Object.freeze([
+  'context',
+  'tps',
+  'ttft',
+  'cost',
+  'quota_auto',
+  'gemini_5h',
+  'gemini_weekly',
+  'claude_5h',
+  'claude_weekly',
+  'none',
+]);
+
+const DEFAULT_CLIENT_TOPBAR_SLOTS = Object.freeze(['context', 'tps', 'quota_auto']);
+
+/**
+ * 归一化前端顶栏胶囊三槽位配置数组，非法项回退默认值，且禁止三项同时为 `none`。
+ *
+ * @param {unknown} raw
+ * @returns {[string, string, string]}
+ */
+function normalizeClientTopbarSlots(raw) {
+  const arr = Array.isArray(raw) ? raw : [];
+  const slots = [0, 1, 2].map((idx) => {
+    const val = String(arr[idx] ?? '').trim();
+    return CLIENT_TOPBAR_SLOT_KEYS.includes(val) ? val : DEFAULT_CLIENT_TOPBAR_SLOTS[idx];
+  });
+  if (slots.every((s) => s === 'none')) {
+    slots[0] = 'context';
+  }
+  return slots;
+}
 
 function isEquivalentTelemetry(prev, next) {
   if (!prev || !next) return false;
   if (prev === next) return true;
 
-  // 1. 比对系统设置项（模型显示策略、周预算模式与额度、插件自动更新开关）
+  // 1. 比对系统设置项（模型显示策略、周预算模式与额度、插件自动更新开关、双栖与顶栏槽位配置）
   const pAct = prev.activeConversation;
   const nAct = next.activeConversation;
   if (prev.settings?.showUpstreamModel !== next.settings?.showUpstreamModel) return false;
@@ -731,14 +947,28 @@ function isEquivalentTelemetry(prev, next) {
   if (prev.settings?.weeklyTokenBudget !== next.settings?.weeklyTokenBudget) return false;
   if (prev.settings?.weeklyCostBudget !== next.settings?.weeklyCostBudget) return false;
   if (prev.settings?.autoUpdatePlugin !== next.settings?.autoUpdatePlugin) return false;
+  if (prev.settings?.enableWindowOverlay !== next.settings?.enableWindowOverlay) return false;
+  if ((prev.settings?.showTopbarMultiSession !== false) !== (next.settings?.showTopbarMultiSession !== false)) {
+    return false;
+  }
+  const pTopSlots = prev.settings?.topbarCapsuleSlots;
+  const nTopSlots = next.settings?.topbarCapsuleSlots;
+  if (
+    (pTopSlots?.[0] ?? 'context') !== (nTopSlots?.[0] ?? 'context') ||
+    (pTopSlots?.[1] ?? 'tps') !== (nTopSlots?.[1] ?? 'tps') ||
+    (pTopSlots?.[2] ?? 'quota_auto') !== (nTopSlots?.[2] ?? 'quota_auto')
+  ) {
+    return false;
+  }
 
-  // 2. 比对云端状态（插件当前/最新版本、价格表版本与模型数量、同步/更新执行状态及错误信息）
+  // 2. 比对云端状态（插件当前/最新版本、安装模式、价格表版本与模型数量、同步/更新执行状态及错误信息）
   const pCloud = prev.cloudStatus;
   const nCloud = next.cloudStatus;
   if (
     pCloud?.currentPluginVersion !== nCloud?.currentPluginVersion ||
     pCloud?.latestPluginVersion !== nCloud?.latestPluginVersion ||
     pCloud?.updateAvailable !== nCloud?.updateAvailable ||
+    pCloud?.installMode !== nCloud?.installMode ||
     pCloud?.catalogVersion !== nCloud?.catalogVersion ||
     pCloud?.source !== nCloud?.source ||
     pCloud?.lastSyncedAtMs !== nCloud?.lastSyncedAtMs ||
@@ -752,15 +982,25 @@ function isEquivalentTelemetry(prev, next) {
     return false;
   }
 
-  // 3. 比对活跃会话的实时测速指标（会话 ID、步数、子代理拓扑、运行状态、TPS、TTFT、当前模型标识与单步费用）
+  // 3. 比对活跃会话的实时测速指标（会话 ID、步数、子代理拓扑、运行状态、TPS、TTFT、当前模型标识与费用）
   if (pAct?.cascadeId !== nAct?.cascadeId) return false;
   if (pAct?.stepCount !== nAct?.stepCount) return false;
   if (pAct?.subagentCount !== nAct?.subagentCount) return false;
   if (pAct?.totalStepsAllAgents !== nAct?.totalStepsAllAgents) return false;
   if (pAct?.isRunning !== nAct?.isRunning) return false;
-  if (pAct?.liveActivity?.signature !== nAct?.liveActivity?.signature) return false;
+  if (
+    pAct?.liveActivity?.signature !== nAct?.liveActivity?.signature ||
+    pAct?.liveActivity?.startedAtMs !== nAct?.liveActivity?.startedAtMs
+  ) {
+    return false;
+  }
   if (pAct?.aggregated?.isRunning !== nAct?.aggregated?.isRunning) return false;
-  if (pAct?.aggregated?.liveActivity?.signature !== nAct?.aggregated?.liveActivity?.signature) return false;
+  if (
+    pAct?.aggregated?.liveActivity?.signature !== nAct?.aggregated?.liveActivity?.signature ||
+    pAct?.aggregated?.liveActivity?.startedAtMs !== nAct?.aggregated?.liveActivity?.startedAtMs
+  ) {
+    return false;
+  }
   if (pAct?.aggregated?.liveActivity?.agentId !== nAct?.aggregated?.liveActivity?.agentId) return false;
   if (pAct?.aggregated?.activeAgentId !== nAct?.aggregated?.activeAgentId) return false;
   if (pAct?.aggregated?.activeAgentBadge !== nAct?.aggregated?.activeAgentBadge) return false;
@@ -769,17 +1009,34 @@ function isEquivalentTelemetry(prev, next) {
   if (pAct?.aggregated?.avgTokPerSec !== nAct?.aggregated?.avgTokPerSec) return false;
   if (pAct?.aggregated?.latestStepCostUsd !== nAct?.aggregated?.latestStepCostUsd) return false;
   if (pAct?.aggregated?.sessionCostUsd !== nAct?.aggregated?.sessionCostUsd) return false;
+  if (pAct?.aggregated?.sessionUnpricedCalls !== nAct?.aggregated?.sessionUnpricedCalls) return false;
+  if (pAct?.aggregated?.sessionCacheHitPct !== nAct?.aggregated?.sessionCacheHitPct) return false;
   if (pAct?.aggregated?.activeModelShort !== nAct?.aggregated?.activeModelShort) return false;
+  if (pAct?.aggregated?.activeModelUpstream !== nAct?.aggregated?.activeModelUpstream) return false;
   if (pAct?.aggregated?.latestCacheHitPct !== nAct?.aggregated?.latestCacheHitPct) return false;
   if (pAct?.aggregated?.latestSpeedReason !== nAct?.aggregated?.latestSpeedReason) return false;
   if (pAct?.latestTokPerSec !== nAct?.latestTokPerSec) return false;
   if (pAct?.latestTtftSec !== nAct?.latestTtftSec) return false;
+  if (pAct?.avgTokPerSec !== nAct?.avgTokPerSec) return false;
   if (pAct?.latestCacheHitPct !== nAct?.latestCacheHitPct) return false;
+  if (pAct?.sessionCacheHitPct !== nAct?.sessionCacheHitPct) return false;
   if (pAct?.latestSpeedReason !== nAct?.latestSpeedReason) return false;
   if (pAct?.ttftSummary?.avgSec !== nAct?.ttftSummary?.avgSec) return false;
   if (pAct?.speedSummary?.sampleCount !== nAct?.speedSummary?.sampleCount) return false;
-  if (pAct?.activeModelShort !== nAct?.activeModelShort || pAct?.activeModelLabel !== nAct?.activeModelLabel) return false;
-  if (pAct?.latestStepCostUsd !== nAct?.latestStepCostUsd || pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls) return false;
+  if (
+    pAct?.activeModelShort !== nAct?.activeModelShort ||
+    pAct?.activeModelLabel !== nAct?.activeModelLabel ||
+    pAct?.activeModelUpstream !== nAct?.activeModelUpstream
+  ) {
+    return false;
+  }
+  if (
+    pAct?.latestStepCostUsd !== nAct?.latestStepCostUsd ||
+    pAct?.sessionCostUsd !== nAct?.sessionCostUsd ||
+    pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls
+  ) {
+    return false;
+  }
 
   const pAgents = pAct?.agents || [];
   const nAgents = nAct?.agents || [];
@@ -787,8 +1044,6 @@ function isEquivalentTelemetry(prev, next) {
   for (let i = 0; i < pAgents.length; i++) {
     const pa = pAgents[i];
     const na = nAgents[i];
-    const pLastStep = pa?.recentSteps?.[0];
-    const nLastStep = na?.recentSteps?.[0];
     if (
       pa?.agentId !== na?.agentId ||
       pa?.role !== na?.role ||
@@ -799,11 +1054,16 @@ function isEquivalentTelemetry(prev, next) {
       pa?.latestTtftSec !== na?.latestTtftSec ||
       pa?.avgTokPerSec !== na?.avgTokPerSec ||
       pa?.latestCacheHitPct !== na?.latestCacheHitPct ||
+      pa?.sessionCacheHitPct !== na?.sessionCacheHitPct ||
       pa?.latestSpeedReason !== na?.latestSpeedReason ||
       pa?.latestStepCostUsd !== na?.latestStepCostUsd ||
       pa?.sessionCostUsd !== na?.sessionCostUsd ||
+      pa?.sessionUnpricedCalls !== na?.sessionUnpricedCalls ||
       pa?.activeModelShort !== na?.activeModelShort ||
+      pa?.activeModelUpstream !== na?.activeModelUpstream ||
       pa?.context?.totalTokens !== na?.context?.totalTokens ||
+      pa?.context?.compactionLimitTokens !== na?.context?.compactionLimitTokens ||
+      pa?.context?.limitTokens !== na?.context?.limitTokens ||
       pa?.context?.messagesTokens !== na?.context?.messagesTokens ||
       pa?.context?.toolResultsTokens !== na?.context?.toolResultsTokens ||
       pa?.context?.assistantTokens !== na?.context?.assistantTokens ||
@@ -814,14 +1074,34 @@ function isEquivalentTelemetry(prev, next) {
       pa?.context?.mcpToolsTokens !== na?.context?.mcpToolsTokens ||
       pa?.context?.skillsTokens !== na?.context?.skillsTokens ||
       pa?.context?.systemPromptTokens !== na?.context?.systemPromptTokens ||
-      pa?.context?.userRulesTokens !== na?.context?.userRulesTokens ||
-      pLastStep?.tokPerSec !== nLastStep?.tokPerSec ||
-      pLastStep?.ttftSec !== nLastStep?.ttftSec ||
-      pLastStep?.outputTokens !== nLastStep?.outputTokens ||
-      pLastStep?.modelUpstream !== nLastStep?.modelUpstream ||
-      pLastStep?.costUsd !== nLastStep?.costUsd
+      pa?.context?.userRulesTokens !== na?.context?.userRulesTokens
     ) {
       return false;
+    }
+    const paSteps = pa?.recentSteps || [];
+    const naSteps = na?.recentSteps || [];
+    if (paSteps.length !== naSteps.length) return false;
+    for (let j = 0; j < paSteps.length; j++) {
+      const bs = paSteps[j];
+      const as = naSteps[j];
+      if (
+        bs?.stepIndex !== as?.stepIndex ||
+        bs?.modelKey !== as?.modelKey ||
+        bs?.modelShort !== as?.modelShort ||
+        bs?.modelLabel !== as?.modelLabel ||
+        bs?.modelUpstream !== as?.modelUpstream ||
+        bs?.responseModel !== as?.responseModel ||
+        bs?.modelSource !== as?.modelSource ||
+        bs?.costUsd !== as?.costUsd ||
+        bs?.tokPerSec !== as?.tokPerSec ||
+        bs?.ttftSec !== as?.ttftSec ||
+        bs?.outputTokens !== as?.outputTokens ||
+        bs?.inputTokens !== as?.inputTokens ||
+        bs?.cacheReadTokens !== as?.cacheReadTokens ||
+        bs?.selectedSpeedReason !== as?.selectedSpeedReason
+      ) {
+        return false;
+      }
     }
   }
 
@@ -829,6 +1109,8 @@ function isEquivalentTelemetry(prev, next) {
   const pCtx = pAct?.context;
   const nCtx = nAct?.context;
   if (pCtx?.totalTokens !== nCtx?.totalTokens) return false;
+  if (pCtx?.compactionLimitTokens !== nCtx?.compactionLimitTokens) return false;
+  if (pCtx?.limitTokens !== nCtx?.limitTokens) return false;
   if (pCtx?.messagesTokens !== nCtx?.messagesTokens) return false;
   if (pCtx?.assistantTokens !== nCtx?.assistantTokens) return false;
   if (pCtx?.toolResultsTokens !== nCtx?.toolResultsTokens) return false;
@@ -846,6 +1128,7 @@ function isEquivalentTelemetry(prev, next) {
     if (
       before.modelKey !== after.modelKey ||
       before.modelShort !== after.modelShort ||
+      before.modelLabel !== after.modelLabel ||
       before.modelUpstream !== after.modelUpstream ||
       before.responseModel !== after.responseModel ||
       before.modelSource !== after.modelSource ||
@@ -854,7 +1137,8 @@ function isEquivalentTelemetry(prev, next) {
       before.ttftSec !== after.ttftSec ||
       before.outputTokens !== after.outputTokens ||
       before.inputTokens !== after.inputTokens ||
-      before.cacheReadTokens !== after.cacheReadTokens
+      before.cacheReadTokens !== after.cacheReadTokens ||
+      before.selectedSpeedReason !== after.selectedSpeedReason
     ) {
       return false;
     }
@@ -877,8 +1161,13 @@ function isEquivalentTelemetry(prev, next) {
   const pAcct = prev.consumption?.account;
   const nAcct = next.consumption?.account;
   if (pAcct?.totalTokens !== nAcct?.totalTokens) return false;
+  if (pAcct?.inputTokens !== nAcct?.inputTokens) return false;
+  if (pAcct?.cacheReadTokens !== nAcct?.cacheReadTokens) return false;
+  if (pAcct?.outputTokens !== nAcct?.outputTokens) return false;
   if (pAcct?.calls !== nAcct?.calls) return false;
   if (pAcct?.costUsd !== nAcct?.costUsd) return false;
+  if (pAcct?.savedCostUsd !== nAcct?.savedCostUsd) return false;
+  if (pAcct?.cacheHitPct !== nAcct?.cacheHitPct) return false;
   if (pAcct?.unpricedCalls !== nAcct?.unpricedCalls) return false;
 
   // 6. 比对历史趋势时间分桶序列与年度分月序列
@@ -964,6 +1253,7 @@ function isEquivalentTelemetry(prev, next) {
   if (pQuot?.usedPct !== nQuot?.usedPct) return false;
   if (pQuot?.remainingPct !== nQuot?.remainingPct) return false;
   if (pQuot?.weeklyUsedPct !== nQuot?.weeklyUsedPct) return false;
+  if (pQuot?.weeklyRemainingPct !== nQuot?.weeklyRemainingPct) return false;
   if (prev.quotas?.weekly?.usedPct !== next.quotas?.weekly?.usedPct) return false;
   if (prev.quotas?.weekly?.remainingPct !== next.quotas?.weekly?.remainingPct) return false;
   if (prev.quotas?.weekly?.tokens !== next.quotas?.weekly?.tokens) return false;
@@ -1019,7 +1309,8 @@ function isEquivalentTelemetry(prev, next) {
       pr?.isMainRunning !== nr?.isMainRunning ||
       pr?.subagentCount !== nr?.subagentCount ||
       pr?.runningSubagentCount !== nr?.runningSubagentCount ||
-      pr?.mainActivity?.signature !== nr?.mainActivity?.signature
+      pr?.mainActivity?.signature !== nr?.mainActivity?.signature ||
+      pr?.mainActivity?.startedAtMs !== nr?.mainActivity?.startedAtMs
     ) {
       return false;
     }
@@ -1032,7 +1323,8 @@ function isEquivalentTelemetry(prev, next) {
         pSubs[j]?.role !== nSubs[j]?.role ||
         pSubs[j]?.isRunning !== nSubs[j]?.isRunning ||
         pSubs[j]?.stepCount !== nSubs[j]?.stepCount ||
-        pSubs[j]?.liveActivity?.signature !== nSubs[j]?.liveActivity?.signature
+        pSubs[j]?.liveActivity?.signature !== nSubs[j]?.liveActivity?.signature ||
+        pSubs[j]?.liveActivity?.startedAtMs !== nSubs[j]?.liveActivity?.startedAtMs
       ) {
         return false;
       }
@@ -1043,25 +1335,46 @@ function isEquivalentTelemetry(prev, next) {
 }
 
 async function fetchTelemetry({ force = false } = {}) {
+  if (!force && activeForceCount > 0) {
+    return telemetryStore.getState().telemetry;
+  }
+
   const st = telemetryStore.getState();
   const reqSeq = ++latestRequestSeq;
   const startMs = Date.now();
 
   if (force) {
+    activeForceCount += 1;
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
     telemetryStore.setState({ syncState: 'syncing' });
   }
 
   try {
+    if (isWindowOverlayMode()) {
+      const liveRouteId = extractHostRouteCascadeId();
+      if (liveRouteId !== st.hostRouteConversationId) {
+        const patch = { hostRouteConversationId: liveRouteId };
+        if (liveRouteId && st.selectedConversationId && st.selectedConversationId !== liveRouteId) {
+          patch.selectedConversationId = '';
+        }
+        telemetryStore.setState(patch);
+      }
+    }
+    const curSt = telemetryStore.getState();
+    const effectiveConvId = curSt.selectedConversationId || curSt.hostRouteConversationId || '';
     const params = new URLSearchParams();
-    if (st.selectedConversationId) {
-      params.set('conversationId', st.selectedConversationId);
+    if (effectiveConvId) {
+      params.set('conversationId', effectiveConvId);
     }
-    if (st.selectedTimeRange) {
-      params.set('range', st.selectedTimeRange);
+    if (curSt.selectedTimeRange) {
+      params.set('range', curSt.selectedTimeRange);
     }
-    if (st.selectedTimeRange === 'custom') {
-      if (st.customStartMs > 0) params.set('startMs', String(st.customStartMs));
-      if (st.customEndMs > 0) params.set('endMs', String(st.customEndMs));
+    if (curSt.selectedTimeRange === 'custom') {
+      if (curSt.customStartMs > 0) params.set('startMs', String(curSt.customStartMs));
+      if (curSt.customEndMs > 0) params.set('endMs', String(curSt.customEndMs));
     }
     if (force) {
       params.set('force', '1');
@@ -1069,7 +1382,7 @@ async function fetchTelemetry({ force = false } = {}) {
     const qs = params.toString();
     const payload = await callSidecarApi(`/api/telemetry${qs ? `?${qs}` : ''}`, {
       method: 'GET',
-      abortKey: 'telemetry-poll',
+      abortKey: force ? 'telemetry-force' : 'telemetry-poll',
     });
 
     if (reqSeq !== latestRequestSeq) {
@@ -1078,7 +1391,11 @@ async function fetchTelemetry({ force = false } = {}) {
 
     if (payload?.uiBundleVersion) {
       if (activeBundleVersion && activeBundleVersion !== payload.uiBundleVersion) {
-        if (typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+        if (
+          !isWindowOverlayMode() &&
+          typeof window !== 'undefined' &&
+          typeof window.location?.reload === 'function'
+        ) {
           window.location.reload();
           return payload;
         }
@@ -1098,6 +1415,7 @@ async function fetchTelemetry({ force = false } = {}) {
       if (feedbackTimer) clearTimeout(feedbackTimer);
       telemetryStore.setState({
         telemetry: payload,
+        minuteTick: Math.floor(Date.now() / 30000),
         syncState: 'synced',
       });
       feedbackTimer = setTimeout(() => {
@@ -1109,6 +1427,7 @@ async function fetchTelemetry({ force = false } = {}) {
       const nextTelemetry = isSame ? latestSt.telemetry : payload;
       telemetryStore.setState({
         telemetry: nextTelemetry,
+        minuteTick: Math.floor(Date.now() / 30000),
         syncState: latestSt.syncState === 'synced' ? 'synced' : 'idle',
       });
     }
@@ -1117,37 +1436,46 @@ async function fetchTelemetry({ force = false } = {}) {
     if (err?.name === 'AbortError' || reqSeq !== latestRequestSeq) return null;
     telemetryStore.setState({ syncState: 'error' });
     return null;
+  } finally {
+    if (force) {
+      activeForceCount = Math.max(0, activeForceCount - 1);
+      if (activeForceCount === 0 && loopActive && loopTickFn && !pollTimer) {
+        pollTimer = setTimeout(loopTickFn, loopIntervalMs);
+      }
+    }
   }
 }
 
 async function saveSettingsPatch(patch) {
+  const safePatch = patch && typeof patch === 'object' ? { ...patch } : {};
+  if (Object.prototype.hasOwnProperty.call(safePatch, 'weeklyLimitMode')) {
+    const mode = safePatch.weeklyLimitMode;
+    safePatch.weeklyLimitMode =
+      mode === 'custom_tokens' || mode === 'custom_cost' ? mode : 'official';
+  }
+  if (Object.prototype.hasOwnProperty.call(safePatch, 'showTopbarMultiSession')) {
+    safePatch.showTopbarMultiSession = Boolean(safePatch.showTopbarMultiSession);
+  }
+  if (Object.prototype.hasOwnProperty.call(safePatch, 'topbarCapsuleSlots')) {
+    safePatch.topbarCapsuleSlots = normalizeClientTopbarSlots(safePatch.topbarCapsuleSlots);
+  }
   const prevTelemetry = telemetryStore.getState().telemetry;
   if (prevTelemetry?.settings) {
     telemetryStore.setState({
       telemetry: {
         ...prevTelemetry,
-        settings: { ...prevTelemetry.settings, ...patch },
-        activeConversation: patch.contextWindowLimit
-          ? {
-              ...prevTelemetry.activeConversation,
-              context: {
-                ...prevTelemetry.activeConversation?.context,
-                limitTokens: patch.contextWindowLimit,
-                usedPct: Math.min(
-                  100,
-                  Math.round(
-                    ((prevTelemetry.activeConversation?.context?.totalTokens || 0) /
-                      Math.max(1, patch.contextWindowLimit)) *
-                      100
-                  )
-                ),
-              },
-            }
-          : prevTelemetry.activeConversation,
+        settings: { ...prevTelemetry.settings, ...safePatch },
       },
     });
   }
-  await callSidecarApi('/api/settings', { method: 'POST', body: patch });
+  try {
+    await callSidecarApi('/api/settings', { method: 'POST', body: safePatch });
+  } catch (err) {
+    if (prevTelemetry) {
+      telemetryStore.setState({ telemetry: prevTelemetry });
+    }
+    throw err;
+  }
   await fetchTelemetry({ force: true });
 }
 
@@ -1161,7 +1489,11 @@ async function triggerPluginUpdate() {
   const res = await callSidecarApi('/api/plugin-update', { method: 'POST', body: {} });
   if (res?.ok && res?.restarting) {
     await new Promise((r) => setTimeout(r, 1100));
-    if (typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+    if (
+      !isWindowOverlayMode() &&
+      typeof window !== 'undefined' &&
+      typeof window.location?.reload === 'function'
+    ) {
       window.location.reload();
       return res;
     }
@@ -1172,26 +1504,43 @@ async function triggerPluginUpdate() {
 
 function startAsyncTelemetryLoop(intervalMs = 2000) {
   stopAsyncTelemetryLoop();
-  let active = true;
+  loopActive = true;
+  loopIntervalMs = intervalMs;
+
+  const resolveNextDelay = () => {
+    if (isWindowOverlayMode() && typeof document !== 'undefined' && document.hidden) {
+      return Math.max(loopIntervalMs, 8000);
+    }
+    return loopIntervalMs;
+  };
 
   const tick = async () => {
-    if (!active) return;
+    pollTimer = null;
+    if (!loopActive) return;
     await fetchTelemetry({ force: false });
-    if (!active) return;
-    pollTimer = setTimeout(tick, intervalMs);
+    if (!loopActive || activeForceCount > 0) return;
+    if (!pollTimer) {
+      pollTimer = setTimeout(tick, resolveNextDelay());
+    }
   };
+  loopTickFn = tick;
 
   tick();
   return () => {
-    active = false;
     stopAsyncTelemetryLoop();
   };
 }
 
 function stopAsyncTelemetryLoop() {
+  loopActive = false;
+  loopTickFn = null;
   if (pollTimer) {
     clearTimeout(pollTimer);
     pollTimer = null;
+  }
+  if (feedbackTimer) {
+    clearTimeout(feedbackTimer);
+    feedbackTimer = null;
   }
 }
 
@@ -1446,7 +1795,7 @@ const TopLongPillNav = defineComponent({
 
 const CustomSelect = defineComponent({
   name: 'CustomSelect',
-  setup({ getProps, emit, onCleanup }) {
+  setup({ getProps, setProps, emit, onCleanup }) {
     let isOpen = false;
     let focusedIndex = -1;
 
@@ -1504,6 +1853,7 @@ const CustomSelect = defineComponent({
       const prevVal = getProps().modelValue;
       toggleOpen(false);
       if (option.value !== prevVal) {
+        setProps({ modelValue: option.value });
         emit('update:modelValue', option.value);
       }
     }
@@ -1519,6 +1869,7 @@ const CustomSelect = defineComponent({
         } else {
           focusedIndex = (focusedIndex + 1) % opts.length;
           renderMenuOptions();
+          menuEl.children[focusedIndex]?.scrollIntoView?.({ block: 'nearest' });
         }
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
@@ -1527,6 +1878,7 @@ const CustomSelect = defineComponent({
         } else {
           focusedIndex = (focusedIndex - 1 + opts.length) % opts.length;
           renderMenuOptions();
+          menuEl.children[focusedIndex]?.scrollIntoView?.({ block: 'nearest' });
         }
       } else if (e.key === 'Enter' && isOpen) {
         e.preventDefault();
@@ -1587,17 +1939,17 @@ const CustomSelect = defineComponent({
       if (icon) {
         patchSvgIcon(leadIcon, icon);
       }
-      const selectedOpt =
-        options.find((o) => o.value === modelValue) ||
-        (!modelValue ? options[0] : undefined);
-      patchText(triggerLabel, selectedOpt ? selectedOpt.label : placeholder);
+      const matchedOpt = options.find((o) => o.value === modelValue);
+      const selectedOpt = matchedOpt || (!modelValue ? options[0] : undefined);
+      const fallbackText = modelValue ? `${placeholder} (${String(modelValue).slice(0, 8)})` : placeholder;
+      patchText(triggerLabel, selectedOpt ? selectedOpt.label : fallbackText);
       if (isOpen) {
         renderMenuOptions();
       }
     }
 
     const handleDocClick = (e) => {
-      if (isOpen && !rootEl.contains(e.target)) {
+      if (isOpen && !isEventInside(e, rootEl)) {
         toggleOpen(false);
       }
     };
@@ -1613,14 +1965,8 @@ const CustomSelect = defineComponent({
       el: rootEl,
       refs: { triggerBtn, triggerLabel, menuEl },
       onPropsChange: syncTriggerAndMenu,
-      getValue: () => getProps().modelValue,
       methods: {
-        open: () => toggleOpen(true),
         close: () => toggleOpen(false),
-        selectByValue: (val) => {
-          const found = (getProps().options || []).find((o) => o.value === val);
-          if (found) chooseOption(found);
-        },
       },
     };
   },
@@ -1636,7 +1982,7 @@ const CustomSelect = defineComponent({
 
 const CustomNumberInput = defineComponent({
   name: 'CustomNumberInput',
-  setup({ getProps, emit }) {
+  setup({ getProps, setProps, emit }) {
     function clampValue(raw) {
       const { min = -Infinity, max = Infinity, precision = 0 } = getProps();
       const num = Number(raw);
@@ -1653,6 +1999,7 @@ const CustomNumberInput = defineComponent({
       const next = clampValue(current + direction * step * multiplier);
       syncFieldDisplay(next);
       if (next !== current) {
+        setProps({ modelValue: next });
         emit('update:modelValue', next);
       }
     }
@@ -1706,11 +2053,22 @@ const CustomNumberInput = defineComponent({
     });
 
     function commitManualInput() {
-      const rawText = String(textField.value || '').replace(/[^0-9.-]/g, '');
-      const next = clampValue(rawText);
+      const raw = String(textField.value ?? '').trim();
+      if (!raw || !/\d/.test(raw)) {
+        syncFieldDisplay(getProps().modelValue);
+        return;
+      }
+      const cleaned = raw.replace(/[^0-9.-]/g, '');
+      const parsed = Number(cleaned);
+      if (!Number.isFinite(parsed)) {
+        syncFieldDisplay(getProps().modelValue);
+        return;
+      }
+      const next = clampValue(parsed);
       const prev = Number(getProps().modelValue);
       syncFieldDisplay(next);
       if (next !== prev) {
+        setProps({ modelValue: next });
         emit('update:modelValue', next);
       }
     }
@@ -1733,10 +2091,8 @@ const CustomNumberInput = defineComponent({
       el: rootEl,
       refs: { decBtn, incBtn, textField },
       onPropsChange: () => syncFieldDisplay(),
-      getValue: () => clampValue(textField.value),
       methods: {
-        stepUp: (mult = 1) => applyStep(1, mult),
-        stepDown: (mult = 1) => applyStep(-1, mult),
+        commit: () => commitManualInput(),
       },
     };
   },
@@ -1859,9 +2215,9 @@ const CustomDateTimePicker = defineComponent({
     function adjustTime(part, delta) {
       const cur = new Date(getProps().modelValue || Date.now());
       if (part === 'hour') {
-        cur.setHours((cur.getHours() + delta + 24) % 24);
+        cur.setHours(cur.getHours() + delta);
       } else {
-        cur.setMinutes((cur.getMinutes() + delta + 60) % 60);
+        cur.setMinutes(cur.getMinutes() + delta);
       }
       const nextMs = cur.getTime();
       viewYear = cur.getFullYear();
@@ -1992,7 +2348,7 @@ const CustomDateTimePicker = defineComponent({
     }
 
     const handleDocClick = (e) => {
-      if (isOpen && !rootEl.contains(e.target)) {
+      if (isOpen && !isEventInside(e, rootEl)) {
         togglePopover(false);
       }
     };
@@ -2008,16 +2364,6 @@ const CustomDateTimePicker = defineComponent({
       el: rootEl,
       refs: { triggerBtn, triggerText, popoverEl, daysGrid, hourValSpan, minValSpan },
       onPropsChange: syncDisplay,
-      getValue: () => Number(getProps().modelValue || 0),
-      methods: {
-        open: () => togglePopover(true),
-        close: () => togglePopover(false),
-        selectDayByOffset: (daysDelta) => {
-          const cur = new Date(getProps().modelValue || Date.now());
-          cur.setDate(cur.getDate() + daysDelta);
-          emit('update:modelValue', cur.getTime());
-        },
-      },
     };
   },
 });
@@ -2026,13 +2372,13 @@ const CustomDateTimePicker = defineComponent({
 /**
  * @fileoverview Bespoke custom scrollbar component (零原生滚动条).
  * Hides native OS scrollbars completely and renders a precision 4px floating
- * rail + GPU-translated thumb with drag, track-jump, and modelValue ratio emit.
+ * rail + GPU-translated thumb with drag and track-jump support.
  */
 
 
 const CustomScrollbar = defineComponent({
   name: 'CustomScrollbar',
-  setup({ getProps, emit, onCleanup }) {
+  setup({ getProps, onCleanup }) {
     const contentEl = getProps().contentEl || h('div');
     contentEl.classList.add('custom-scroll-content');
 
@@ -2084,11 +2430,6 @@ const CustomScrollbar = defineComponent({
 
     function onContentScroll() {
       syncThumb();
-      const overflow = (contentEl.scrollHeight || 0) - (contentEl.clientHeight || 0);
-      if (overflow > 1) {
-        const ratio = +Math.max(0, Math.min(1, (contentEl.scrollTop || 0) / overflow)).toFixed(3);
-        emit('update:modelValue', ratio);
-      }
     }
 
     function onDocMouseMove(e) {
@@ -2186,12 +2527,6 @@ const CustomScrollbar = defineComponent({
         refresh() {
           scheduleSyncThumb();
         },
-        scrollToRatio(ratio) {
-          const r = Math.max(0, Math.min(1, Number(ratio || 0)));
-          const overflow = Math.max(0, (contentEl.scrollHeight || 0) - (contentEl.clientHeight || 0));
-          contentEl.scrollTop = Math.round(r * overflow);
-          syncThumb();
-        },
       },
     };
   },
@@ -2206,7 +2541,7 @@ const CustomScrollbar = defineComponent({
 
 const SegmentedControl = defineComponent({
   name: 'SegmentedControl',
-  setup({ getProps, emit }) {
+  setup({ getProps, setProps, emit }) {
     const rootEl = h('div', {
       className: 'segmented',
       role: 'group',
@@ -2225,6 +2560,7 @@ const SegmentedControl = defineComponent({
             onClick: (e) => {
               e.stopPropagation();
               if (getProps().modelValue !== opt.value) {
+                setProps({ modelValue: opt.value });
                 emit('update:modelValue', opt.value);
               }
             },
@@ -2398,17 +2734,22 @@ function createFourSegmentBar() {
  */
 
 
+let chartUidCounter = 0;
+
+function safeSlotTokens(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 /**
  * 将二维采样点序列转换为水平张力平滑的三次贝塞尔曲线 SVG 路径 (`M ... C ...`)。
  * 控制点沿 X 轴取相邻点间距的 `0.42` 张力系数，Y 轴与各自端点齐平，
  * 保证曲线在极值点处平缓过渡且不会产生上下过冲 (Overshoot)。
  *
- * @param {Array<{ x: number, y: number }>} points SVG 坐标系下的采样点数组
+ * @param {Array<{ x: number, y: number }>} points SVG 坐标系下的采样点数组（长度 >= 2）
  * @returns {string} SVG `<path>` 的 `d` 属性字符串
  */
 function buildSmoothSplinePath(points) {
-  if (!points.length) return '';
-  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
   let d = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
   for (let i = 0; i < points.length - 1; i++) {
     const p0 = points[i];
@@ -2465,10 +2806,11 @@ function createTrendAreaChart() {
   svg.setAttribute('class', 'trend-svg');
   svg.setAttribute('aria-hidden', 'true');
 
-  // 垂直线性渐变
+  // 垂直线性渐变（每实例独立 ID，避免多图表挂载时 SVG url(#...) 冲突）
+  const gradId = `trend-area-grad-${++chartUidCounter}`;
   const defs = document.createElementNS(SVG_NS, 'defs');
   const grad = document.createElementNS(SVG_NS, 'linearGradient');
-  grad.setAttribute('id', 'trend-area-grad');
+  grad.setAttribute('id', gradId);
   grad.setAttribute('x1', '0');
   grad.setAttribute('y1', '0');
   grad.setAttribute('x2', '0');
@@ -2507,7 +2849,7 @@ function createTrendAreaChart() {
   svg.appendChild(vGridGroup);
 
   const areaPath = document.createElementNS(SVG_NS, 'path');
-  areaPath.setAttribute('fill', 'url(#trend-area-grad)');
+  areaPath.setAttribute('fill', `url(#${gradId})`);
   svg.appendChild(areaPath);
 
   const linePath = document.createElementNS(SVG_NS, 'path');
@@ -2590,18 +2932,20 @@ function createTrendAreaChart() {
     patchAttr(tooltipEl, 'hidden', false);
 
     patchText(tipTimeEl, slot.fullLabel || slot.label || '--');
-    patchText(tipCallsEl, `${Number(slot.calls || 0)} 次`);
-    patchText(tipTokensEl, `${formatTokensPrecise(Number(slot.tokens || 0))} tok`);
+    patchText(tipCallsEl, `${Math.max(0, Math.floor(Number(slot.calls) || 0))} 次`);
+    const slotTok = safeSlotTokens(slot.tokens);
+    patchText(tipTokensEl, `${formatTokensPrecise(slotTok)} tok`);
+    const slotCost = Number.isFinite(Number(slot.costUsd)) ? Math.max(0, Number(slot.costUsd)) : 0;
     patchText(
       tipCostEl,
-      formatUsd(Number(slot.costUsd || 0), {
+      formatUsd(slotCost, {
         unpricedCalls: slot.unpricedCalls,
-        precise: Number(slot.costUsd || 0) > 0 && Number(slot.costUsd || 0) < 0.1,
+        precise: slotCost > 0 && slotCost < 0.1,
       })
     );
 
     const hasSubBreakdown =
-      Number(slot.tokens || 0) > 0 &&
+      slotTok > 0 &&
       (slot.inputTokens !== undefined ||
         slot.cacheReadTokens !== undefined ||
         slot.outputTokens !== undefined);
@@ -2609,7 +2953,7 @@ function createTrendAreaChart() {
     if (hasSubBreakdown) {
       patchText(
         tipSubEl,
-        `入 ${formatTokensPrecise(slot.inputTokens || 0)} · 缓 ${formatTokensPrecise(slot.cacheReadTokens || 0)} · 出 ${formatTokensPrecise(slot.outputTokens || 0)}`
+        `入 ${formatTokensPrecise(safeSlotTokens(slot.inputTokens))} · 缓 ${formatTokensPrecise(safeSlotTokens(slot.cacheReadTokens))} · 出 ${formatTokensPrecise(safeSlotTokens(slot.outputTokens))}`
       );
     }
 
@@ -2656,7 +3000,7 @@ function createTrendAreaChart() {
    */
   function update(series = []) {
     const slots =
-      Array.isArray(series) && series.length >= 2
+      Array.isArray(series) && series.length >= 1
         ? series
         : [
             { label: '00:00', fullLabel: '00:00 - 01:00', tokens: 0, calls: 0, costUsd: 0 },
@@ -2669,7 +3013,7 @@ function createTrendAreaChart() {
     let maxTokens = 0;
     let peakIdx = 0;
     for (let i = 0; i < slots.length; i++) {
-      const t = Number(slots[i].tokens || 0);
+      const t = safeSlotTokens(slots[i]?.tokens);
       if (t >= maxTokens) {
         maxTokens = t;
         peakIdx = i;
@@ -2677,22 +3021,32 @@ function createTrendAreaChart() {
     }
 
     const denom = Math.max(1, maxTokens);
+    const isSingle = slots.length === 1;
     const pts = slots.map((s, idx) => {
-      const x = LEFT_X + (idx / Math.max(1, slots.length - 1)) * SPAN_X;
-      const ratio = maxTokens > 0 ? Number(s.tokens || 0) / denom : 0;
+      const tok = safeSlotTokens(s?.tokens);
+      const x = isSingle ? (LEFT_X + RIGHT_X) / 2 : LEFT_X + (idx / Math.max(1, slots.length - 1)) * SPAN_X;
+      const ratio = maxTokens > 0 ? tok / denom : 0;
       const y = BOTTOM_Y - ratio * SPAN_Y;
-      return { x, y, tokens: Number(s.tokens || 0) };
+      return { x, y, tokens: tok };
     });
     currentPts = pts;
 
     const sig = slots
-      .map((s) => `${s.label}:${s.fullLabel || ''}:${s.tokens}:${s.costUsd}:${s.calls}`)
+      .map((s) => `${s?.label || ''}:${s?.fullLabel || ''}:${safeSlotTokens(s?.tokens)}:${Number(s?.costUsd || 0)}:${Number(s?.calls || 0)}`)
       .join('|');
 
     if (sig !== lastRenderSig) {
       lastRenderSig = sig;
-      const lineD = buildSmoothSplinePath(pts);
-      const areaD = `${lineD} L ${pts[pts.length - 1].x.toFixed(1)} ${BOTTOM_Y} L ${pts[0].x.toFixed(1)} ${BOTTOM_Y} Z`;
+      let lineD;
+      let areaD;
+      if (isSingle) {
+        const yStr = pts[0].y.toFixed(1);
+        lineD = `M ${LEFT_X.toFixed(1)} ${yStr} L ${RIGHT_X.toFixed(1)} ${yStr}`;
+        areaD = `${lineD} L ${RIGHT_X.toFixed(1)} ${BOTTOM_Y} L ${LEFT_X.toFixed(1)} ${BOTTOM_Y} Z`;
+      } else {
+        lineD = buildSmoothSplinePath(pts);
+        areaD = `${lineD} L ${pts[pts.length - 1].x.toFixed(1)} ${BOTTOM_Y} L ${pts[0].x.toFixed(1)} ${BOTTOM_Y} Z`;
+      }
       patchAttr(linePath, 'd', lineD);
       patchAttr(areaPath, 'd', areaD);
 
@@ -2717,8 +3071,8 @@ function createTrendAreaChart() {
           vGridGroup.appendChild(vLine);
         }
 
-        const isFirst = i === 0;
-        const isLast = i === tickIndices.length - 1;
+        const isFirst = !isSingle && i === 0;
+        const isLast = !isSingle && i === tickIndices.length - 1;
         const pct = (pt.x / VIEW_W) * 100;
         const tickEl = h('span', {
           className: `trend-x-tick text-mono${isFirst ? ' is-start' : isLast ? ' is-end' : ''}`,
@@ -2759,7 +3113,9 @@ function createTrendAreaChart() {
     const pctLeft = Math.max(12, Math.min(88, (peakPt.x / VIEW_W) * 100));
     patchStyleVar(peakPill, '--peak-x', `${pctLeft.toFixed(1)}%`);
 
-    if (hoveredIdx >= 0 && hoveredIdx < slots.length) {
+    if (hoveredIdx >= slots.length) {
+      clearHover();
+    } else if (hoveredIdx >= 0) {
       showHoverAtIndex(hoveredIdx);
     }
   }
@@ -2873,22 +3229,64 @@ const TopSessionHeader = defineComponent({
         lastActiveCascadeId = currentCascadeId;
       }
 
+      const actConv = telemetry?.activeConversation;
       const convs = telemetry?.conversations || [];
-      const latestTitle = convs[0]?.title ? `最新 (${convs[0].title})` : '跟随最新会话';
+      const hostRouteId = telSt.hostRouteConversationId || '';
+      const hostMatchedConv = hostRouteId
+        ? convs.find((c) => c.cascadeId === hostRouteId) ||
+          (actConv?.cascadeId === hostRouteId ? actConv : null)
+        : null;
+      const defaultOptLabel = hostRouteId
+        ? hostMatchedConv?.title
+          ? `当前窗口 (${hostMatchedConv.title})`
+          : `当前窗口 (${hostRouteId.slice(0, 8)})`
+        : convs[0]?.title
+          ? `最新 (${convs[0].title})`
+          : '跟随最新会话';
+      const defaultOptMeta = hostRouteId
+        ? hostMatchedConv
+          ? formatConvOptionMeta({
+              stepCount: hostMatchedConv.stepCount,
+              subagentCount: hostMatchedConv.subagentCount,
+              totalStepCount: hostMatchedConv.totalStepCount ?? hostMatchedConv.totalStepsAllAgents,
+            })
+          : ''
+        : convs[0]
+          ? formatConvOptionMeta(convs[0])
+          : '';
       const options = [
-        { value: '', label: latestTitle, meta: convs[0] ? formatConvOptionMeta(convs[0]) : '' },
+        { value: '', label: defaultOptLabel, meta: defaultOptMeta },
         ...convs.map((c) => ({
           value: c.cascadeId,
           label: c.title || c.cascadeId.slice(0, 8),
           meta: formatConvOptionMeta(c),
         })),
       ];
+      const lockedId = telSt.selectedConversationId;
+      if (lockedId && !convs.some((c) => c.cascadeId === lockedId)) {
+        const isLoadedLocked = actConv?.cascadeId === lockedId;
+        const lockedTitle =
+          isLoadedLocked && actConv?.title
+            ? actConv.title
+            : `已锁定会话 (${String(lockedId).slice(0, 8)})`;
+        const lockedMeta = isLoadedLocked
+          ? formatConvOptionMeta({
+              stepCount: actConv.stepCount,
+              subagentCount: actConv.subagentCount,
+              totalStepCount: actConv.totalStepsAllAgents,
+            })
+          : '已锁定';
+        options.splice(1, 0, {
+          value: lockedId,
+          label: lockedTitle,
+          meta: lockedMeta,
+        });
+      }
       convSelect.setProps({
         modelValue: telSt.selectedConversationId,
         options,
       });
 
-      const actConv = telemetry?.activeConversation;
       const hasSubagents = Boolean(actConv?.hasSubagents || (actConv?.subagentCount || 0) > 0);
       const aggregated = actConv?.aggregated;
 
@@ -2971,6 +3369,7 @@ const TopSessionHeader = defineComponent({
     const unsubTelemetry = telemetryStore.subscribe(
       (st) => ({
         selectedConversationId: st.selectedConversationId,
+        hostRouteConversationId: st.hostRouteConversationId,
         syncState: st.syncState,
         telemetry: st.telemetry,
       }),
@@ -2994,9 +3393,9 @@ const TopSessionHeader = defineComponent({
  * @fileoverview View 1: LiveOverviewView (实时监控视图).
  * 负责展示当前活跃会话的核心实时遥测指标：
  * 1. 4 格实时测速矩阵：实时吞吐 (TPS)、首 Token 延迟 (TTFT)、会话有效加权均速与本步费用/缓存命中率；
- * 2. 6 通道上下文窗口构成：自动锚定当前模型的上下文压缩基线 (`compactionLimitTokens`)，
- *    通过 6 段进度条与双列图例展示消息、系统工具、MCP 工具、Skill、系统提示词与用户规则的 Token 占用；
- * 3. 动态多配额池监控卡片：支持 Gemini、Pro 订阅专属独立 Argon 周配额池、Claude & GPT 等动态配额池，
+ * 2. 10 通道上下文窗口构成：自动锚定当前模型的上下文压缩基线 (`compactionLimitTokens`)，
+ *    通过 10 段进度条与双列图例展示模型回复、工具结果、用户消息、子代理通知、压缩摘要及系统提示词/工具/MCP/Skill/规则的 Token 占用；
+ * 3. 动态多配额池监控卡片：支持 Gemini、Pro 订阅专属独立 Argon/Carbon 周配额池、Claude & GPT 等动态配额池，
  *    自动适配 5h/每周双窗口或单窗口模式，并展示本机周累计消耗与 AI 积分脚标。
  */
 
@@ -3015,6 +3414,239 @@ function estPillWidth(text) {
   return Math.ceil(w);
 }
 
+/**
+ * 10 通道上下文窗口构成定义（供实时监控主视图与主窗口顶栏悬停概览卡共享）。
+ */
+const CTX_CHANNEL_DEFS = [
+  {
+    key: 'assistant',
+    label: '模型回复',
+    segClass: 'seg-assistant',
+    title: '模型推理思考、回复正文与工具调用入参',
+    getValue: (c) => Number(c.assistantTokens || 0),
+  },
+  {
+    key: 'toolResults',
+    label: '工具结果',
+    segClass: 'seg-tool-results',
+    title: '文件读取、终端输出与工具执行返回内容',
+    getValue: (c) => Number(c.toolResultsTokens || 0),
+  },
+  {
+    key: 'userInput',
+    label: '用户消息',
+    segClass: 'seg-user-input',
+    title: '用户提问文本与上传附件',
+    getValue: (c) => Number(c.userInputTokens ?? c.messagesTokens ?? 0),
+  },
+  {
+    key: 'subagent',
+    label: '子代理通知',
+    segClass: 'seg-subagent-msg',
+    title: '子代理完成汇报与后台任务系统通知',
+    getValue: (c) => Number(c.subagentTokens || 0),
+  },
+  {
+    key: 'checkpoint',
+    label: '压缩摘要',
+    segClass: 'seg-checkpoint',
+    title: '自动上下文压缩生成的历史摘要检查点',
+    getValue: (c) => Number(c.checkpointTokens || 0),
+  },
+  {
+    key: 'systemPrompt',
+    label: '系统提示词',
+    segClass: 'seg-system-prompt',
+    title: '核心身份、终端沙箱、制品与环境提示词',
+    getValue: (c) => Number(c.systemPromptTokens || 0),
+  },
+  {
+    key: 'systemTools',
+    label: '系统工具',
+    segClass: 'seg-system-tools',
+    title: '内置系统工具 Schema 定义',
+    getValue: (c) => Number(c.systemToolsTokens || 0),
+  },
+  {
+    key: 'mcpTools',
+    label: 'MCP 工具',
+    segClass: 'seg-mcp-tools',
+    title: 'MCP 外部服务工具与资源定义',
+    getValue: (c) => Number(c.mcpToolsTokens || 0),
+  },
+  {
+    key: 'skills',
+    label: 'Skill',
+    segClass: 'seg-skills',
+    title: '已挂载的 Skills 技能索引与说明',
+    getValue: (c) => Number(c.skillsTokens || 0),
+  },
+  {
+    key: 'userRules',
+    label: '用户规则',
+    segClass: 'seg-user-rules',
+    title: '全局与工作区自定义规则 (user_rules)',
+    getValue: (c) => Number(c.userRulesTokens || 0),
+  },
+];
+
+/**
+ * 归一化动态配额池列表；在官方配额尚未返回时回退预占 Gemini 与 Claude & GPT 两个标准池槽位。
+ *
+ * @param {object|null|undefined} quotas
+ * @param {number} minuteTick
+ * @param {{ isPending?: boolean }} [options]
+ * @returns {Array<object>}
+ */
+function buildQuotaPoolItems(quotas, minuteTick = 0, { isPending = false } = {}) {
+  const safeQuotas = quotas || {};
+  const activePool = safeQuotas.activePool || {};
+  const rawPools =
+    Array.isArray(safeQuotas.pools) && safeQuotas.pools.length > 0
+      ? safeQuotas.pools
+      : [
+          { poolKey: 'Gemini', poolLabel: 'Gemini', family: 'Gemini' },
+          { poolKey: 'Claude & GPT', poolLabel: 'Claude & GPT', family: 'Claude & GPT' },
+        ];
+  const weekly = safeQuotas.weekly || {};
+  const poolItems = rawPools.map((p) => {
+    const key = p.poolKey || p.family || p.poolLabel || 'Other';
+    const poolLabel = p.poolLabel || p.family || key;
+    const isActivePool =
+      Boolean(activePool.family) &&
+      (activePool.poolKey === key ||
+        activePool.family === p.family ||
+        (key === 'Claude & GPT' && ['Claude', 'GPT'].includes(activePool.family)));
+    return {
+      key,
+      poolLabel,
+      poolData: p,
+      fallbackWeekly: weekly,
+      isActivePool,
+      minuteTick,
+      isPending,
+    };
+  });
+  if (
+    weekly?.isOfficial === false &&
+    poolItems.length > 0 &&
+    !poolItems.some((item) => item.isActivePool)
+  ) {
+    poolItems[0].isActivePool = true;
+  }
+  return poolItems;
+}
+
+/**
+ * 创建单个配额池的 DOM 行结构，内含 5h 限额与每周限额两个可独立显隐的子窗口进度条。
+ */
+function createPoolQuotaRow() {
+  const title5h = h('span', { text: '5h 限额' });
+  const meta5h = h('span', { className: 'panel-meta text-mono', text: '--' });
+  const fill5h = h('div', { className: 'progress-fill' });
+  const row5h = h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
+    h('div', { className: 'panel-header' }, [title5h, meta5h]),
+    h('div', { className: 'progress-track' }, [fill5h]),
+  ]);
+
+  const titleWk = h('span', { text: '每周限额' });
+  const metaWk = h('span', { className: 'panel-meta text-mono', text: '--' });
+  const fillWk = h('div', { className: 'progress-fill' });
+  const rowWk = h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
+    h('div', { className: 'panel-header' }, [titleWk, metaWk]),
+    h('div', { className: 'progress-track' }, [fillWk]),
+  ]);
+
+  const el = h('div', { style: 'display: flex; flex-direction: column; gap: 8px;' }, [
+    row5h,
+    rowWk,
+  ]);
+
+  return {
+    el,
+    refs: { row5h, title5h, meta5h, fill5h, rowWk, titleWk, metaWk, fillWk },
+  };
+}
+
+/**
+ * 同步单个配额池行的 5h 与每周窗口状态：
+ * - 对于仅有周限额的独立配额池（例如 Google AI Pro 账号下的 Argon 池或 Plus 档位）自动隐藏 5h 行；
+ * - 对于仅有 5h 限额的配额池自动隐藏每周行；
+ * - 若两个窗口均无数据（首次加载或拉取失败），同时保留两行以维持预占高度不跳动。
+ */
+function syncPoolQuotaRow(refs, item, idx, rowEl) {
+  const { poolData, poolLabel, fallbackWeekly, isActivePool, isPending } = item;
+  patchAttr(
+    rowEl,
+    'style',
+    idx === 0
+      ? 'display: flex; flex-direction: column; gap: 8px;'
+      : 'display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-hairline);'
+  );
+
+  const has5h = poolData?.usedPct != null && poolData?.remainingPct != null;
+  const used5hVal = has5h ? Number(poolData.usedPct) : 0;
+  const rem5hVal = has5h ? Number(poolData.remainingPct) : 0;
+
+  const useCustomWeekly = Boolean(isActivePool && fallbackWeekly?.isOfficial === false);
+  const wkUsedRaw = useCustomWeekly
+    ? fallbackWeekly?.usedPct
+    : poolData?.weeklyUsedPct ?? (isActivePool ? fallbackWeekly?.usedPct : null);
+  const wkRemRaw = useCustomWeekly
+    ? fallbackWeekly?.remainingPct
+    : poolData?.weeklyRemainingPct ?? (isActivePool ? fallbackWeekly?.remainingPct : null);
+  const wkResetRaw = useCustomWeekly
+    ? fallbackWeekly?.resetTime || poolData?.weeklyResetTime
+    : poolData?.weeklyResetTime || (isActivePool ? fallbackWeekly?.resetTime : null);
+  const hasWk = wkUsedRaw != null && wkRemRaw != null;
+  const usedWkVal = hasWk ? Number(wkUsedRaw) : 0;
+  const remWkVal = hasWk ? Number(wkRemRaw) : 0;
+
+  // 在单窗口配额池（如 Pro 账号独立 Argon 周配额池或仅 5h 池）中隐藏不适用的另一窗口
+  const hide5h = !has5h && hasWk;
+  const hideWk = !hasWk && has5h;
+  refs.row5h.hidden = hide5h;
+  refs.row5h.style.display = hide5h ? 'none' : 'flex';
+  refs.rowWk.hidden = hideWk;
+  refs.rowWk.style.display = hideWk ? 'none' : 'flex';
+
+  const fallbackMetaText = isPending ? '读取中...' : '获取失败 (--%)';
+
+  patchText(refs.title5h, `5h 限额 (${poolLabel})`);
+  patchText(
+    refs.meta5h,
+    has5h
+      ? `${formatCountdown(poolData.resetTime)} · 已用 ${used5hVal.toFixed(1)}% (余 ${rem5hVal.toFixed(1)}%)`
+      : fallbackMetaText
+  );
+  patchStyleVar(refs.fill5h, '--fill-w', `${Math.min(100, used5hVal)}%`);
+  patchClasses(refs.fill5h, {
+    'tone-warn': used5hVal >= 60 && used5hVal < 85,
+    'tone-danger': used5hVal >= 85,
+  });
+
+  const customTitle =
+    isActivePool && fallbackWeekly?.isOfficial === false && fallbackWeekly?.title
+      ? fallbackWeekly.title
+      : `每周限额 (${poolLabel})`;
+  patchText(refs.titleWk, customTitle);
+  patchText(
+    refs.metaWk,
+    hasWk
+      ? `${formatCountdown(wkResetRaw)} · 已用 ${usedWkVal.toFixed(1)}% (余 ${remWkVal.toFixed(1)}%)`
+      : fallbackMetaText
+  );
+  patchStyleVar(refs.fillWk, '--fill-w', `${Math.min(100, usedWkVal)}%`);
+  patchClasses(refs.fillWk, {
+    'tone-warn': usedWkVal >= 60 && usedWkVal < 85,
+    'tone-danger': usedWkVal >= 85,
+  });
+}
+
+function quotaPoolRowSig(item, idx) {
+  return `${idx}:${item.poolLabel}:${item.isActivePool}:${Boolean(item.isPending)}:${item.minuteTick}:${item.poolData?.usedPct}:${item.poolData?.remainingPct}:${item.poolData?.resetTime}:${item.poolData?.weeklyUsedPct}:${item.poolData?.weeklyRemainingPct}:${item.poolData?.weeklyResetTime}:${item.fallbackWeekly?.isOfficial}:${item.fallbackWeekly?.usedPct}:${item.fallbackWeekly?.remainingPct}:${item.fallbackWeekly?.resetTime}:${item.fallbackWeekly?.title}`;
+}
+
 const LiveOverviewView = defineComponent({
   name: 'LiveOverviewView',
   setup({ onCleanup }) {
@@ -3028,6 +3660,7 @@ const LiveOverviewView = defineComponent({
     const expandedTaskConvIds = new Set();
     const activityTimersMap = new Map();
     let liveTickTimer = null;
+    let countdownTickTimer = null;
 
     function bindLiveElapsedTimer(timerKey, sig, rawStartMs, targetEl) {
       const now = Date.now();
@@ -3053,22 +3686,51 @@ const LiveOverviewView = defineComponent({
       }
     }
 
-    function stopLiveTicker() {
+    function pauseLiveTicker() {
       if (liveTickTimer) {
         clearInterval(liveTickTimer);
         liveTickTimer = null;
       }
+    }
+
+    function stopLiveTicker() {
+      pauseLiveTicker();
       activityTimersMap.clear();
     }
 
     function ensureLiveTicker() {
+      if (uiStore.getState().activeView !== 'overview' || activityTimersMap.size === 0) {
+        pauseLiveTicker();
+        return;
+      }
       if (!liveTickTimer) {
         liveTickTimer = setInterval(updateLiveElapsedDisplay, 1000);
       }
     }
 
+    function stopCountdownTicker() {
+      if (countdownTickTimer) {
+        clearInterval(countdownTickTimer);
+        countdownTickTimer = null;
+      }
+    }
+
+    function ensureCountdownTicker() {
+      if (uiStore.getState().activeView !== 'overview') {
+        stopCountdownTicker();
+        return;
+      }
+      if (!countdownTickTimer) {
+        countdownTickTimer = setInterval(() => {
+          if (uiStore.getState().activeView === 'overview' && latestData) {
+            renderData(latestData);
+          }
+        }, 30_000);
+      }
+    }
+
     function createLiveTaskCard() {
-      const dotIcon = createSvgIcon('dot', { size: 9 });
+      const dotIcon = createSvgIcon('dot', { size: 11 });
       patchClasses(dotIcon, { 'is-pulsing': true });
       const dotWrap = h('span', { className: 'live-activity-dot' }, [dotIcon]);
       const titleEl = h('strong', { className: 'live-task-title', text: '当前会话' });
@@ -3088,7 +3750,11 @@ const LiveOverviewView = defineComponent({
         h('div', { className: 'live-task-header-right' }, [subToggleBtn, elapsedEl]),
       ]);
 
-      const mainBadge = h('span', { className: 'agent-badge badge-main', text: '主' });
+      const mainBadge = h('span', {
+        className: 'agent-badge badge-main',
+        hidden: true,
+        text: '主',
+      });
       const mainPhase = h('strong', { className: 'live-activity-phase', text: '推理中' });
       const mainProgress = h('span', {
         className: 'live-activity-progress text-mono',
@@ -3121,6 +3787,7 @@ const LiveOverviewView = defineComponent({
           titleEl,
           subToggleBtn,
           elapsedEl,
+          mainBadge,
           mainPhase,
           mainProgress,
           mainSep,
@@ -3168,7 +3835,7 @@ const LiveOverviewView = defineComponent({
     const avgVal = h('strong', { className: 'cell-value', text: '—' });
     const avgSub = h('span', { className: 'cell-sub', text: '有效样本 0/0 步' });
 
-    const costVal = h('strong', { className: 'cell-value', text: '$0.000' });
+    const costVal = h('strong', { className: 'cell-value', text: '—' });
     const cacheSub = h('span', { className: 'cell-sub accent-ok', text: '缓存 0% · 累计 $0.00' });
 
     const matrixEl = h('section', { className: 'telemetry-matrix', 'aria-label': '实时指标' }, [
@@ -3219,78 +3886,7 @@ const LiveOverviewView = defineComponent({
       [ctxPillGroup]
     );
 
-    const ctxChannels = [
-      {
-        key: 'assistant',
-        label: '模型回复',
-        segClass: 'seg-assistant',
-        title: '模型推理思考、回复正文与工具调用入参',
-        getValue: (c) => Number(c.assistantTokens || 0),
-      },
-      {
-        key: 'toolResults',
-        label: '工具结果',
-        segClass: 'seg-tool-results',
-        title: '文件读取、终端输出与工具执行返回内容',
-        getValue: (c) => Number(c.toolResultsTokens || 0),
-      },
-      {
-        key: 'userInput',
-        label: '用户消息',
-        segClass: 'seg-user-input',
-        title: '用户提问文本与上传附件',
-        getValue: (c) => Number(c.userInputTokens ?? c.messagesTokens ?? 0),
-      },
-      {
-        key: 'subagent',
-        label: '子代理通知',
-        segClass: 'seg-subagent-msg',
-        title: '子代理完成汇报与后台任务系统通知',
-        getValue: (c) => Number(c.subagentTokens || 0),
-      },
-      {
-        key: 'checkpoint',
-        label: '压缩摘要',
-        segClass: 'seg-checkpoint',
-        title: '自动上下文压缩生成的历史摘要检查点',
-        getValue: (c) => Number(c.checkpointTokens || 0),
-      },
-      {
-        key: 'systemPrompt',
-        label: '系统提示词',
-        segClass: 'seg-system-prompt',
-        title: '核心身份、终端沙箱、制品与环境提示词',
-        getValue: (c) => Number(c.systemPromptTokens || 0),
-      },
-      {
-        key: 'systemTools',
-        label: '系统工具',
-        segClass: 'seg-system-tools',
-        title: '内置系统工具 Schema 定义',
-        getValue: (c) => Number(c.systemToolsTokens || 0),
-      },
-      {
-        key: 'mcpTools',
-        label: 'MCP 工具',
-        segClass: 'seg-mcp-tools',
-        title: 'MCP 外部服务工具与资源定义',
-        getValue: (c) => Number(c.mcpToolsTokens || 0),
-      },
-      {
-        key: 'skills',
-        label: 'Skill',
-        segClass: 'seg-skills',
-        title: '已挂载的 Skills 技能索引与说明',
-        getValue: (c) => Number(c.skillsTokens || 0),
-      },
-      {
-        key: 'userRules',
-        label: '用户规则',
-        segClass: 'seg-user-rules',
-        title: '全局与工作区自定义规则 (user_rules)',
-        getValue: (c) => Number(c.userRulesTokens || 0),
-      },
-    ].map((ch, idx) => {
+    const ctxChannels = CTX_CHANNEL_DEFS.map((ch, idx) => {
       const valEl = h('strong', { className: 'text-mono', text: '0' });
       const itemEl = h('div', { className: 'legend-item', title: ch.title }, [
         h('span', { className: 'legend-left' }, [
@@ -3327,37 +3923,6 @@ const LiveOverviewView = defineComponent({
     const tierBadge = h('span', { className: 'panel-meta', text: 'Google AI · Pro' });
     const poolsListEl = h('div', { style: 'display: flex; flex-direction: column; gap: 0;' });
 
-    /**
-     * 创建单个配额池的 DOM 行结构，内含 5h 限额与每周限额两个可独立显隐的子窗口进度条。
-     */
-    function createPoolQuotaRow() {
-      const title5h = h('span', { text: '5h 限额' });
-      const meta5h = h('span', { className: 'panel-meta text-mono', text: '--' });
-      const fill5h = h('div', { className: 'progress-fill' });
-      const row5h = h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
-        h('div', { className: 'panel-header' }, [title5h, meta5h]),
-        h('div', { className: 'progress-track' }, [fill5h]),
-      ]);
-
-      const titleWk = h('span', { text: '每周限额' });
-      const metaWk = h('span', { className: 'panel-meta text-mono', text: '--' });
-      const fillWk = h('div', { className: 'progress-fill' });
-      const rowWk = h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
-        h('div', { className: 'panel-header' }, [titleWk, metaWk]),
-        h('div', { className: 'progress-track' }, [fillWk]),
-      ]);
-
-      const el = h('div', { style: 'display: flex; flex-direction: column; gap: 8px;' }, [
-        row5h,
-        rowWk,
-      ]);
-
-      return {
-        el,
-        refs: { row5h, title5h, meta5h, fill5h, rowWk, titleWk, metaWk, fillWk },
-      };
-    }
-
     const wkFootLeft = h('span', { className: 'text-muted', text: '本周累计: 0 ($0.00)' });
     const wkFootRight = h('span', { className: 'text-muted', text: '' });
 
@@ -3387,75 +3952,6 @@ const LiveOverviewView = defineComponent({
       contentEl: overviewInner,
       className: 'view-pane',
     });
-
-    /**
-     * 同步单个配额池行的 5h 与每周窗口状态：
-     * - 对于仅有周限额的独立配额池（例如 Google AI Pro 账号下的 Argon 池或 Plus 档位）自动隐藏 5h 行；
-     * - 对于仅有 5h 限额的配额池自动隐藏每周行；
-     * - 若两个窗口均无数据（如首次拉取失败），则同时保留两行并显示“获取失败 (--%)”占位提示。
-     */
-    function syncPoolQuotaRow(refs, item, idx, rowEl) {
-      const { poolData, poolLabel, fallbackWeekly, isActivePool } = item;
-      patchAttr(
-        rowEl,
-        'style',
-        idx === 0
-          ? 'display: flex; flex-direction: column; gap: 8px;'
-          : 'display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-hairline);'
-      );
-
-      const has5h = poolData?.usedPct != null && poolData?.remainingPct != null;
-      const used5hVal = has5h ? Number(poolData.usedPct) : 0;
-      const rem5hVal = has5h ? Number(poolData.remainingPct) : 0;
-
-      const wkUsedRaw =
-        poolData?.weeklyUsedPct ?? (isActivePool ? fallbackWeekly?.usedPct : null);
-      const wkRemRaw =
-        poolData?.weeklyRemainingPct ?? (isActivePool ? fallbackWeekly?.remainingPct : null);
-      const wkResetRaw =
-        poolData?.weeklyResetTime || (isActivePool ? fallbackWeekly?.resetTime : null);
-      const hasWk = wkUsedRaw != null && wkRemRaw != null;
-      const usedWkVal = hasWk ? Number(wkUsedRaw) : 0;
-      const remWkVal = hasWk ? Number(wkRemRaw) : 0;
-
-      // 在单窗口配额池（如 Pro 账号独立 Argon 周配额池或仅 5h 池）中隐藏不适用的另一窗口
-      const hide5h = !has5h && hasWk;
-      const hideWk = !hasWk && has5h;
-      refs.row5h.hidden = hide5h;
-      refs.row5h.style.display = hide5h ? 'none' : 'flex';
-      refs.rowWk.hidden = hideWk;
-      refs.rowWk.style.display = hideWk ? 'none' : 'flex';
-
-      patchText(refs.title5h, `5h 限额 (${poolLabel})`);
-      patchText(
-        refs.meta5h,
-        has5h
-          ? `${formatCountdown(poolData.resetTime)} · 已用 ${used5hVal.toFixed(1)}% (余 ${rem5hVal.toFixed(1)}%)`
-          : '获取失败 (--%)'
-      );
-      patchStyleVar(refs.fill5h, '--fill-w', `${Math.min(100, used5hVal)}%`);
-      patchClasses(refs.fill5h, {
-        'tone-warn': used5hVal >= 60 && used5hVal < 85,
-        'tone-danger': used5hVal >= 85,
-      });
-
-      const customTitle =
-        isActivePool && fallbackWeekly?.isOfficial === false && fallbackWeekly?.title
-          ? fallbackWeekly.title
-          : `每周限额 (${poolLabel})`;
-      patchText(refs.titleWk, customTitle);
-      patchText(
-        refs.metaWk,
-        hasWk
-          ? `${formatCountdown(wkResetRaw)} · 已用 ${usedWkVal.toFixed(1)}% (余 ${remWkVal.toFixed(1)}%)`
-          : '获取失败 (--%)'
-      );
-      patchStyleVar(refs.fillWk, '--fill-w', `${Math.min(100, usedWkVal)}%`);
-      patchClasses(refs.fillWk, {
-        'tone-warn': usedWkVal >= 60 && usedWkVal < 85,
-        'tone-danger': usedWkVal >= 85,
-      });
-    }
 
     let latestData = null;
     let isDirty = false;
@@ -3568,10 +4064,10 @@ const LiveOverviewView = defineComponent({
             const subSig = (item.subagents || [])
               .map(
                 (s) =>
-                  `${s.cascadeId}:${s.isRunning}:${s.stepCount}:${s.liveActivity?.signature || ''}`
+                  `${s.cascadeId}:${s.isRunning}:${s.stepCount}:${s.liveActivity?.signature || ''}:${s.liveActivity?.startedAtMs || 0}`
               )
               .join('|');
-            return `${item.cascadeId}:${item.title}:${item.isMainRunning}:${item.subagentCount}:${item.runningSubagentCount}:${isExp}:${item.mainActivity?.signature || ''}:${subSig}`;
+            return `${item.cascadeId}:${item.title}:${item.isMainRunning}:${item.subagentCount}:${item.runningSubagentCount}:${isExp}:${item.mainActivity?.signature || ''}:${item.mainActivity?.startedAtMs || 0}:${subSig}`;
           },
           createRow: createLiveTaskCard,
           updateRow: (refs, item) => {
@@ -3585,7 +4081,11 @@ const LiveOverviewView = defineComponent({
             };
 
             const isWaiting = act.phase === 'waiting';
-            patchClasses(refs.cardEl, { 'is-waiting': isWaiting });
+            const isCompacting = act.phase === 'compacting';
+            patchClasses(refs.cardEl, {
+              'is-waiting': isWaiting,
+              'is-compacting': isCompacting,
+            });
             patchClasses(refs.dotIcon, { 'is-pulsing': true });
 
             const convTitle = item.title || item.cascadeId?.slice(0, 8) || '当前会话';
@@ -3602,6 +4102,7 @@ const LiveOverviewView = defineComponent({
             const subCount = Number(item.subagentCount || item.subagents?.length || 0);
             const runSubCount = Number(item.runningSubagentCount || 0);
             const isExpanded = expandedTaskConvIds.has(item.cascadeId);
+            patchAttr(refs.mainBadge, 'hidden', subCount === 0);
             patchAttr(refs.subToggleBtn, 'hidden', subCount === 0);
             if (subCount > 0) {
               const arrow = isExpanded ? '▾' : '▸';
@@ -3721,14 +4222,19 @@ const LiveOverviewView = defineComponent({
         ensureLiveTicker();
       }
 
-      // 1. 更新 4 格实时测速矩阵（展示当前会话全局汇总指标）
+      // 1. 更新 4 格实时测速矩阵（展示当前会话全局汇总指标，遵循模型名称格式设置）
+      const showUpstream = Boolean(data.settings?.showUpstreamModel);
+      const activeModelDisplay =
+        (showUpstream
+          ? active.activeModelUpstream || active.activeModelShort
+          : active.activeModelShort) || '模型未知';
       patchClasses(pulseDot, { 'is-pulsing': Boolean(active.isRunning) });
       patchText(tpsVal, formatMetric(active.latestTokPerSec, ' tok/s'));
       const reason = speedReasonText(active.latestSpeedReason);
       const modelAndAgent =
         hasSubagents && active.activeAgentBadge
-          ? `[${active.activeAgentBadge}] ${active.activeModelShort || '模型未知'}`
-          : active.activeModelShort || '模型未知';
+          ? `[${active.activeAgentBadge}] ${activeModelDisplay}`
+          : activeModelDisplay;
       patchText(tpsSub, reason ? `${modelAndAgent} · ${reason}` : modelAndAgent);
 
       patchText(ttftVal, formatMetric(active.latestTtftSec, 's'));
@@ -3738,7 +4244,11 @@ const LiveOverviewView = defineComponent({
       patchText(avgSub, `有效 ${sampleSummary(active.speedSummary)}`);
 
       const stepCost = active.latestStepCostUsd;
-      patchText(costVal, formatUsd(stepCost, { precise: true }));
+      const hasAnySteps = Number(active.stepCount || 0) > 0;
+      patchText(
+        costVal,
+        !hasAnySteps && stepCost == null ? '—' : formatUsd(stepCost, { precise: true })
+      );
       patchText(
         cacheSub,
         `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
@@ -3766,10 +4276,13 @@ const LiveOverviewView = defineComponent({
 
         const allAgentPills = agents.map((ag) => {
           const agPct = ag.context?.usedPct ?? 0;
+          const agModelDisplay =
+            (showUpstream ? ag.activeModelUpstream || ag.activeModelShort : ag.activeModelShort) ||
+            '模型未知';
           return {
             key: ag.agentId,
             label: `${ag.badgeText || ag.shortLabel} ${agPct}%`,
-            title: `${formatAgentLabel(ag)} (${ag.activeModelShort || '模型未知'} · ${ag.stepCount || 0}步)`,
+            title: `${formatAgentLabel(ag)} (${agModelDisplay} · ${ag.stepCount || 0}步)`,
             isActive: effectiveCtxScope === ag.agentId,
             mode: 'ctx-only',
           };
@@ -3851,12 +4364,8 @@ const LiveOverviewView = defineComponent({
               if (item.mode === 'toggle-expand') {
                 ctxPillsExpanded = !ctxPillsExpanded;
                 renderData(latestData);
-              } else if (item.mode === 'ctx-only') {
-                uiStore.setState({ ctxInspectorAgentId: item.key });
-              } else if (item.key === 'all') {
-                uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' });
               } else {
-                uiStore.setState({ selectedAgentScope: item.key });
+                uiStore.setState({ ctxInspectorAgentId: item.key });
               }
             };
           },
@@ -3891,37 +4400,13 @@ const LiveOverviewView = defineComponent({
         tierBadge,
         `${data.account?.tierName || 'Google AI'} · ${data.account?.planName || 'Pro'}`
       );
-      const activePool = quotas.activePool || {};
-      const rawPools = Array.isArray(quotas.pools) && quotas.pools.length > 0
-        ? quotas.pools
-        : [
-            { poolKey: 'Gemini', poolLabel: 'Gemini', family: 'Gemini' },
-            { poolKey: 'Claude & GPT', poolLabel: 'Claude & GPT', family: 'Claude & GPT' },
-          ];
       const weekly = quotas.weekly || {};
       const minuteTick = Math.floor(Date.now() / 30000);
-      const poolItems = rawPools.map((p) => {
-        const key = p.poolKey || p.family || p.poolLabel || 'Other';
-        const poolLabel = p.poolLabel || p.family || key;
-        const isActivePool =
-          Boolean(activePool.family) &&
-          (activePool.poolKey === key ||
-            activePool.family === p.family ||
-            (key === 'Claude & GPT' && ['Claude', 'GPT'].includes(activePool.family)));
-        return {
-          key,
-          poolLabel,
-          poolData: p,
-          fallbackWeekly: weekly,
-          isActivePool,
-          minuteTick,
-        };
-      });
+      const poolItems = buildQuotaPoolItems(quotas, minuteTick);
 
       patchKeyedList(poolsListEl, poolItems, {
         keyFn: (item) => item.key,
-        sigFn: (item, idx) =>
-          `${idx}:${item.poolLabel}:${item.isActivePool}:${item.minuteTick}:${item.poolData?.usedPct}:${item.poolData?.remainingPct}:${item.poolData?.resetTime}:${item.poolData?.weeklyUsedPct}:${item.poolData?.weeklyRemainingPct}:${item.poolData?.weeklyResetTime}:${item.fallbackWeekly?.isOfficial}:${item.fallbackWeekly?.usedPct}:${item.fallbackWeekly?.title}`,
+        sigFn: quotaPoolRowSig,
         createRow: createPoolQuotaRow,
         updateRow: syncPoolQuotaRow,
       });
@@ -3937,12 +4422,13 @@ const LiveOverviewView = defineComponent({
           : `本周调用: ${weekly.calls || 0} 次`
       );
 
+      ensureCountdownTicker();
       viewScrollbar.refresh();
     }
 
     const unsub = telemetryStore.subscribe(
-      (st) => st.telemetry,
-      (data) => {
+      (st) => ({ telemetry: st.telemetry, minuteTick: st.minuteTick }),
+      ({ telemetry: data }) => {
         latestData = data;
         if (uiStore.getState().activeView !== 'overview') {
           const stillRunning =
@@ -3974,12 +4460,18 @@ const LiveOverviewView = defineComponent({
         prevCtxTarget = slice.ctxInspectorAgentId;
 
         if (slice.activeView !== 'overview') {
+          pauseLiveTicker();
+          stopCountdownTicker();
           if (scopeChanged) isDirty = true;
           return;
         }
+        ensureCountdownTicker();
         if ((isDirty || scopeChanged) && latestData) {
           isDirty = false;
           renderData(latestData);
+        } else if (activityTimersMap.size > 0) {
+          updateLiveElapsedDisplay();
+          ensureLiveTicker();
         }
       }
     );
@@ -4002,6 +4494,7 @@ const LiveOverviewView = defineComponent({
 
     onCleanup(() => {
       stopLiveTicker();
+      stopCountdownTicker();
       unsub();
       unsubView();
       if (ro) ro.disconnect();
@@ -4020,9 +4513,9 @@ const LiveOverviewView = defineComponent({
 /**
  * @fileoverview View 2: ConsumptionView (全景消耗统计视图).
  * 采用 5 段式分析布局展示指定时间窗口内的全量 Token 与费用消耗：
- * 1. 用量概览：支持预设时间段与自定义区间筛选，通过 3+2 组合矩阵展示总 Token/调用次数、
- *    USD/CNY 预估费用、缓存命中率与命中量、输入/输出细分占比，以及底部 4 段比例条 (`FourSegmentBar`)。
- * 2. 历史趋势：基于 `TrendAreaChart` 渲染纯 SVG 三次贝塞尔平滑曲线面积图、峰值气泡与首/中/末三时间锚点。
+ * 1. 用量概览：支持预设时间段与自定义区间筛选，通过 3+3 组合矩阵展示总 Token/调用次数、
+ *    USD/CNY 预估费用、缓存命中率与命中量、新输入/缓存读取（含节省费用）/输出细分占比，以及底部 4 段比例条 (`FourSegmentBar`)。
+ * 2. 历史趋势：基于 `TrendAreaChart` 渲染纯 SVG 三次贝塞尔平滑曲线面积图、峰值气泡、对齐多刻度时间轴与悬停详情浮层。
  * 3. 热门模型：按 Token 总量降序展示各模型的消耗占比徽章、4 段构成条及输入/缓存/输出/思考/调用明细。
  * 4. 数据来源：按调用来源聚合展示 Token 构成、占比与费用明细。
  * 5. 按月细分：12 个月垂直 4 段堆叠柱状图，直观对比全年各月费用、Token 总量与缓存/思考结构。
@@ -4044,27 +4537,45 @@ const ConsumptionView = defineComponent({
   name: 'ConsumptionView',
   setup({ onCleanup }) {
     // --- 时间筛选栏：快速时间段分段控制器与自定义起止时间选择条 ---
+    let draftStartMs = telemetryStore.getState().customStartMs;
+    let draftEndMs = telemetryStore.getState().customEndMs;
+    let hasUncommittedCustomDraft = false;
+
     const timeFilterSwitch = SegmentedControl({
       ariaLabel: '消耗统计时间范围',
       modelValue: telemetryStore.getState().selectedTimeRange,
       options: TIME_RANGE_OPTIONS,
       onUpdateModelValue: (nextRange) => {
+        if (nextRange === 'custom') {
+          const st = telemetryStore.getState();
+          draftStartMs = st.customStartMs;
+          draftEndMs = st.customEndMs;
+          hasUncommittedCustomDraft = false;
+          startPicker.setValue(draftStartMs);
+          endPicker.setValue(draftEndMs);
+        } else {
+          hasUncommittedCustomDraft = false;
+        }
         telemetryStore.setState({ selectedTimeRange: nextRange });
         fetchTelemetry({ force: false });
       },
     });
 
     const startPicker = CustomDateTimePicker({
-      modelValue: telemetryStore.getState().customStartMs,
+      modelValue: draftStartMs,
       onUpdateModelValue: (ms) => {
-        telemetryStore.setState({ customStartMs: ms });
+        draftStartMs = ms;
+        hasUncommittedCustomDraft = true;
+        startPicker.setValue(ms);
       },
     });
 
     const endPicker = CustomDateTimePicker({
-      modelValue: telemetryStore.getState().customEndMs,
+      modelValue: draftEndMs,
       onUpdateModelValue: (ms) => {
-        telemetryStore.setState({ customEndMs: ms });
+        draftEndMs = ms;
+        hasUncommittedCustomDraft = true;
+        endPicker.setValue(ms);
       },
     });
 
@@ -4075,20 +4586,20 @@ const ConsumptionView = defineComponent({
         className: 'btn-primary',
         style: 'height: 26px; padding: 0 10px;',
         onClick: () => {
-          const st = telemetryStore.getState();
-          const sMs = Number(st.customStartMs || 0);
-          const eMs = Number(st.customEndMs || 0);
-          if (sMs > 0 && eMs > 0 && sMs > eMs) {
-            startPicker.setValue(eMs);
-            endPicker.setValue(sMs);
-            telemetryStore.setState({
-              selectedTimeRange: 'custom',
-              customStartMs: eMs,
-              customEndMs: sMs,
-            });
-          } else {
-            telemetryStore.setState({ selectedTimeRange: 'custom' });
-          }
+          const sMs = Number(draftStartMs || 0);
+          const eMs = Number(draftEndMs || 0);
+          const minMs = sMs > 0 && eMs > 0 ? Math.min(sMs, eMs) : sMs;
+          const maxMs = sMs > 0 && eMs > 0 ? Math.max(sMs, eMs) : eMs;
+          draftStartMs = minMs;
+          draftEndMs = maxMs;
+          hasUncommittedCustomDraft = false;
+          startPicker.setValue(minMs);
+          endPicker.setValue(maxMs);
+          telemetryStore.setState({
+            selectedTimeRange: 'custom',
+            customStartMs: minMs,
+            customEndMs: maxMs,
+          });
           fetchTelemetry({ force: true });
         },
       },
@@ -4110,7 +4621,7 @@ const ConsumptionView = defineComponent({
       ]
     );
 
-    // --- Section 1: 用量概览矩阵 (上层 3 列核心总量 + 下层 2 列输入/输出拆分 + 底部 4 段比例条) ---
+    // --- Section 1: 用量概览矩阵 (上层 3 列核心总量 + 下层 3 列新输入/缓存读取/输出拆分 + 底部 4 段比例条) ---
     const dateSpanBadge = h('span', { className: 'cons-badge text-mono', text: '-- ~ --' });
     const heroTotalTokens = h('strong', { className: 'cons-hero-num text-mono', text: '0' });
     const heroTotalCalls = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '0 次' });
@@ -4122,7 +4633,11 @@ const ConsumptionView = defineComponent({
 
     const inputSharePct = h('span', { className: 'text-mono', style: 'color: var(--ctx-input); font-weight: 600; font-size: 11.5px;', text: '0%' });
     const inputMainTokens = h('strong', { className: 'cons-mid-num text-mono', text: '0' });
-    const inputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '新输入 0 · 缓存 0' });
+    const inputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '未命中缓存输入' });
+
+    const cacheSharePct = h('span', { className: 'text-mono', style: 'color: var(--ctx-cached); font-weight: 600; font-size: 11.5px;', text: '0%' });
+    const cacheMainTokens = h('strong', { className: 'cons-mid-num text-mono', text: '0' });
+    const cacheSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '节省 $0.00' });
 
     const outputSharePct = h('span', { className: 'text-mono', style: 'color: var(--ctx-output); font-weight: 600; font-size: 11.5px;', text: '0%' });
     const outputMainTokens = h('strong', { className: 'cons-mid-num text-mono', text: '0' });
@@ -4157,27 +4672,38 @@ const ConsumptionView = defineComponent({
             h('div', { className: 'cons-baseline' }, [cacheHitPctEl, cacheTokensEl]),
           ]),
         ]),
-        h('div', { className: 'cons-split-2 cons-matrix-bottom' }, [
+        h('div', { className: 'cons-split-3 cons-matrix-bottom' }, [
           h('div', { className: 'cons-col' }, [
-            h('div', { className: 'panel-header' }, [
-              h('span', { className: 'legend-left' }, [
+            h('div', { className: 'cons-sub-head' }, [
+              h('span', { className: 'legend-left cons-sub-label' }, [
                 h('span', { className: 'dot-swatch seg-input' }),
-                h('span', { style: 'color: var(--text-primary); font-weight: 600; font-size: 11.5px;', text: '输入用量' }),
-                inputMainTokens,
+                h('span', { text: '新输入' }),
               ]),
               inputSharePct,
             ]),
+            inputMainTokens,
             inputSubText,
           ]),
           h('div', { className: 'cons-col is-bordered-col' }, [
-            h('div', { className: 'panel-header' }, [
-              h('span', { className: 'legend-left' }, [
+            h('div', { className: 'cons-sub-head' }, [
+              h('span', { className: 'legend-left cons-sub-label' }, [
+                h('span', { className: 'dot-swatch seg-cached' }),
+                h('span', { text: '缓存读取' }),
+              ]),
+              cacheSharePct,
+            ]),
+            cacheMainTokens,
+            cacheSubText,
+          ]),
+          h('div', { className: 'cons-col is-bordered-col' }, [
+            h('div', { className: 'cons-sub-head' }, [
+              h('span', { className: 'legend-left cons-sub-label' }, [
                 h('span', { className: 'dot-swatch seg-output' }),
-                h('span', { style: 'color: var(--text-primary); font-weight: 600; font-size: 11.5px;', text: '输出用量' }),
-                outputMainTokens,
+                h('span', { text: '输出用量' }),
               ]),
               outputSharePct,
             ]),
+            outputMainTokens,
             outputSubText,
           ]),
         ]),
@@ -4412,8 +4938,12 @@ const ConsumptionView = defineComponent({
       if (!slice) return;
       timeFilterSwitch.setValue(slice.range);
       patchAttr(customRangeBar, 'hidden', slice.range !== 'custom');
-      startPicker.setValue(slice.customStartMs);
-      endPicker.setValue(slice.customEndMs);
+      if (!hasUncommittedCustomDraft) {
+        draftStartMs = slice.customStartMs;
+        draftEndMs = slice.customEndMs;
+        startPicker.setValue(draftStartMs);
+        endPicker.setValue(draftEndMs);
+      }
 
       const cons = slice.consumption || {};
       const preset =
@@ -4432,6 +4962,7 @@ const ConsumptionView = defineComponent({
       const responseTokens = Number(acct.responseTokens || 0);
       const thinkingTokens = Number(acct.thinkingTokens || 0);
       const costUsd = Number(acct.costUsd || 0);
+      const savedCostUsd = Number(acct.savedCostUsd || 0);
 
       patchText(heroTotalTokens, formatTokensPrecise(totalTokens));
       patchText(heroTotalCalls, `${acct.calls || 0} 次`);
@@ -4441,13 +4972,37 @@ const ConsumptionView = defineComponent({
       patchText(cacheHitPctEl, `${Number(acct.cacheHitPct ?? 0).toFixed(1)}%`);
       patchText(cacheTokensEl, `命中 ${formatTokensPrecise(cacheTokens)}`);
 
-      const inPct = totalTokens > 0 ? +((inputTokens / totalTokens) * 100).toFixed(1) : 0;
-      const outPct = totalTokens > 0 ? +((outputTokens / totalTokens) * 100).toFixed(1) : 0;
+      let inPct = 0;
+      let cachePct = 0;
+      let outPct = 0;
+      if (totalTokens > 0) {
+        const rawTenths = [
+          (inputTokens / totalTokens) * 1000,
+          (cacheTokens / totalTokens) * 1000,
+          (outputTokens / totalTokens) * 1000,
+        ];
+        const floored = rawTenths.map((v) => Math.max(0, Math.floor(v)));
+        const rem = Math.max(0, 1000 - (floored[0] + floored[1] + floored[2]));
+        const order = [0, 1, 2].sort(
+          (a, b) => rawTenths[b] - floored[b] - (rawTenths[a] - floored[a])
+        );
+        for (let k = 0; k < rem && k < 3; k++) {
+          floored[order[k]] += 1;
+        }
+        inPct = +(floored[0] / 10).toFixed(1);
+        cachePct = +(floored[1] / 10).toFixed(1);
+        outPct = +(floored[2] / 10).toFixed(1);
+      }
+
       patchText(inputSharePct, `${inPct}%`);
       patchText(inputMainTokens, formatTokensPrecise(inputTokens));
+      patchText(inputSubText, '未命中缓存输入');
+
+      patchText(cacheSharePct, `${cachePct}%`);
+      patchText(cacheMainTokens, formatTokensPrecise(cacheTokens));
       patchText(
-        inputSubText,
-        `新输入 ${formatTokensPrecise(inputTokens)} · 缓存 ${formatTokensPrecise(cacheTokens)}`
+        cacheSubText,
+        `节省 ${formatUsd(savedCostUsd, { precise: savedCostUsd > 0 && savedCostUsd < 0.01 })}`
       );
 
       patchText(outputSharePct, `${outPct}%`);
@@ -4476,7 +5031,8 @@ const ConsumptionView = defineComponent({
       );
       trendChart.update(trendSeries);
 
-      // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账）
+      // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账，遵循模型名称显示格式设置）
+      const showUpstream = Boolean(slice.showUpstreamModel);
       const models = (slice.modelBreakdown || [])
         .slice()
         .sort((a, b) => (b.totalTokens || 0) - (a.totalTokens || 0));
@@ -4485,9 +5041,17 @@ const ConsumptionView = defineComponent({
       patchKeyedList(modelsListEl, models, {
         keyFn: (m) => m.label || m.shortName,
         sigFn: (m) =>
-          `${m.label}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.calls}:${modelsTotalTok}`,
+          `${showUpstream}:${m.label}:${m.upstreamName || ''}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.calls}:${modelsTotalTok}`,
         createRow: createBreakdownItemRow,
-        updateRow: (refs, m) => updateBreakdownItemRow(refs, m, modelsTotalTok, true),
+        updateRow: (refs, m) =>
+          updateBreakdownItemRow(
+            refs,
+            showUpstream
+              ? { ...m, label: m.upstreamName || m.label || m.shortName }
+              : m,
+            modelsTotalTok,
+            true
+          ),
       });
 
       // 4. 同步数据来源列表
@@ -4525,8 +5089,14 @@ const ConsumptionView = defineComponent({
           patchText(col.tokText, '');
         } else {
           const cVal = Number(m.costUsd || 0);
-          patchText(col.costText, m.unpricedCalls > 0 ? formatUsd(cVal, { unpricedCalls: m.unpricedCalls })
-            : cVal >= 10 ? `$${Math.round(cVal)}` : `$${cVal.toFixed(2)}`);
+          patchText(
+            col.costText,
+            m.unpricedCalls > 0
+              ? formatUsd(cVal, { unpricedCalls: m.unpricedCalls, compactPending: true })
+              : cVal >= 10
+                ? `$${Math.round(cVal)}`
+                : `$${cVal.toFixed(2)}`
+          );
           patchText(col.tokText, formatTokensPrecise(mTot));
 
           const totalHeightPct = Math.max(8, Math.min(100, (mTot / maxMonthTokens) * 100));
@@ -4554,6 +5124,7 @@ const ConsumptionView = defineComponent({
         customEndMs: st.customEndMs,
         consumption: st.telemetry?.consumption,
         modelBreakdown: st.telemetry?.modelBreakdown,
+        showUpstreamModel: Boolean(st.telemetry?.settings?.showUpstreamModel),
       }),
       (slice) => {
         latestSlice = slice;
@@ -4920,7 +5491,7 @@ const StepsDetailView = defineComponent({
           patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' tok/s'));
           patchText(refs.speedSub, `有效 ${sampleSummary(m.speedSummary)}`);
           patchText(refs.tdTokens, formatTokens(m.totalTokens || 0));
-          patchText(refs.tdCost, formatUsd(m.costUsd, { estimated: m.isEstimatedPrice, unpricedCalls: m.unpricedCalls }));
+          patchText(refs.tdCost, formatUsd(m.costUsd, { unpricedCalls: m.unpricedCalls }));
         },
       });
 
@@ -4938,7 +5509,6 @@ const StepsDetailView = defineComponent({
         recentSteps: st.telemetry?.activeConversation?.recentSteps,
         sessionModelBreakdown: st.telemetry?.activeConversation?.modelBreakdown,
         modelBreakdown: st.telemetry?.modelBreakdown,
-        rangeLabel: st.telemetry?.consumption?.selectedRange?.label || '全部时间',
         showUpstreamModel: Boolean(st.telemetry?.settings?.showUpstreamModel),
       }),
       (slice) => {
@@ -5000,23 +5570,43 @@ const StepsDetailView = defineComponent({
 // --- src/views/SettingsView.js ---
 /**
  * @fileoverview View 4: SettingsView (系统设置视图).
- * 采用定制的 `CustomSelect` 与 `CustomNumberInput` 替代所有原生表单控件，分为两个设置面板：
- * 1. 本地配额监控与预算表单：配置模型名称显示方式（内部代号/实际模型名）、周用量计算模式及自定义 Token/USD 预算；
- * 2. 云端价格同步与插件更新面板：配置插件自动更新策略、手动同步云端模型价格表，以及检查并执行 Git/ZIP 双模式插件升级。
+ * 采用定制的 `CustomSelect` 与 `SegmentedControl` 替代所有原生表单控件，分为三个单层细线设置面板：
+ * 1. 常规设置：配置面板挂载方式（双栖挂载 / 仅右侧辅助栏）与模型名称格式（精简代号 / 原始模型 ID）；
+ * 2. 顶部栏定制：控制左侧「实时运行会话」入口开关，以及自由定义右侧精简胶囊三个数值槽位的显示内容与左右顺序；
+ * 3. 版本更新：配置插件自动更新策略、手动同步云端模型价格表，以及检查并执行 Git/ZIP 双模式插件升级。
  */
 
-
-/** 每周配额计算模式可选项 */
-const WEEKLY_MODE_OPTIONS = [
-  { value: 'official', label: '跟随官方额度' },
-  { value: 'custom_tokens', label: '自定义 Token 上限' },
-  { value: 'custom_cost', label: '自定义费用上限 (USD)' },
-];
 
 /** 步骤明细表中的模型名称显示方式可选项 */
 const STEP_MODEL_DISPLAY_OPTIONS = [
   { value: 'short', label: '精简代号 (如 argon-4-high)' },
   { value: 'upstream', label: '原始模型 ID (如 gemini-3.8-flash-n)' },
+];
+
+/** 面板挂载模式可选项（顶部栏 + 侧边栏 vs 仅侧边栏） */
+const WINDOW_MOUNT_OPTIONS = [
+  { value: 'dual', label: '双栖挂载 (顶部栏 + 侧边栏)' },
+  { value: 'sidebar', label: '仅侧边栏' },
+];
+
+/** 顶栏左侧实时运行会话入口显隐选项 */
+const TOPBAR_MULTI_TOGGLE_OPTIONS = [
+  { value: 'show', label: '显示' },
+  { value: 'hide', label: '隐藏' },
+];
+
+/** 顶栏右侧精简胶囊三槽位可选指标项 */
+const TOPBAR_SLOT_OPTIONS = [
+  { value: 'context', label: '上下文占用 (%)' },
+  { value: 'tps', label: '输出速度 (TPS)' },
+  { value: 'ttft', label: '首字延迟 (TTFT)' },
+  { value: 'cost', label: '本次费用 ($)' },
+  { value: 'quota_auto', label: '自动紧俏额度' },
+  { value: 'gemini_5h', label: 'Gemini 5h 额度' },
+  { value: 'gemini_weekly', label: 'Gemini 周额度' },
+  { value: 'claude_5h', label: 'Claude 5h 额度' },
+  { value: 'claude_weekly', label: 'Claude 周额度' },
+  { value: 'none', label: '不显示' },
 ];
 
 /** 插件版本更新策略可选项 */
@@ -5043,20 +5633,20 @@ function formatSyncTimeText(tsMs, updatedAt) {
 const SettingsView = defineComponent({
   name: 'SettingsView',
   setup({ onCleanup }) {
-    // --- 面板 1：本地配额监控与预算表单状态与控件 ---
-    let draftMode = 'official';
-    let draftTokens = 150000000;
-    let draftCost = 100;
     let draftShowUpstreamModel = false;
     let draftAutoUpdatePlugin = false;
+    let draftEnableWindowOverlay = true;
+    let draftShowTopbarMulti = true;
+    let draftTopbarSlots = [...DEFAULT_CLIENT_TOPBAR_SLOTS];
     let statusTimer = null;
+    let topbarTimer = null;
     let cloudTimer = null;
-    let lastSyncedSettingsSig = '';
 
     const saveStatusText = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
+    const topbarStatusText = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
     const cloudStatusMsg = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
 
-    /** 在本地预算面板右上角展示短暂的保存状态提示 */
+    /** 在常规设置面板右上角展示短暂的保存状态提示 */
     function showSaveFeedback(text) {
       if (statusTimer) {
         clearTimeout(statusTimer);
@@ -5068,6 +5658,21 @@ const SettingsView = defineComponent({
           statusTimer = null;
           patchText(saveStatusText, '');
         }, text === '保存失败' ? 2500 : 1500);
+      }
+    }
+
+    /** 在顶部栏定制面板右上角展示短暂的状态提示 */
+    function showTopbarFeedback(text, autoClearMs = 1500) {
+      if (topbarTimer) {
+        clearTimeout(topbarTimer);
+        topbarTimer = null;
+      }
+      patchText(topbarStatusText, text);
+      if (autoClearMs > 0) {
+        topbarTimer = setTimeout(() => {
+          topbarTimer = null;
+          patchText(topbarStatusText, '');
+        }, autoClearMs);
       }
     }
 
@@ -5086,110 +5691,54 @@ const SettingsView = defineComponent({
       }
     }
 
-    const modeSelect = CustomSelect({
-      modelValue: draftMode,
-      icon: 'sliders',
-      options: WEEKLY_MODE_OPTIONS,
-      onUpdateModelValue: (val) => {
-        draftMode = val;
-      },
-    });
-
-    // 模型名显示方式切换后立即持久化并刷新遥测数据
-    const stepModelSelect = CustomSelect({
-      modelValue: 'short',
-      icon: 'table',
-      options: STEP_MODEL_DISPLAY_OPTIONS,
+    // --- 面板 1：常规设置 ---
+    const windowMountSelect = CustomSelect({
+      modelValue: 'dual',
+      icon: 'dock',
+      options: WINDOW_MOUNT_OPTIONS,
       onUpdateModelValue: async (val) => {
-        draftShowUpstreamModel = val === 'upstream';
-        if (latestSettings) {
-          lastSyncedSettingsSig = settingsSig({
-            ...latestSettings,
-            showUpstreamModel: draftShowUpstreamModel,
-          });
-        }
+        const nextEnable = val !== 'sidebar';
+        draftEnableWindowOverlay = nextEnable;
+        windowMountSelect.setValue(nextEnable ? 'dual' : 'sidebar');
         showSaveFeedback('保存中…');
         try {
           await saveSettingsPatch({
-            showUpstreamModel: draftShowUpstreamModel,
+            enableWindowOverlay: nextEnable,
           });
           showSaveFeedback('已保存');
         } catch {
+          if (latestSettings) {
+            renderSettings(latestSettings);
+          }
           showSaveFeedback('保存失败');
         }
       },
     });
 
-    // 插件自动更新策略切换后立即保存至后端
-    const autoUpdateSelect = CustomSelect({
-      modelValue: 'manual',
-      icon: 'refresh',
-      options: AUTO_UPDATE_OPTIONS,
+    const stepModelSelect = CustomSelect({
+      modelValue: 'short',
+      icon: 'table',
+      options: STEP_MODEL_DISPLAY_OPTIONS,
       onUpdateModelValue: async (val) => {
-        draftAutoUpdatePlugin = val === 'auto';
-        if (latestSettings) {
-          lastSyncedSettingsSig = settingsSig({
-            ...latestSettings,
-            autoUpdatePlugin: draftAutoUpdatePlugin,
-          });
-        }
-        showCloudFeedback('保存中…', 0);
+        const nextUpstream = val === 'upstream';
+        draftShowUpstreamModel = nextUpstream;
+        stepModelSelect.setValue(nextUpstream ? 'upstream' : 'short');
+        showSaveFeedback('保存中…');
         try {
           await saveSettingsPatch({
-            autoUpdatePlugin: draftAutoUpdatePlugin,
+            showUpstreamModel: nextUpstream,
           });
-          showCloudFeedback('已保存', 1800);
+          showSaveFeedback('已保存');
         } catch {
-          showCloudFeedback('保存失败', 2500);
+          if (latestSettings) {
+            renderSettings(latestSettings);
+          }
+          showSaveFeedback('保存失败');
         }
       },
     });
 
-    const tokenBudgetInput = CustomNumberInput({
-      modelValue: draftTokens,
-      min: 100000,
-      max: 10000000000,
-      step: 1000000,
-      onUpdateModelValue: (val) => {
-        draftTokens = val;
-      },
-    });
-
-    const costBudgetInput = CustomNumberInput({
-      modelValue: draftCost,
-      min: 1,
-      max: 100000,
-      step: 5,
-      onUpdateModelValue: (val) => {
-        draftCost = val;
-      },
-    });
-
-    const saveBtn = h(
-      'button',
-      {
-        type: 'button',
-        className: 'btn-primary',
-        onClick: async () => {
-          showSaveFeedback('保存中…');
-          try {
-            await saveSettingsPatch({
-              weeklyLimitMode: draftMode,
-              weeklyTokenBudget: draftTokens,
-              weeklyCostBudget: draftCost,
-              showUpstreamModel: draftShowUpstreamModel,
-              autoUpdatePlugin: draftAutoUpdatePlugin,
-            });
-            showSaveFeedback('已保存');
-          } catch {
-            showSaveFeedback('保存失败');
-          }
-        },
-      },
-      [createSvgIcon('check', { size: 13 }), h('span', { text: '保存设置' })]
-    );
-
-    const budgetPanel = h('section', { className: 'panel' }, [
+    const generalPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
           createSvgIcon('sliders', { size: 13 }),
@@ -5198,30 +5747,210 @@ const SettingsView = defineComponent({
         saveStatusText,
       ]),
       h('div', { className: 'form-row' }, [
+        h('span', { className: 'form-label', text: '面板挂载方式' }),
+        windowMountSelect.el,
+      ]),
+      h('div', { className: 'form-row' }, [
         h('span', { className: 'form-label', text: '模型名称格式' }),
         stepModelSelect.el,
       ]),
-      h('div', { className: 'form-row' }, [
-        h('span', { className: 'form-label', text: '周额度基准' }),
-        modeSelect.el,
-      ]),
-      h('div', { className: 'dual-grid' }, [
-        h('div', { className: 'form-row' }, [
-          h('span', { className: 'form-label', text: '每周 Token 上限' }),
-          tokenBudgetInput.el,
-        ]),
-        h('div', { className: 'form-row' }, [
-          h('span', { className: 'form-label', text: '每周费用上限 ($)' }),
-          costBudgetInput.el,
-        ]),
-      ]),
-      h('div', { style: 'display: flex; justify-content: flex-end;' }, [saveBtn]),
     ]);
 
-    // --- 面板 2：版本更新面板 ---
+    // --- 面板 2：顶部栏定制（实时运行会话开关 + 右侧三槽位指标与顺序自定义） ---
+    const multiSessionToggle = SegmentedControl({
+      ariaLabel: '实时运行会话开关',
+      modelValue: 'show',
+      options: TOPBAR_MULTI_TOGGLE_OPTIONS,
+      onUpdateModelValue: async (val) => {
+        const nextShow = val !== 'hide';
+        draftShowTopbarMulti = nextShow;
+        syncTopbarControls();
+        showTopbarFeedback('保存中…', 0);
+        try {
+          await saveSettingsPatch({
+            showTopbarMultiSession: nextShow,
+          });
+          showTopbarFeedback('已保存', 1500);
+        } catch {
+          if (latestSettings) {
+            renderSettings(latestSettings);
+          }
+          showTopbarFeedback('保存失败', 2500);
+        }
+      },
+    });
+
+    async function persistTopbarSlots(nextRawSlots, noticeText = '') {
+      const normalized = normalizeClientTopbarSlots(nextRawSlots);
+      draftTopbarSlots = normalized;
+      syncTopbarControls();
+      showTopbarFeedback(noticeText || '保存中…', 0);
+      try {
+        await saveSettingsPatch({
+          topbarCapsuleSlots: normalized,
+        });
+        showTopbarFeedback(noticeText || '已保存', noticeText ? 2000 : 1500);
+      } catch {
+        if (latestSettings) {
+          renderSettings(latestSettings);
+        }
+        showTopbarFeedback('保存失败', 2500);
+      }
+    }
+
+    function handleSlotMetricChange(slotIndex, nextVal) {
+      const candidate = [...draftTopbarSlots];
+      candidate[slotIndex] = nextVal;
+      const wouldAllBeHidden = candidate.every((item) => item === 'none');
+      void persistTopbarSlots(
+        candidate,
+        wouldAllBeHidden ? '至少保留 1 项显示' : ''
+      );
+    }
+
+    function swapTopbarSlots(idxA, idxB) {
+      if (idxA < 0 || idxA > 2 || idxB < 0 || idxB > 2 || idxA === idxB) return;
+      const candidate = [...draftTopbarSlots];
+      const temp = candidate[idxA];
+      candidate[idxA] = candidate[idxB];
+      candidate[idxB] = temp;
+      void persistTopbarSlots(candidate);
+    }
+
+    const slotSelects = [0, 1, 2].map((idx) =>
+      CustomSelect({
+        modelValue: draftTopbarSlots[idx],
+        options: TOPBAR_SLOT_OPTIONS,
+        onUpdateModelValue: (val) => handleSlotMetricChange(idx, val),
+      })
+    );
+
+    const slotRows = [0, 1, 2].map((idx) => {
+      const upBtn = h(
+        'button',
+        {
+          type: 'button',
+          className: 'slot-move-btn',
+          disabled: idx === 0,
+          'aria-label': `槽位 ${idx + 1} 左移`,
+          title: idx === 0 ? '已在最左' : '上移 (在顶栏靠左)',
+          onClick: (e) => {
+            e.stopPropagation();
+            swapTopbarSlots(idx, idx - 1);
+          },
+        },
+        [createSvgIcon('chevron-up', { size: 12 })]
+      );
+
+      const downBtn = h(
+        'button',
+        {
+          type: 'button',
+          className: 'slot-move-btn',
+          disabled: idx === 2,
+          'aria-label': `槽位 ${idx + 1} 右移`,
+          title: idx === 2 ? '已在最右' : '下移 (在顶栏靠右)',
+          onClick: (e) => {
+            e.stopPropagation();
+            swapTopbarSlots(idx, idx + 1);
+          },
+        },
+        [createSvgIcon('chevron-down', { size: 12 })]
+      );
+
+      return h('div', { className: 'topbar-slot-row', 'data-slot-row': String(idx) }, [
+        h('span', { className: 'slot-index-badge', text: String(idx + 1) }),
+        slotSelects[idx].el,
+        h('span', { className: 'slot-order-btns' }, [upBtn, downBtn]),
+      ]);
+    });
+
+    const resetTopbarBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'btn-ghost-sm',
+        disabled: true,
+        onClick: async () => {
+          draftShowTopbarMulti = true;
+          draftTopbarSlots = [...DEFAULT_CLIENT_TOPBAR_SLOTS];
+          syncTopbarControls();
+          showTopbarFeedback('保存中…', 0);
+          try {
+            await saveSettingsPatch({
+              showTopbarMultiSession: true,
+              topbarCapsuleSlots: [...DEFAULT_CLIENT_TOPBAR_SLOTS],
+            });
+            showTopbarFeedback('已恢复默认', 1600);
+          } catch {
+            if (latestSettings) {
+              renderSettings(latestSettings);
+            }
+            showTopbarFeedback('保存失败', 2500);
+          }
+        },
+      },
+      [h('span', { text: '恢复默认' })]
+    );
+
+    function syncTopbarControls() {
+      multiSessionToggle.setValue(draftShowTopbarMulti ? 'show' : 'hide');
+      for (let i = 0; i < 3; i += 1) {
+        slotSelects[i].setValue(draftTopbarSlots[i]);
+      }
+      const isDefault =
+        draftShowTopbarMulti === true &&
+        draftTopbarSlots[0] === DEFAULT_CLIENT_TOPBAR_SLOTS[0] &&
+        draftTopbarSlots[1] === DEFAULT_CLIENT_TOPBAR_SLOTS[1] &&
+        draftTopbarSlots[2] === DEFAULT_CLIENT_TOPBAR_SLOTS[2];
+      patchAttr(resetTopbarBtn, 'disabled', isDefault);
+    }
+
+    const topbarPanel = h('section', { className: 'panel topbar-config-panel' }, [
+      h('div', { className: 'panel-header' }, [
+        h('span', { className: 'panel-title' }, [
+          createSvgIcon('dock', { size: 13 }),
+          h('span', { text: '顶部栏定制' }),
+        ]),
+        h('span', { className: 'topbar-header-right' }, [topbarStatusText, resetTopbarBtn]),
+      ]),
+      h('div', { className: 'settings-inline-row' }, [
+        h('span', { className: 'form-label', text: '实时运行会话' }),
+        multiSessionToggle.el,
+      ]),
+      h('div', { className: 'form-row' }, [
+        h('span', { className: 'form-label', text: '胶囊数值与顺序 (左 → 右)' }),
+        h('div', { className: 'topbar-slot-list' }, slotRows),
+      ]),
+    ]);
+
+    // --- 面板 3：版本更新面板 ---
+    const autoUpdateSelect = CustomSelect({
+      modelValue: 'manual',
+      icon: 'refresh',
+      options: AUTO_UPDATE_OPTIONS,
+      onUpdateModelValue: async (val) => {
+        const nextAuto = val === 'auto';
+        draftAutoUpdatePlugin = nextAuto;
+        autoUpdateSelect.setValue(nextAuto ? 'auto' : 'manual');
+        showCloudFeedback('保存中…', 0);
+        try {
+          await saveSettingsPatch({
+            autoUpdatePlugin: nextAuto,
+          });
+          showCloudFeedback('已保存', 1800);
+        } catch {
+          if (latestSettings) {
+            renderSettings(latestSettings);
+          }
+          showCloudFeedback('保存失败', 2500);
+        }
+      },
+    });
+
     const pricingCountVal = h('strong', { className: 'cell-value', text: '—' });
     const pricingSyncSub = h('span', { className: 'cell-sub', text: '读取中…' });
-    const versionVal = h('strong', { className: 'cell-value', text: 'v1.4.1' });
+    const versionVal = h('strong', { className: 'cell-value', text: 'v1.4.3' });
     const versionSub = h('span', { className: 'cell-sub', text: '检查中…' });
 
     const syncPricingBtnText = h('span', { text: '更新价格表' });
@@ -5276,7 +6005,7 @@ const SettingsView = defineComponent({
                 return;
               }
               if (!cs?.updateAvailable) {
-                const curVer = cs?.currentPluginVersion || '1.4.1';
+                const curVer = cs?.currentPluginVersion || '1.4.3';
                 showCloudFeedback(`当前已是最新版本 (v${curVer})`, 4500);
                 return;
               }
@@ -5330,38 +6059,35 @@ const SettingsView = defineComponent({
       h('div', { className: 'cloud-actions-row' }, [syncPricingBtn, updatePluginBtn]),
     ]);
 
-    const rootEl = h('div', { className: 'view-pane' }, [budgetPanel, cloudPanel]);
+    const settingsInner = h(
+      'div',
+      {
+        style: 'display: flex; flex-direction: column; gap: var(--space-3); padding-bottom: 2px;',
+      },
+      [generalPanel, topbarPanel, cloudPanel]
+    );
+    const viewScrollbar = CustomScrollbar({
+      contentEl: settingsInner,
+      className: 'view-pane',
+    });
 
     let latestSettings = null;
     let latestCloudStatus = null;
-    let isDirty = false;
-
-    /** 生成设置项签名，避免轮询返回相同配置时覆盖用户正在编辑的草稿值 */
-    function settingsSig(s) {
-      if (!s) return '';
-      return `${s.weeklyLimitMode}:${s.weeklyTokenBudget}:${s.weeklyCostBudget}:${Boolean(s.showUpstreamModel)}:${Boolean(s.autoUpdatePlugin)}`;
-    }
 
     /** 将后端返回的最新设置同步至表单控件 */
     function renderSettings(settings) {
       if (!settings) return;
-      const nextSig = settingsSig(settings);
-      if (nextSig === lastSyncedSettingsSig) return;
-      lastSyncedSettingsSig = nextSig;
-      draftMode =
-        settings.weeklyLimitMode === 'custom_tokens' ||
-        settings.weeklyLimitMode === 'custom_cost'
-          ? settings.weeklyLimitMode
-          : 'official';
-      draftTokens = Number(settings.weeklyTokenBudget || 150000000);
-      draftCost = Number(settings.weeklyCostBudget || 100);
       draftShowUpstreamModel = Boolean(settings.showUpstreamModel);
       draftAutoUpdatePlugin = Boolean(settings.autoUpdatePlugin);
-      modeSelect.setValue(draftMode);
+      draftEnableWindowOverlay = settings.enableWindowOverlay !== false;
+      draftShowTopbarMulti = settings.showTopbarMultiSession !== false;
+      draftTopbarSlots = normalizeClientTopbarSlots(settings.topbarCapsuleSlots);
+
+      windowMountSelect.setValue(draftEnableWindowOverlay ? 'dual' : 'sidebar');
       stepModelSelect.setValue(draftShowUpstreamModel ? 'upstream' : 'short');
       autoUpdateSelect.setValue(draftAutoUpdatePlugin ? 'auto' : 'manual');
-      tokenBudgetInput.setValue(draftTokens);
-      costBudgetInput.setValue(draftCost);
+      syncTopbarControls();
+      viewScrollbar.refresh();
     }
 
     /** 将云端价格表统计与插件版本对比状态同步至云端面板 */
@@ -5379,7 +6105,7 @@ const SettingsView = defineComponent({
         `${srcLabel} · ${formatSyncTimeText(cs.lastSyncedAtMs, cs.catalogUpdatedAt)}`
       );
 
-      const curVer = cs.currentPluginVersion || '1.4.1';
+      const curVer = cs.currentPluginVersion || '1.4.3';
       const latVer = cs.latestPluginVersion || curVer;
       const modeTag = cs.installMode === 'git' ? 'Git' : 'ZIP';
       patchText(versionVal, `v${curVer}`);
@@ -5398,6 +6124,7 @@ const SettingsView = defineComponent({
       if (!cloudTimer && (cs.lastUpdateError || (cs.lastUpdateResult?.ok === false && cs.lastUpdateResult?.message))) {
         showCloudFeedback(cs.lastUpdateError || cs.lastUpdateResult.message, 5500);
       }
+      viewScrollbar.refresh();
     }
 
     const unsub = telemetryStore.subscribe(
@@ -5408,42 +6135,51 @@ const SettingsView = defineComponent({
       (slice) => {
         latestSettings = slice.settings;
         latestCloudStatus = slice.cloudStatus;
-        if (uiStore.getState().activeView !== 'settings') {
-          isDirty = true;
-          return;
-        }
-        isDirty = false;
         renderSettings(slice.settings);
-        renderCloudStatus(slice.cloudStatus);
+        if (uiStore.getState().activeView === 'settings') {
+          renderCloudStatus(slice.cloudStatus);
+        }
       }
     );
 
     const unsubView = uiStore.subscribe(
       (st) => st.activeView,
       (activeView) => {
-        if (activeView === 'settings' && isDirty) {
-          isDirty = false;
+        if (activeView === 'settings') {
           if (latestSettings) renderSettings(latestSettings);
           if (latestCloudStatus) renderCloudStatus(latestCloudStatus);
+          viewScrollbar.refresh();
         }
       }
     );
 
     onCleanup(() => {
       if (statusTimer) clearTimeout(statusTimer);
+      if (topbarTimer) clearTimeout(topbarTimer);
       if (cloudTimer) clearTimeout(cloudTimer);
       unsub();
       unsubView();
-      modeSelect.destroy();
+      windowMountSelect.destroy();
       stepModelSelect.destroy();
+      multiSessionToggle.destroy();
+      for (const sel of slotSelects) {
+        sel.destroy();
+      }
       autoUpdateSelect.destroy();
-      tokenBudgetInput.destroy();
-      costBudgetInput.destroy();
+      viewScrollbar.destroy();
     });
 
     return {
-      el: rootEl,
-      refs: { modeSelect, stepModelSelect, autoUpdateSelect, tokenBudgetInput, costBudgetInput },
+      el: viewScrollbar.el,
+      refs: {
+        windowMountSelect,
+        stepModelSelect,
+        multiSessionToggle,
+        slotSelects,
+        resetTopbarBtn,
+        autoUpdateSelect,
+        viewScrollbar,
+      },
     };
   },
 });
@@ -5492,6 +6228,22 @@ const App = defineComponent({
       stageEl,
     ]);
 
+    function syncStepsBadge() {
+      const uiSt = uiStore.getState();
+      const scopeForBadge = uiSt.activeView === 'steps' ? uiSt.selectedAgentScope : 'all';
+      const { scopedConv } = resolveScopedConversation(
+        telemetryStore.getState().telemetry,
+        scopeForBadge,
+        uiSt.ctxInspectorAgentId
+      );
+      const stepCount = scopedConv?.stepCount ?? 0;
+      topPillNav.setProps({
+        items: VIEW_TABS.map((t) =>
+          t.value === 'steps' ? { ...t, badge: stepCount > 0 ? stepCount : '' } : t
+        ),
+      });
+    }
+
     const unsubUi = uiStore.subscribe(
       (st) => st.activeView,
       (activeView) => {
@@ -5506,23 +6258,12 @@ const App = defineComponent({
         } else if (activeView === 'steps') {
           stepsView.refs?.stepsScroll?.refresh();
           stepsView.refs?.modelsScroll?.refresh();
+        } else if (activeView === 'settings') {
+          settingsView.refs?.viewScrollbar?.refresh();
         }
+        syncStepsBadge();
       }
     );
-
-    function syncStepsBadge() {
-      const { scopedConv } = resolveScopedConversation(
-        telemetryStore.getState().telemetry,
-        uiStore.getState().selectedAgentScope,
-        uiStore.getState().ctxInspectorAgentId
-      );
-      const stepCount = scopedConv?.stepCount ?? 0;
-      topPillNav.setProps({
-        items: VIEW_TABS.map((t) =>
-          t.value === 'steps' ? { ...t, badge: stepCount > 0 ? stepCount : '' } : t
-        ),
-      });
-    }
 
     const unsubStepCount = telemetryStore.subscribe(
       (st) => ({
@@ -5564,9 +6305,2158 @@ const App = defineComponent({
   },
 });
 
+// --- src/components/layout/WindowOverlayShell.js ---
+/**
+ * @fileoverview 主窗口双栖挂载外壳 (WindowOverlayShell.js).
+ *
+ * 采用「分离式双 Shadow Host」架构，彻底规避宿主顶栏层叠上下文 (`z-0` / `overflow: hidden`) 裁切与路由重绘卸载问题：
+ * 1. `#ag-usage-monitor-capsule`：轻量顶栏胶囊，优先内嵌停靠至 `[class*="@container/titlebar"]` 右侧按钮组，
+ *    支持四级迟滞宽度自适应折叠（`wide` -> `compact` -> `minimal` -> `ring-only`），找不到顶栏时自动回退至右上角固定定位；
+ * 2. `#ag-usage-monitor-portal`：常驻 `document.body` 顶层的无遮挡浮层宿主，承载悬停速览卡与完整四标签 `App()` 监控面板，
+ *    在宿主切换会话重建顶栏 DOM 时始终保持组件实例、滚动位置与动画状态不丢失。
+ */
+
+
+const CAPSULE_HOST_ID = 'ag-usage-monitor-capsule';
+const PORTAL_HOST_ID = 'ag-usage-monitor-portal';
+const FLOATING_CARD_WIDTH = 492;
+const MULTI_PANEL_WIDTH = 484;
+const RING_RADIUS = 5.2;
+const RING_CIRCUMFERENCE = +(2 * Math.PI * RING_RADIUS).toFixed(2);
+
+/**
+ * 带迟滞区间（Hysteresis）的四阶段顶栏双胶囊响应式宽度计算，避免临界宽度反复跳动。
+ * 当左侧多会话入口关闭（`showMulti === false`）时自动释放约 76px 预算给右侧指标胶囊。
+ *
+ * @param {number} availWidth
+ * @param {'wide'|'compact'|'minimal'|'ring-only'} currentMode
+ * @param {{ showMulti?: boolean }} [options]
+ * @returns {'wide'|'compact'|'minimal'|'ring-only'}
+ */
+function computeCapsuleLayoutMode(availWidth, currentMode = 'wide', options = undefined) {
+  if (availWidth == null || Number.isNaN(availWidth)) return 'wide';
+  const showMulti = options?.showMulti !== false;
+  const effWidth = showMulti ? availWidth : availWidth + 76;
+  if (currentMode === 'wide') {
+    if (effWidth < 78) return 'ring-only';
+    if (effWidth < 196) return 'minimal';
+    if (effWidth < 256) return 'compact';
+    return 'wide';
+  }
+  if (currentMode === 'compact') {
+    if (effWidth >= 272) return 'wide';
+    if (effWidth < 78) return 'ring-only';
+    if (effWidth < 196) return 'minimal';
+    return 'compact';
+  }
+  if (currentMode === 'minimal') {
+    if (effWidth >= 272) return 'wide';
+    if (effWidth >= 212) return 'compact';
+    if (effWidth < 78) return 'ring-only';
+    return 'minimal';
+  }
+  if (effWidth >= 272) return 'wide';
+  if (effWidth >= 212) return 'compact';
+  if (effWidth >= 92) return 'minimal';
+  return 'ring-only';
+}
+
+function findHostTitlebar() {
+  try {
+    if (typeof document === 'undefined' || typeof document.querySelector !== 'function') {
+      return null;
+    }
+    return document.querySelector('[class*="@container/titlebar"]');
+  } catch {
+    return null;
+  }
+}
+
+function findNativeTopRightAnchor() {
+  try {
+    if (typeof document === 'undefined' || typeof document.querySelector !== 'function') {
+      return null;
+    }
+    const auxToggle = document.querySelector('[data-testid="toggle-aux-sidebar"]');
+    if (auxToggle?.closest) {
+      return auxToggle.closest('div.absolute.right-0.top-0') || auxToggle;
+    }
+    const candidates = document.querySelectorAll('button, a, [role="button"]');
+    for (const btn of candidates) {
+      const text = String(btn.textContent || '').trim();
+      if (
+        (text === 'Open IDE' || text === '打开 IDE' || text.includes('Open IDE') || text.includes('打开 IDE')) &&
+        btn.getBoundingClientRect?.().top < 52
+      ) {
+        return btn.closest?.('div.flex.items-center, div.absolute.right-0') || btn;
+      }
+    }
+    return document.querySelector('div.absolute.right-0.top-0');
+  } catch {
+    return null;
+  }
+}
+
+function getLeftSidebarRightEdge(vw) {
+  try {
+    if (typeof document !== 'undefined' && typeof document.querySelector === 'function') {
+      const navEl = document.querySelector('div[role="navigation"]');
+      if (navEl?.getBoundingClientRect) {
+        const nr = navEl.getBoundingClientRect();
+        if (nr.width > 0 && nr.left <= 8 && nr.right > 0 && nr.right < vw - 280) {
+          return Math.ceil(nr.right);
+        }
+      }
+    }
+  } catch {
+    // 忽略侧栏测量异常
+  }
+  return 0;
+}
+
+function resolveQuotaCapsuleSummary(quotas) {
+  if (!quotas) return null;
+  const activePool = quotas.activePool;
+  const weekly = quotas.weekly;
+  const candidates = [];
+  if (activePool && Number.isFinite(Number(activePool.remainingPct))) {
+    candidates.push({
+      pct: Number(activePool.remainingPct),
+      label: activePool.poolLabel || activePool.family || '当前池',
+      windowTag: '5h',
+    });
+  }
+  if (activePool && Number.isFinite(Number(activePool.weeklyRemainingPct))) {
+    candidates.push({
+      pct: Number(activePool.weeklyRemainingPct),
+      label: activePool.poolLabel || activePool.family || '当前池',
+      windowTag: '周',
+    });
+  }
+  if (!candidates.length && weekly && Number.isFinite(Number(weekly.remainingPct))) {
+    candidates.push({
+      pct: Number(weekly.remainingPct),
+      label: weekly.poolFamily || '周限额',
+      windowTag: '周',
+    });
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => a.pct - b.pct);
+  const tightest = candidates[0];
+  const rounded = Math.max(0, Math.min(100, Math.round(tightest.pct)));
+  return {
+    roundedPct: rounded,
+    shortText: `余 ${rounded}%`,
+    detailText: candidates
+      .map((c) => `${c.label} ${c.windowTag} 余 ${Math.max(0, Math.min(100, Math.round(c.pct)))}%`)
+      .join(' · '),
+  };
+}
+
+const THIRD_PARTY_FAMILY_RE = /claude|gpt|anthropic|openai|3p|sonnet|opus|haiku/i;
+
+/**
+ * 解析指定模型池（Gemini 或 Claude & GPT）与指定时间窗口（5h 或周额度）的剩余百分比摘要。
+ *
+ * @param {object|null|undefined} quotas
+ * @param {'gemini_5h'|'gemini_weekly'|'claude_5h'|'claude_weekly'} slotKey
+ * @returns {{ roundedPct: number, shortText: string } | null}
+ */
+function resolveSpecificQuotaSlotSummary(quotas, slotKey) {
+  if (!quotas) return null;
+  const pools = Array.isArray(quotas.pools) ? quotas.pools : [];
+  const activePool = quotas.activePool || null;
+  const isClaude = slotKey.startsWith('claude_');
+  const isWeekly = slotKey.endsWith('_weekly');
+  let rawPct = null;
+
+  if (isClaude) {
+    const claudePool =
+      pools.find((p) => p?.poolKey === 'Claude & GPT') ||
+      pools.find((p) => THIRD_PARTY_FAMILY_RE.test(String(p?.poolKey || p?.poolLabel || '')));
+    const cand = isWeekly ? claudePool?.weeklyRemainingPct : claudePool?.remainingPct;
+    if (cand != null && Number.isFinite(Number(cand))) {
+      rawPct = Number(cand);
+    } else if (
+      activePool &&
+      THIRD_PARTY_FAMILY_RE.test(String(activePool.family || activePool.poolLabel || ''))
+    ) {
+      const fb = isWeekly ? activePool.weeklyRemainingPct : activePool.remainingPct;
+      if (fb != null && Number.isFinite(Number(fb))) {
+        rawPct = Number(fb);
+      }
+    }
+  } else {
+    const stdGemini =
+      pools.find((p) => p?.poolKey === 'Gemini') ||
+      pools.find(
+        (p) =>
+          /gemini/i.test(String(p?.poolKey || p?.poolLabel || '')) &&
+          !/carbon|argon/i.test(String(p?.poolKey || ''))
+      );
+    const geminiFamilyPools = pools.filter((p) =>
+      /gemini|carbon|argon/i.test(String(p?.poolKey || p?.poolLabel || ''))
+    );
+    const primaryCand = isWeekly ? stdGemini?.weeklyRemainingPct : stdGemini?.remainingPct;
+    if (primaryCand != null && Number.isFinite(Number(primaryCand))) {
+      rawPct = Number(primaryCand);
+    } else {
+      const familyVals = geminiFamilyPools
+        .map((p) => (isWeekly ? p?.weeklyRemainingPct : p?.remainingPct))
+        .filter((v) => v != null && Number.isFinite(Number(v)))
+        .map(Number);
+      if (familyVals.length > 0) {
+        rawPct = Math.min(...familyVals);
+      } else if (
+        activePool &&
+        !THIRD_PARTY_FAMILY_RE.test(String(activePool.family || activePool.poolLabel || ''))
+      ) {
+        const fb = isWeekly ? activePool.weeklyRemainingPct : activePool.remainingPct;
+        if (fb != null && Number.isFinite(Number(fb))) {
+          rawPct = Number(fb);
+        }
+      }
+      if (
+        rawPct == null &&
+        isWeekly &&
+        quotas.weekly &&
+        !THIRD_PARTY_FAMILY_RE.test(String(quotas.weekly.poolFamily || '')) &&
+        quotas.weekly.remainingPct != null &&
+        Number.isFinite(Number(quotas.weekly.remainingPct))
+      ) {
+        rawPct = Number(quotas.weekly.remainingPct);
+      }
+    }
+  }
+
+  if (rawPct == null || !Number.isFinite(rawPct)) return null;
+  const rounded = Math.max(0, Math.min(100, Math.round(rawPct)));
+  return {
+    roundedPct: rounded,
+    shortText: `余 ${rounded}%`,
+  };
+}
+
+function formatCompactCapsuleCost(stepCost) {
+  if (stepCost == null || !Number.isFinite(Number(stepCost))) return '--';
+  const val = Math.max(0, Number(stepCost));
+  if (val === 0) return '$0.00';
+  if (val < 0.001) return '<$0.001';
+  if (val < 1) return `$${val.toFixed(3)}`;
+  if (val < 100) return `$${val.toFixed(2)}`;
+  return `$${Math.round(val)}`;
+}
+
+function formatCompactCapsuleTtft(ttftSec) {
+  if (ttftSec == null || !Number.isFinite(Number(ttftSec)) || Number(ttftSec) < 0) return '--s';
+  const val = Number(ttftSec);
+  if (val < 1) return `${val.toFixed(2)}s`;
+  if (val < 100) return `${val.toFixed(1)}s`;
+  return `${Math.round(val)}s`;
+}
+
+/**
+ * 在主窗口挂载双栖顶栏胶囊与完整四标签悬浮面板，并注册 `window.__AGUsageMonitorOverlay` 生命周期句柄。
+ */
+function mountWindowOverlay() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return null;
+
+  // 先读取旧实例缓存的遥测快照与展开态（热升级时无缝承接数据与悬停状态，杜绝闪烁或关开），再安全卸载旧实例
+  let carryOverTelemetry = null;
+  let carryOverTooltipOpen = false;
+  let carryOverPopoverOpen = false;
+  let carryOverMultiHoverOpen = false;
+  let carryOverMultiPinnedOpen = false;
+  let carryOverPointer = null;
+  try {
+    const prevOv = window.__AGUsageMonitorOverlay;
+    carryOverTelemetry = prevOv?.getTelemetrySnapshot?.() || null;
+    carryOverTooltipOpen = Boolean(prevOv?.isHoverOpen?.());
+    carryOverPopoverOpen = Boolean(prevOv?.isOpen?.());
+    carryOverMultiHoverOpen = Boolean(prevOv?.isMultiHoverOpen?.());
+    carryOverMultiPinnedOpen = Boolean(prevOv?.isMultiPinnedOpen?.());
+    carryOverPointer = prevOv?.getLastPointer?.() || null;
+    prevOv?.dispose?.();
+  } catch {
+    // 忽略旧实例卸载异常
+  }
+  try {
+    document.getElementById(CAPSULE_HOST_ID)?.remove?.();
+    document.getElementById(PORTAL_HOST_ID)?.remove?.();
+  } catch {
+    // 忽略残留节点清理异常
+  }
+
+  const bridgeConfig = getWindowBridgeConfig();
+  const bundleVersion = String(bridgeConfig?.bundleVersion || '');
+  const stylesCss = String(bridgeConfig?.stylesCss || '');
+  const seedTelemetry =
+    (bridgeConfig?.initialTelemetry && typeof bridgeConfig.initialTelemetry === 'object'
+      ? bridgeConfig.initialTelemetry
+      : null) || carryOverTelemetry;
+  if (bridgeConfig?.initialTelemetry) {
+    delete bridgeConfig.initialTelemetry;
+  }
+  if (seedTelemetry) {
+    telemetryStore.setState({
+      telemetry: seedTelemetry,
+      minuteTick: Math.floor(Date.now() / 30000),
+      syncState: 'idle',
+    });
+  }
+
+  let disposed = false;
+  let popoverOpen = false;
+  let tooltipOpen = false;
+  let multiOpen = false;
+  let multiPinned = false;
+  let hoverLeaveTimer = null;
+  let multiLeaveTimer = null;
+  const manualSubExpandMap = new Map();
+  const multiTimersMap = new Map();
+  let multiLiveTickTimer = null;
+  let hasPointerCoords = Boolean(
+    carryOverPointer &&
+      Number.isFinite(carryOverPointer.x) &&
+      Number.isFinite(carryOverPointer.y)
+  );
+  let lastPointerX = hasPointerCoords ? carryOverPointer.x : -1;
+  let lastPointerY = hasPointerCoords ? carryOverPointer.y : -1;
+  let layoutMode = 'wide';
+  let observedTitlebar = null;
+  let dockRafId = 0;
+  let lastObservedRouteId = extractHostRouteCascadeId();
+
+  function recordPointerCoords(e) {
+    if (e && Number.isFinite(e.clientX) && Number.isFinite(e.clientY)) {
+      lastPointerX = e.clientX;
+      lastPointerY = e.clientY;
+      hasPointerCoords = true;
+    }
+  }
+
+  function isPointerStillInCapsule() {
+    if (!hasPointerCoords || document.hidden || !capsuleBtn.getBoundingClientRect) {
+      return false;
+    }
+    const r = capsuleBtn.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    return (
+      lastPointerX >= r.left - 1 &&
+      lastPointerX <= r.right + 1 &&
+      lastPointerY >= r.top - 1 &&
+      lastPointerY <= r.bottom + 1
+    );
+  }
+
+  function isPointerInMultiZone() {
+    if (!hasPointerCoords || document.hidden || multiBtn.hasAttribute('hidden')) {
+      return false;
+    }
+    if (multiBtn.getBoundingClientRect) {
+      const mr = multiBtn.getBoundingClientRect();
+      if (
+        mr.width > 0 &&
+        mr.height > 0 &&
+        lastPointerX >= mr.left - 1 &&
+        lastPointerX <= mr.right + 1 &&
+        lastPointerY >= mr.top - 1 &&
+        lastPointerY <= mr.bottom + 10
+      ) {
+        return true;
+      }
+    }
+    if (multiOpen && multiPanelEl.getBoundingClientRect) {
+      const pr = multiPanelEl.getBoundingClientRect();
+      if (
+        pr.width > 0 &&
+        pr.height > 0 &&
+        lastPointerX >= pr.left - 1 &&
+        lastPointerX <= pr.right + 1 &&
+        lastPointerY >= pr.top - 4 &&
+        lastPointerY <= pr.bottom + 1
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function scheduleMultiHoverClose() {
+    if (multiLeaveTimer) {
+      clearTimeout(multiLeaveTimer);
+    }
+    multiLeaveTimer = setTimeout(() => {
+      multiLeaveTimer = null;
+      if (disposed || multiPinned || !multiOpen) return;
+      let nativeHover = false;
+      try {
+        nativeHover = Boolean(
+          multiBtn.matches?.(':hover') || multiPanelEl.matches?.(':hover')
+        );
+      } catch {
+        nativeHover = false;
+      }
+      if (nativeHover || isPointerInMultiZone()) {
+        return;
+      }
+      setMultiOpen(false);
+    }, 90);
+  }
+
+  function bindMultiElapsedTimer(timerKey, sig, rawStartMs, targetEl) {
+    const now = Date.now();
+    const prev = multiTimersMap.get(timerKey);
+    let startMs = prev?.startMs || 0;
+    if (!prev || prev.sig !== sig) {
+      const validRaw = Number(rawStartMs || 0);
+      startMs = validRaw > 0 && validRaw <= now + 2000 ? validRaw : now;
+    } else if (startMs <= 0 && Number(rawStartMs) > 0 && Number(rawStartMs) <= now + 2000) {
+      startMs = Number(rawStartMs);
+    }
+    multiTimersMap.set(timerKey, { sig, startMs, el: targetEl });
+    const elapsedSec = Math.max(0, (now - startMs) / 1000);
+    patchText(targetEl, formatElapsedSec(elapsedSec));
+  }
+
+  function tickMultiElapsedDisplay() {
+    const now = Date.now();
+    for (const entry of multiTimersMap.values()) {
+      if (!entry?.el) continue;
+      const elapsedSec = entry.startMs > 0 ? Math.max(0, (now - entry.startMs) / 1000) : 0;
+      patchText(entry.el, formatElapsedSec(elapsedSec));
+    }
+  }
+
+  function stopMultiLiveTicker() {
+    if (multiLiveTickTimer) {
+      clearInterval(multiLiveTickTimer);
+      multiLiveTickTimer = null;
+    }
+    multiTimersMap.clear();
+  }
+
+  function ensureMultiLiveTicker() {
+    if (multiTimersMap.size === 0) {
+      stopMultiLiveTicker();
+      return;
+    }
+    if (!multiLiveTickTimer) {
+      multiLiveTickTimer = setInterval(tickMultiElapsedDisplay, 1000);
+    }
+  }
+
+  function inspectSessionInMonitor(cascadeId) {
+    if (!cascadeId || cascadeId === 'current') return;
+    uiStore.setState({
+      activeView: 'overview',
+      selectedAgentScope: 'all',
+      ctxInspectorAgentId: 'auto',
+    });
+    telemetryStore.setState({ selectedConversationId: cascadeId });
+    void fetchTelemetry({ force: false });
+    setMultiOpen(false);
+    setPopoverOpen(true);
+  }
+
+  // --- 1. 创建顶栏双胶囊 Shadow Host（左：多会话实时信息；右：单会话指标胶囊） ---
+  const capsuleHost = document.createElement('div');
+  capsuleHost.id = CAPSULE_HOST_ID;
+  capsuleHost.className = 'wm-capsule-host';
+  capsuleHost.setAttribute('data-dock', 'fixed');
+  capsuleHost.setAttribute('data-layout', layoutMode);
+  const capsuleShadow = capsuleHost.attachShadow({ mode: 'open' });
+
+  const capsuleStyleEl = document.createElement('style');
+  capsuleStyleEl.textContent = stylesCss;
+  capsuleShadow.appendChild(capsuleStyleEl);
+
+  // 左侧无边框多会话实时触发按钮（固定预占宽度，不随运行数跳动）
+  const multiDot = h('span', { className: 'wm-multi-dot' });
+  const multiLabel = h('span', { className: 'wm-multi-label', text: '0 运行中' });
+  const multiBtn = h(
+    'button',
+    {
+      type: 'button',
+      className: 'wm-multi-btn',
+      'aria-label': '多会话实时信息',
+      'aria-expanded': 'false',
+      onClick: (e) => {
+        e.stopPropagation();
+        if (multiOpen && multiPinned) {
+          setMultiOpen(false);
+        } else {
+          setMultiOpen(true, { pinned: true });
+        }
+      },
+      onContextmenu: (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void fetchTelemetry({ force: true });
+      },
+      onMouseenter: (e) => {
+        recordPointerCoords(e);
+        if (multiLeaveTimer) {
+          clearTimeout(multiLeaveTimer);
+          multiLeaveTimer = null;
+        }
+        if (!popoverOpen && !multiPinned) {
+          setMultiOpen(true, { pinned: false });
+        }
+      },
+      onMouseleave: (e) => {
+        recordPointerCoords(e);
+        if (!multiPinned) {
+          scheduleMultiHoverClose();
+        }
+      },
+    },
+    [multiDot, multiLabel]
+  );
+
+  // 构建可复用的预占胶囊槽位节点（仅当槽位配置为 context 时挂载环形 SVG，运行期仅就地更新文本与属性）
+  function createCapsuleSlot(slotIndex, initialMetric) {
+    const ringSvg = document.createElementNS(SVG_NS, 'svg');
+    ringSvg.setAttribute('viewBox', '0 0 14 14');
+    ringSvg.setAttribute('class', 'wm-ring-svg');
+    ringSvg.setAttribute('aria-hidden', 'true');
+
+    const ringTrack = document.createElementNS(SVG_NS, 'circle');
+    ringTrack.setAttribute('cx', '7');
+    ringTrack.setAttribute('cy', '7');
+    ringTrack.setAttribute('r', String(RING_RADIUS));
+    ringTrack.setAttribute('class', 'wm-ring-track');
+
+    const ringFill = document.createElementNS(SVG_NS, 'circle');
+    ringFill.setAttribute('cx', '7');
+    ringFill.setAttribute('cy', '7');
+    ringFill.setAttribute('r', String(RING_RADIUS));
+    ringFill.setAttribute('class', 'wm-ring-fill');
+    ringFill.setAttribute('stroke-dasharray', String(RING_CIRCUMFERENCE));
+    ringFill.setAttribute('stroke-dashoffset', String(RING_CIRCUMFERENCE));
+
+    ringSvg.appendChild(ringTrack);
+    ringSvg.appendChild(ringFill);
+
+    const isCtx = initialMetric === 'context';
+    const textSpan = h('span', {
+      className: isCtx ? 'wm-slot-text wm-ctx-pct' : 'wm-slot-text',
+      text: isCtx ? '--%' : initialMetric === 'tps' ? '-- t/s' : '余 --%',
+    });
+    const el = h(
+      'span',
+      {
+        className: isCtx
+          ? 'wm-cap-slot wm-ctx-seg'
+          : initialMetric === 'tps'
+            ? 'wm-cap-slot wm-seg-speed'
+            : 'wm-cap-slot wm-seg-quota',
+        'data-slot-idx': String(slotIndex),
+        'data-metric': initialMetric,
+        'data-vis-rank': String(slotIndex + 1),
+      },
+      isCtx ? [ringSvg, textSpan] : [textSpan]
+    );
+
+    return {
+      el,
+      ringSvg,
+      ringFill,
+      textSpan,
+      ringMounted: isCtx,
+    };
+  }
+
+  const capsuleSlots = [
+    createCapsuleSlot(0, 'context'),
+    createCapsuleSlot(1, 'tps'),
+    createCapsuleSlot(2, 'quota_auto'),
+  ];
+  const sep0 = h('span', { className: 'wm-sep wm-sep-speed', 'data-sep-for-rank': '2' });
+  const sep1 = h('span', { className: 'wm-sep wm-sep-quota', 'data-sep-for-rank': '3' });
+  let lastShowMulti = true;
+
+  const updateDot = h('span', { className: 'wm-update-dot', hidden: true });
+
+  const capsuleBtn = h(
+    'button',
+    {
+      type: 'button',
+      className: 'wm-capsule-btn',
+      'aria-label': '用量与速度监控',
+      'aria-expanded': 'false',
+      onClick: (e) => {
+        e.stopPropagation();
+        setPopoverOpen(!popoverOpen);
+      },
+      onContextmenu: (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void fetchTelemetry({ force: true });
+      },
+      onMouseenter: (e) => {
+        recordPointerCoords(e);
+        if (hoverLeaveTimer) {
+          clearTimeout(hoverLeaveTimer);
+          hoverLeaveTimer = null;
+        }
+        if (!popoverOpen && !multiPinned) {
+          if (multiOpen) {
+            setMultiOpen(false);
+          }
+          setTooltipOpen(true);
+        }
+      },
+      onMouseleave: (e) => {
+        recordPointerCoords(e);
+        if (hoverLeaveTimer) {
+          clearTimeout(hoverLeaveTimer);
+        }
+        hoverLeaveTimer = setTimeout(() => {
+          hoverLeaveTimer = null;
+          if (disposed || popoverOpen) return;
+          let nativeHover = false;
+          try {
+            nativeHover = Boolean(capsuleBtn.matches?.(':hover'));
+          } catch {
+            nativeHover = false;
+          }
+          if (nativeHover || isPointerStillInCapsule()) {
+            return;
+          }
+          setTooltipOpen(false);
+        }, 40);
+      },
+    },
+    [capsuleSlots[0].el, sep0, capsuleSlots[1].el, sep1, capsuleSlots[2].el, updateDot]
+  );
+  capsuleShadow.appendChild(multiBtn);
+  capsuleShadow.appendChild(capsuleBtn);
+
+  // --- 2. 创建 Body 顶层浮层 Portal Shadow Host ---
+  const portalHost = document.createElement('div');
+  portalHost.id = PORTAL_HOST_ID;
+  portalHost.className = 'wm-portal-host';
+  const portalShadow = portalHost.attachShadow({ mode: 'open' });
+
+  const portalStyleEl = document.createElement('style');
+  portalStyleEl.textContent = stylesCss;
+  portalShadow.appendChild(portalStyleEl);
+
+  // 悬停全景概览浮层（复用实时概览三卡片架构：4格测速矩阵 + 10通道上下文窗口 + 动态配额池，全槽位预占）
+  const hoverTpsVal = h('strong', { className: 'cell-value accent-speed', text: '—' });
+  const hoverTpsSub = h('span', { className: 'cell-sub', text: '模型未知' });
+  const hoverPulseDot = createSvgIcon('dot', { size: 10 });
+
+  const hoverTtftVal = h('strong', { className: 'cell-value', text: '—' });
+  const hoverTtftSub = h('span', { className: 'cell-sub', text: '均值 —' });
+
+  const hoverAvgVal = h('strong', { className: 'cell-value', text: '—' });
+  const hoverAvgSub = h('span', { className: 'cell-sub', text: '有效 0/0 步' });
+
+  const hoverCostVal = h('strong', { className: 'cell-value', text: '—' });
+  const hoverCacheSub = h('span', { className: 'cell-sub accent-ok', text: '缓存 0% · 累计 $0.00' });
+
+  const hoverMatrixEl = h('section', { className: 'telemetry-matrix', 'aria-label': '实时指标' }, [
+    h('div', { className: 'matrix-cell' }, [
+      h('div', { className: 'cell-label' }, [h('span', { text: '输出速度' }), hoverPulseDot]),
+      hoverTpsVal,
+      hoverTpsSub,
+    ]),
+    h('div', { className: 'matrix-cell' }, [
+      h('div', { className: 'cell-label' }, [
+        h('span', { text: '首字延迟' }),
+        createSvgIcon('clock', { size: 11 }),
+      ]),
+      hoverTtftVal,
+      hoverTtftSub,
+    ]),
+    h('div', { className: 'matrix-cell' }, [
+      h('div', { className: 'cell-label' }, [
+        h('span', { text: '平均速度' }),
+        createSvgIcon('pulse', { size: 11 }),
+      ]),
+      hoverAvgVal,
+      hoverAvgSub,
+    ]),
+    h('div', { className: 'matrix-cell' }, [
+      h('div', { className: 'cell-label' }, [
+        h('span', { text: '本次费用' }),
+        createSvgIcon('bolt', { size: 11 }),
+      ]),
+      hoverCostVal,
+      hoverCacheSub,
+    ]),
+  ]);
+
+  const hoverCtxAgentBadge = h('span', {
+    className: 'agent-badge badge-main',
+    hidden: true,
+    text: '主代理',
+  });
+  const hoverCtxSummaryText = h('span', { className: 'text-mono', text: '0 / 256.0k (0%)' });
+  const hoverCtxSegmentBar = ContextSegmentMeter({ context: {} });
+
+  // 固定预占 10 个双列图例槽位，排序时仅就地替换色块类名与文本，不调用 appendChild 移动节点
+  const hoverLegendSlots = CTX_CHANNEL_DEFS.map((ch) => {
+    const swatchEl = h('span', { className: `swatch ${ch.segClass}` });
+    const labelEl = h('span', { text: ch.label });
+    const valEl = h('strong', { className: 'text-mono', text: '0' });
+    const itemEl = h('div', { className: 'legend-item' }, [
+      h('span', { className: 'legend-left' }, [swatchEl, labelEl]),
+      valEl,
+    ]);
+    return { itemEl, swatchEl, labelEl, valEl };
+  });
+
+  const hoverCtxLegendGrid = h(
+    'div',
+    { className: 'ctx-legend-grid' },
+    hoverLegendSlots.map((slot) => slot.itemEl)
+  );
+
+  const hoverCtxPanel = h('section', { className: 'panel' }, [
+    h('div', { className: 'panel-header' }, [
+      h('span', { className: 'panel-title' }, [
+        createSvgIcon('layers', { size: 13 }),
+        h('span', { text: '上下文窗口' }),
+        hoverCtxAgentBadge,
+      ]),
+      h('span', { className: 'panel-meta' }, [hoverCtxSummaryText]),
+    ]),
+    hoverCtxSegmentBar.el,
+    hoverCtxLegendGrid,
+  ]);
+
+  const hoverTierBadge = h('span', { className: 'panel-meta', text: 'Google AI · Pro' });
+  const hoverPoolsListEl = h('div', { className: 'wm-hover-quota-pools' });
+  patchKeyedList(
+    hoverPoolsListEl,
+    buildQuotaPoolItems(null, 0, { isPending: true }),
+    {
+      keyFn: (item) => item.key,
+      sigFn: quotaPoolRowSig,
+      createRow: createPoolQuotaRow,
+      updateRow: syncPoolQuotaRow,
+    }
+  );
+  const hoverWkFootLeft = h('span', { className: 'text-muted', text: '本周累计: 0 ($0.00)' });
+  const hoverWkFootRight = h('span', { className: 'text-muted', text: '本周调用: 0 次' });
+
+  const hoverQuotaPanel = h('section', { className: 'panel' }, [
+    h('div', { className: 'panel-header' }, [
+      h('span', { className: 'panel-title' }, [
+        createSvgIcon('pulse', { size: 13 }),
+        h('span', { text: '可用额度' }),
+      ]),
+      hoverTierBadge,
+    ]),
+    hoverPoolsListEl,
+    h('div', { className: 'panel-header wm-hover-quota-foot' }, [
+      hoverWkFootLeft,
+      hoverWkFootRight,
+    ]),
+  ]);
+
+  const hoverTipEl = h(
+    'div',
+    {
+      className: 'wm-hover-tip',
+      hidden: true,
+    },
+    [hoverMatrixEl, hoverCtxPanel, hoverQuotaPanel]
+  );
+
+  // 左侧多会话实时看板浮层（活跃运行会话卡片 + 近期多窗口会话速览，全槽位预占、就地补丁更新）
+  function createMultiLiveSubRow() {
+    const subBadge = h('span', { className: 'agent-badge badge-sub-1', text: '子1' });
+    const subRole = h('span', { className: 'live-sub-role', text: '子代理' });
+    const subSummary = h('span', { className: 'live-sub-summary', text: '' });
+    const subElapsed = h('span', { className: 'live-sub-elapsed text-mono', text: '0s' });
+    const rowEl = h('div', { className: 'live-sub-row' }, [
+      h('div', { className: 'live-sub-left' }, [subBadge, subRole, subSummary]),
+      subElapsed,
+    ]);
+    return {
+      el: rowEl,
+      refs: { rowEl, subBadge, subRole, subSummary, subElapsed },
+    };
+  }
+
+  function createMultiLiveTaskCard() {
+    const dotIcon = createSvgIcon('dot', { size: 11 });
+    patchClasses(dotIcon, { 'is-pulsing': true });
+    const dotWrap = h('span', { className: 'live-activity-dot' }, [dotIcon]);
+    const titleEl = h('strong', { className: 'live-task-title', text: '当前会话' });
+    const hereTagEl = h('span', {
+      className: 'wm-session-tag is-here',
+      hidden: true,
+      text: '本窗',
+    });
+    const metricsEl = h('span', {
+      className: 'wm-task-metrics text-mono',
+      hidden: true,
+      text: '',
+    });
+    const subToggleBtn = h('button', {
+      type: 'button',
+      className: 'live-sub-toggle',
+      hidden: true,
+      text: '子代理 (0) ▸',
+    });
+    const elapsedEl = h('span', {
+      className: 'live-activity-elapsed text-mono',
+      text: '0s',
+    });
+
+    const headerEl = h('div', { className: 'live-task-header' }, [
+      h('div', { className: 'live-task-title-wrap' }, [dotWrap, titleEl, hereTagEl]),
+      h('div', { className: 'live-task-header-right' }, [metricsEl, subToggleBtn, elapsedEl]),
+    ]);
+
+    const mainBadge = h('span', {
+      className: 'agent-badge badge-main',
+      hidden: true,
+      text: '主',
+    });
+    const mainPhase = h('strong', { className: 'live-activity-phase', text: '推理中' });
+    const mainProgress = h('span', {
+      className: 'live-activity-progress text-mono',
+      hidden: true,
+      text: '',
+    });
+    const mainSep = h('span', { className: 'live-activity-sep', hidden: true, text: '·' });
+    const mainDetail = h('span', {
+      className: 'live-activity-detail',
+      hidden: true,
+      text: '',
+    });
+
+    const mainRowEl = h('div', { className: 'live-task-main-row' }, [
+      mainBadge,
+      mainPhase,
+      mainProgress,
+      mainSep,
+      mainDetail,
+    ]);
+
+    const subListEl = h('div', { className: 'live-sub-list', hidden: true });
+    const cardEl = h('div', { className: 'live-task-card' }, [headerEl, mainRowEl, subListEl]);
+
+    return {
+      el: cardEl,
+      refs: {
+        cardEl,
+        dotIcon,
+        titleEl,
+        hereTagEl,
+        metricsEl,
+        subToggleBtn,
+        elapsedEl,
+        mainBadge,
+        mainPhase,
+        mainProgress,
+        mainSep,
+        mainDetail,
+        subListEl,
+      },
+    };
+  }
+
+  const multiPinBadge = h('span', { className: 'wm-pin-badge', hidden: true, text: '已固定' });
+  const multiRunningMetaEl = h('span', { className: 'panel-meta text-mono', text: '读取中...' });
+  const multiEmptyHintEl = h('span', {
+    className: 'wm-multi-empty-hint',
+    text: '悬停速览 · 左键固定',
+  });
+  const multiEmptyEl = h('div', { className: 'wm-multi-empty' }, [
+    h('span', { className: 'wm-multi-empty-left' }, [
+      h('span', { className: 'wm-idle-dot' }),
+      h('span', { text: '当前暂无在线运行的会话' }),
+    ]),
+    multiEmptyHintEl,
+  ]);
+  const multiRunningListEl = h('div', {
+    className: 'live-activity-list',
+    hidden: true,
+    'aria-live': 'polite',
+  });
+
+  const multiHeaderEl = h('div', { className: 'panel-header wm-multi-header' }, [
+    h('span', { className: 'panel-title' }, [
+      createSvgIcon('pulse', { size: 13 }),
+      h('span', { text: '实时运行会话' }),
+      multiPinBadge,
+    ]),
+    multiRunningMetaEl,
+  ]);
+
+  const multiPanelEl = h(
+    'div',
+    {
+      className: 'wm-multi-panel',
+      role: 'dialog',
+      'aria-label': '多会话实时信息面板',
+      hidden: true,
+      onMouseenter: (e) => {
+        recordPointerCoords(e);
+        if (multiLeaveTimer) {
+          clearTimeout(multiLeaveTimer);
+          multiLeaveTimer = null;
+        }
+      },
+      onMouseleave: (e) => {
+        recordPointerCoords(e);
+        if (!multiPinned) {
+          scheduleMultiHoverClose();
+        }
+      },
+    },
+    [multiHeaderEl, multiEmptyEl, multiRunningListEl]
+  );
+
+  // 完整四标签悬浮容器
+  const appInstance = App();
+  const popoverEl = h(
+    'div',
+    {
+      className: 'wm-popover-panel',
+      role: 'dialog',
+      'aria-label': '用量与速度监控面板',
+      hidden: true,
+    },
+    [appInstance.el]
+  );
+
+  portalShadow.appendChild(multiPanelEl);
+  portalShadow.appendChild(hoverTipEl);
+  portalShadow.appendChild(popoverEl);
+  (document.body || document.documentElement).appendChild(portalHost);
+
+  // --- 3. 几何测量、顶栏停靠与防溢出定位 ---
+  function updateFixedFallbackPosition() {
+    if (capsuleHost.getAttribute('data-dock') === 'flow') {
+      capsuleHost.style.top = '';
+      capsuleHost.style.right = '';
+      return;
+    }
+    try {
+      const vw = Number(window.innerWidth || 1280);
+      let rightOffset = 144;
+      const anchor = findNativeTopRightAnchor();
+      if (anchor?.getBoundingClientRect) {
+        const r = anchor.getBoundingClientRect();
+        if (r.width > 0 && r.left > 0 && r.left < vw) {
+          rightOffset = Math.max(144, Math.ceil(vw - r.left + 6));
+        }
+      }
+      capsuleHost.style.top = '7px';
+      capsuleHost.style.right = `${rightOffset}px`;
+    } catch {
+      // 忽略回退坐标计算异常
+    }
+  }
+
+  function measureAvailableTitlebarWidth(titlebar) {
+    try {
+      if (titlebar?.getBoundingClientRect) {
+        const tbRect = titlebar.getBoundingClientRect();
+        if (tbRect.width > 0) {
+          const titleEl = titlebar.firstElementChild;
+          const titleInner = titleEl?.firstElementChild;
+          const contentStart = titleInner?.getBoundingClientRect
+            ? Math.max(8, titleInner.getBoundingClientRect().left - tbRect.left)
+            : tbRect.left < 168
+              ? 168 - tbRect.left
+              : 12;
+          const minTitleWidth = 180;
+          let siblingButtonsWidth = 64;
+          let rightPad = 8;
+          const rightGroup = capsuleHost.parentElement;
+          if (rightGroup && rightGroup !== titlebar) {
+            const auxOpen =
+              typeof document.querySelector === 'function' &&
+              Boolean(document.querySelector('[data-testid="aux-pane-sash"]'));
+            const root =
+              typeof document.querySelector === 'function'
+                ? document.querySelector('div.h-screen.w-screen')
+                : null;
+            const rightClusterVar =
+              root?.style?.getPropertyValue?.('--right-cluster-width')?.trim() || '';
+            if (auxOpen) {
+              rightPad = 8;
+            } else if (rightClusterVar) {
+              rightPad = Math.max(8, (parseFloat(rightClusterVar) || 44) - 4);
+            } else if (typeof window.getComputedStyle === 'function') {
+              rightPad = parseFloat(window.getComputedStyle(rightGroup).paddingRight) || 0;
+            }
+            if (rightGroup.children) {
+              let sum = 0;
+              for (const child of rightGroup.children) {
+                if (child !== capsuleHost && child.getBoundingClientRect) {
+                  sum += child.getBoundingClientRect().width;
+                }
+              }
+              if (sum > 0) siblingButtonsWidth = sum + 8;
+            }
+          }
+          return tbRect.width - contentStart - minTitleWidth - rightPad - siblingButtonsWidth;
+        }
+      }
+      if (window.innerWidth) {
+        return window.innerWidth - 360;
+      }
+    } catch {
+      // 忽略测量异常
+    }
+    return 320;
+  }
+
+  function positionFloatingElements() {
+    if (disposed || !capsuleBtn.getBoundingClientRect) return;
+    try {
+      const bRect = capsuleBtn.getBoundingClientRect();
+      if (bRect.width === 0 && bRect.height === 0) return;
+      const vw = Number(window.innerWidth || 1280);
+      const vh = Number(window.innerHeight || 800);
+      const navRight = getLeftSidebarRightEdge(vw);
+      const minLeft = navRight > 0 ? Math.max(12, navRight + 12) : 12;
+      const defaultCardW = Math.min(FLOATING_CARD_WIDTH, Math.max(280, vw - 24));
+      const defaultMultiW = Math.min(MULTI_PANEL_WIDTH, Math.max(280, vw - 24));
+
+      if (multiOpen) {
+        const mRect = multiBtn.getBoundingClientRect?.() || bRect;
+        const anchorRect = mRect.width > 0 || mRect.height > 0 ? mRect : bRect;
+        const rawW =
+          Number(multiPanelEl.offsetWidth) ||
+          Number(multiPanelEl.getBoundingClientRect?.().width) ||
+          defaultMultiW;
+        const panelW = Math.min(rawW, Math.max(280, vw - minLeft - 12));
+        const panelH =
+          Number(multiPanelEl.offsetHeight) ||
+          Number(multiPanelEl.getBoundingClientRect?.().height) ||
+          320;
+        let top = Math.max(38, Math.round(anchorRect.bottom + 6));
+        if (top + panelH > vh - 8 && anchorRect.top > panelH + 12) {
+          top = Math.round(anchorRect.top - panelH - 6);
+        }
+        let left = Math.round(anchorRect.left);
+        left = Math.min(left, vw - panelW - 12);
+        left = Math.max(minLeft, left);
+        multiPanelEl.style.top = `${top}px`;
+        multiPanelEl.style.left = `${left}px`;
+        multiPanelEl.style.maxHeight = `${Math.max(240, vh - top - 12)}px`;
+      }
+
+      if (popoverOpen) {
+        const rawW =
+          Number(popoverEl.offsetWidth) ||
+          Number(popoverEl.getBoundingClientRect?.().width) ||
+          defaultCardW;
+        const panelW = Math.min(rawW, Math.max(280, vw - minLeft - 12));
+        const top = Math.max(38, Math.min(vh - 140, Math.round(bRect.bottom + 6)));
+        let left = Math.round(bRect.right - panelW);
+        left = Math.min(left, vw - panelW - 12);
+        left = Math.max(minLeft, left);
+        popoverEl.style.top = `${top}px`;
+        popoverEl.style.left = `${left}px`;
+        popoverEl.style.maxHeight = `${Math.max(240, vh - top - 12)}px`;
+      }
+
+      if (tooltipOpen && !popoverOpen && !multiOpen) {
+        const rawW =
+          Number(hoverTipEl.offsetWidth) ||
+          Number(hoverTipEl.getBoundingClientRect?.().width) ||
+          defaultCardW;
+        const tipW = Math.min(rawW, Math.max(280, vw - minLeft - 12));
+        const tipH =
+          Number(hoverTipEl.offsetHeight) ||
+          Number(hoverTipEl.getBoundingClientRect?.().height) ||
+          480;
+        let top = Math.max(38, Math.round(bRect.bottom + 6));
+        if (top + tipH > vh - 8 && bRect.top > tipH + 12) {
+          top = Math.round(bRect.top - tipH - 6);
+        }
+        let left = Math.round(bRect.right - tipW);
+        left = Math.min(left, vw - tipW - 12);
+        left = Math.max(minLeft, left);
+        hoverTipEl.style.top = `${top}px`;
+        hoverTipEl.style.left = `${left}px`;
+        hoverTipEl.style.maxHeight = `${Math.max(240, vh - top - 12)}px`;
+      }
+    } catch {
+      // 忽略定位异常
+    }
+  }
+
+  function updateResponsiveLayout() {
+    if (disposed) return;
+    const titlebar = findHostTitlebar();
+    const avail = measureAvailableTitlebarWidth(titlebar);
+    const showMulti =
+      telemetryStore.getState().telemetry?.settings?.showTopbarMultiSession !== false;
+    const nextMode = computeCapsuleLayoutMode(avail, layoutMode, { showMulti });
+    if (nextMode !== layoutMode) {
+      layoutMode = nextMode;
+      capsuleHost.setAttribute('data-layout', layoutMode);
+    }
+    if (capsuleHost.getAttribute('data-dock') === 'fixed') {
+      updateFixedFallbackPosition();
+    }
+    if (popoverOpen || tooltipOpen || multiOpen) {
+      positionFloatingElements();
+    }
+  }
+
+  let resizeObserver = null;
+
+  function ensureCapsuleDocked() {
+    if (disposed) return false;
+    const bodyOrDoc = document.body || document.documentElement;
+    if (bodyOrDoc && !portalHost.isConnected) {
+      bodyOrDoc.appendChild(portalHost);
+    }
+
+    const titlebar = findHostTitlebar();
+    if (titlebar) {
+      let targetContainer = titlebar;
+      try {
+        const rightGroup = titlebar.querySelector(':scope > div.shrink-0') || titlebar.lastElementChild;
+        if (rightGroup && rightGroup !== titlebar.firstElementChild) {
+          targetContainer = rightGroup;
+        }
+      } catch {
+        // 忽略子选择器不兼容场景
+      }
+
+      if (capsuleHost.parentElement !== targetContainer) {
+        if (targetContainer.firstChild && targetContainer !== titlebar) {
+          targetContainer.insertBefore(capsuleHost, targetContainer.firstChild);
+        } else {
+          targetContainer.appendChild(capsuleHost);
+        }
+      }
+      patchAttr(capsuleHost, 'data-dock', 'flow');
+      if (capsuleHost.style.top) capsuleHost.style.top = '';
+      if (capsuleHost.style.right) capsuleHost.style.right = '';
+
+      if (observedTitlebar !== titlebar) {
+        observedTitlebar = titlebar;
+        try {
+          if (resizeObserver) {
+            resizeObserver.disconnect();
+            resizeObserver.observe(titlebar);
+            if (document.body) resizeObserver.observe(document.body);
+          }
+        } catch {
+          // 忽略观察器异常
+        }
+      }
+    } else if (bodyOrDoc) {
+      if (capsuleHost.parentElement !== bodyOrDoc) {
+        bodyOrDoc.appendChild(capsuleHost);
+      }
+      patchAttr(capsuleHost, 'data-dock', 'fixed');
+      updateFixedFallbackPosition();
+    }
+
+    updateResponsiveLayout();
+    return Boolean(capsuleHost.isConnected && portalHost.isConnected);
+  }
+
+  function scheduleDockSync() {
+    if (disposed) return;
+    if (typeof requestAnimationFrame === 'function') {
+      if (dockRafId) return;
+      dockRafId = requestAnimationFrame(() => {
+        dockRafId = 0;
+        ensureCapsuleDocked();
+      });
+    } else {
+      ensureCapsuleDocked();
+    }
+  }
+
+  function refreshActiveViewScrollbars() {
+    const activeView = uiStore.getState().activeView;
+    const refs = appInstance.refs;
+    if (activeView === 'overview') {
+      refs?.overviewView?.refs?.viewScrollbar?.refresh();
+    } else if (activeView === 'consumption') {
+      refs?.consumptionView?.refs?.viewScrollbar?.refresh();
+    } else if (activeView === 'steps') {
+      refs?.stepsView?.refs?.stepsScroll?.refresh();
+      refs?.stepsView?.refs?.modelsScroll?.refresh();
+    } else if (activeView === 'settings') {
+      refs?.settingsView?.refs?.viewScrollbar?.refresh();
+    }
+  }
+
+  function setMultiOpen(nextOpen, { pinned = false, instant = false } = {}) {
+    const targetOpen = Boolean(nextOpen);
+    if (targetOpen && multiLeaveTimer) {
+      clearTimeout(multiLeaveTimer);
+      multiLeaveTimer = null;
+    }
+    if (targetOpen) {
+      setTooltipOpen(false);
+      if (pinned && popoverOpen) {
+        setPopoverOpen(false);
+      }
+    }
+    const nextPinned = targetOpen ? Boolean(pinned) : false;
+    const stateChanged = multiOpen !== targetOpen || multiPinned !== nextPinned;
+    multiOpen = targetOpen;
+    multiPinned = nextPinned;
+    patchClasses(multiBtn, { 'is-open': multiOpen && multiPinned });
+    patchAttr(multiBtn, 'aria-expanded', multiOpen ? 'true' : 'false');
+    patchAttr(multiPinBadge, 'hidden', !multiPinned);
+    if (!stateChanged) return;
+    patchClasses(multiPanelEl, { 'is-instant': Boolean(instant && multiOpen) });
+    patchAttr(multiPanelEl, 'hidden', !multiOpen);
+    if (multiOpen) {
+      positionFloatingElements();
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => positionFloatingElements());
+      }
+    }
+  }
+
+  function setTooltipOpen(nextOpen, { instant = false } = {}) {
+    const targetOpen = Boolean(nextOpen && !popoverOpen && !(multiOpen && multiPinned));
+    if (targetOpen && hoverLeaveTimer) {
+      clearTimeout(hoverLeaveTimer);
+      hoverLeaveTimer = null;
+    }
+    if (targetOpen && multiOpen && !multiPinned) {
+      setMultiOpen(false);
+    }
+    if (tooltipOpen === targetOpen) return;
+    tooltipOpen = targetOpen;
+    patchClasses(hoverTipEl, { 'is-instant': Boolean(instant && targetOpen) });
+    patchAttr(hoverTipEl, 'hidden', !tooltipOpen);
+    if (tooltipOpen) {
+      positionFloatingElements();
+    }
+  }
+
+  function setPopoverOpen(nextOpen, { instant = false } = {}) {
+    const targetOpen = Boolean(nextOpen);
+    if (targetOpen) {
+      setTooltipOpen(false);
+      if (multiOpen) {
+        setMultiOpen(false);
+      }
+    }
+    if (popoverOpen === targetOpen) return;
+    popoverOpen = targetOpen;
+    patchClasses(capsuleBtn, { 'is-open': popoverOpen });
+    patchClasses(popoverEl, { 'is-instant': Boolean(instant && popoverOpen) });
+    patchAttr(capsuleBtn, 'aria-expanded', popoverOpen ? 'true' : 'false');
+    patchAttr(popoverEl, 'hidden', !popoverOpen);
+    if (popoverOpen) {
+      positionFloatingElements();
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => {
+          positionFloatingElements();
+          refreshActiveViewScrollbars();
+        });
+      } else {
+        refreshActiveViewScrollbars();
+      }
+    }
+  }
+
+  function resolveCapsuleSlotPresentation(metricKey, slotCtx) {
+    if (metricKey === 'none') {
+      return {
+        hidden: true,
+        metric: 'none',
+        segClass: 'wm-cap-slot',
+        textClass: 'wm-slot-text',
+        showRing: false,
+        dashOffset: RING_CIRCUMFERENCE,
+        text: '',
+        running: false,
+        warn: false,
+        danger: false,
+      };
+    }
+
+    if (metricKey === 'context') {
+      if (!slotCtx.hasTelemetry) {
+        return {
+          hidden: false,
+          metric: 'context',
+          segClass: 'wm-cap-slot wm-ctx-seg',
+          textClass: 'wm-slot-text wm-ctx-pct',
+          showRing: true,
+          dashOffset: RING_CIRCUMFERENCE,
+          text: '--%',
+          running: false,
+          warn: false,
+          danger: false,
+        };
+      }
+      const isDanger = slotCtx.usedPct >= 88;
+      const isWarn = !isDanger && slotCtx.usedPct >= 70;
+      return {
+        hidden: false,
+        metric: 'context',
+        segClass: 'wm-cap-slot wm-ctx-seg',
+        textClass: 'wm-slot-text wm-ctx-pct',
+        showRing: true,
+        dashOffset: slotCtx.dashOffset,
+        text: `${Math.round(slotCtx.usedPct)}%`,
+        running: false,
+        warn: isWarn,
+        danger: isDanger,
+      };
+    }
+
+    if (metricKey === 'tps') {
+      if (!slotCtx.hasTelemetry) {
+        return {
+          hidden: false,
+          metric: 'tps',
+          segClass: 'wm-cap-slot wm-seg-speed',
+          textClass: 'wm-slot-text wm-speed-text',
+          showRing: false,
+          dashOffset: RING_CIRCUMFERENCE,
+          text: '-- t/s',
+          running: false,
+          warn: false,
+          danger: false,
+        };
+      }
+      const hasValidTps = Number.isFinite(slotCtx.tps) && slotCtx.tps > 0;
+      const tpsText = hasValidTps
+        ? `${slotCtx.tps >= 100 ? Math.round(slotCtx.tps) : slotCtx.tps.toFixed(1)} t/s`
+        : slotCtx.isRunning
+          ? '生成中'
+          : '待命';
+      return {
+        hidden: false,
+        metric: 'tps',
+        segClass: 'wm-cap-slot wm-seg-speed',
+        textClass: 'wm-slot-text wm-speed-text',
+        showRing: false,
+        dashOffset: RING_CIRCUMFERENCE,
+        text: tpsText,
+        running: slotCtx.isRunning,
+        warn: false,
+        danger: false,
+      };
+    }
+
+    if (metricKey === 'ttft') {
+      const val = slotCtx.hasTelemetry ? slotCtx.ttft : null;
+      const valid = val != null && Number.isFinite(Number(val)) && Number(val) >= 0;
+      const numVal = valid ? Number(val) : 0;
+      const isDanger = valid && numVal >= 30;
+      const isWarn = valid && !isDanger && numVal >= 15;
+      return {
+        hidden: false,
+        metric: 'ttft',
+        segClass: 'wm-cap-slot wm-seg-ttft',
+        textClass: 'wm-slot-text wm-ttft-text',
+        showRing: false,
+        dashOffset: RING_CIRCUMFERENCE,
+        text: valid ? formatCompactCapsuleTtft(numVal) : '--s',
+        running: false,
+        warn: isWarn,
+        danger: isDanger,
+      };
+    }
+
+    if (metricKey === 'cost') {
+      const costVal = slotCtx.hasTelemetry ? slotCtx.stepCost : null;
+      return {
+        hidden: false,
+        metric: 'cost',
+        segClass: 'wm-cap-slot wm-seg-cost',
+        textClass: 'wm-slot-text wm-cost-text',
+        showRing: false,
+        dashOffset: RING_CIRCUMFERENCE,
+        text: slotCtx.hasTelemetry ? formatCompactCapsuleCost(costVal) : '--',
+        running: false,
+        warn: false,
+        danger: false,
+      };
+    }
+
+    const quotaSum = !slotCtx.hasTelemetry
+      ? null
+      : metricKey === 'quota_auto'
+        ? resolveQuotaCapsuleSummary(slotCtx.quotas)
+        : resolveSpecificQuotaSlotSummary(slotCtx.quotas, metricKey);
+    const isDanger = Boolean(quotaSum && quotaSum.roundedPct <= 15);
+    const isWarn = Boolean(quotaSum && !isDanger && quotaSum.roundedPct <= 30);
+    return {
+      hidden: false,
+      metric: metricKey,
+      segClass: 'wm-cap-slot wm-seg-quota',
+      textClass: 'wm-slot-text wm-quota-text',
+      showRing: false,
+      dashOffset: RING_CIRCUMFERENCE,
+      text: quotaSum ? quotaSum.shortText : '余 --%',
+      running: false,
+      warn: isWarn,
+      danger: isDanger,
+    };
+  }
+
+  function applyCapsuleSlots(slotKeys, slotCtx) {
+    const presList = slotKeys.map((key) => resolveCapsuleSlotPresentation(key, slotCtx));
+    let visRank = 0;
+    const visRanks = [0, 0, 0];
+    for (let i = 0; i < 3; i += 1) {
+      const slot = capsuleSlots[i];
+      const pres = presList[i];
+      if (pres.hidden) {
+        patchAttr(slot.el, 'hidden', true);
+        patchAttr(slot.el, 'data-metric', 'none');
+        patchAttr(slot.el, 'data-vis-rank', '');
+        continue;
+      }
+      visRank += 1;
+      visRanks[i] = visRank;
+      patchAttr(slot.el, 'hidden', false);
+      patchAttr(slot.el, 'data-metric', pres.metric);
+      patchAttr(slot.el, 'data-vis-rank', String(visRank));
+
+      if (pres.showRing && !slot.ringMounted) {
+        slot.el.insertBefore(slot.ringSvg, slot.textSpan);
+        slot.ringMounted = true;
+      } else if (!pres.showRing && slot.ringMounted) {
+        slot.ringSvg.remove();
+        slot.ringMounted = false;
+      }
+
+      const fullSegClass =
+        `${pres.segClass}${pres.running ? ' state-running' : ''}${pres.warn ? ' tone-warn' : ''}${pres.danger ? ' tone-danger' : ''}`;
+      patchAttr(slot.el, 'class', fullSegClass);
+      const fullTextClass =
+        `${pres.textClass}${pres.warn ? ' tone-warn' : ''}${pres.danger ? ' tone-danger' : ''}`;
+      patchAttr(slot.textSpan, 'class', fullTextClass);
+      patchText(slot.textSpan, pres.text);
+
+      if (pres.showRing) {
+        slot.ringFill.setAttribute('stroke-dashoffset', String(pres.dashOffset));
+        patchClasses(slot.ringFill, { 'tone-warn': pres.warn, 'tone-danger': pres.danger });
+      }
+    }
+
+    const showSep0 = visRanks[1] >= 2;
+    patchAttr(sep0, 'hidden', !showSep0);
+    patchAttr(sep0, 'data-sep-for-rank', showSep0 ? String(visRanks[1]) : '');
+
+    const showSep1 = visRanks[2] >= 2;
+    patchAttr(sep1, 'hidden', !showSep1);
+    patchAttr(sep1, 'data-sep-for-rank', showSep1 ? String(visRanks[2]) : '');
+  }
+
+  // --- 4. 实时遥测状态绑定（双胶囊与多会话/全景概览浮层全部槽位预占，仅就地更新节点，零布局跳动） ---
+  function renderCapsuleTelemetry() {
+    if (disposed) return;
+    const telSt = telemetryStore.getState();
+    const uiSt = uiStore.getState();
+    const telemetry = telSt.telemetry;
+
+    const showMulti = telemetry?.settings?.showTopbarMultiSession !== false;
+    patchAttr(multiBtn, 'hidden', !showMulti);
+    patchAttr(capsuleHost, 'data-multi', showMulti ? 'on' : 'off');
+    if (!showMulti && multiOpen) {
+      setMultiOpen(false);
+    }
+    if (showMulti !== lastShowMulti) {
+      lastShowMulti = showMulti;
+      updateResponsiveLayout();
+    }
+
+    const slotKeys = normalizeClientTopbarSlots(telemetry?.settings?.topbarCapsuleSlots);
+
+    if (!telemetry) {
+      patchClasses(multiBtn, { 'is-running': false, 'is-waiting': false });
+      patchText(multiLabel, '0 运行中');
+      patchText(multiRunningMetaEl, '读取中...');
+      stopMultiLiveTicker();
+
+      applyCapsuleSlots(slotKeys, { hasTelemetry: false });
+      return;
+    }
+
+    const { hasSubagents, agents, scopedConv: overviewScopedConv, ctxAgent, aggregated } =
+      resolveScopedConversation(telemetry, 'all', uiSt.ctxInspectorAgentId);
+    const { scopedConv: capsuleScopedConv } = resolveScopedConversation(
+      telemetry,
+      uiSt.selectedAgentScope,
+      uiSt.ctxInspectorAgentId
+    );
+    const activeConv = telemetry.activeConversation || {};
+    const overviewActive = overviewScopedConv || activeConv;
+    const ctx = ctxAgent?.context || overviewActive.context || activeConv.context || {};
+    const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000);
+    const totalTokens = Number(ctx.totalTokens || 0);
+    const usedPct =
+      limitTokens > 0 ? Math.min(100, +((totalTokens / limitTokens) * 100).toFixed(1)) : 0;
+    const dashOffset = +(
+      RING_CIRCUMFERENCE *
+      (1 - Math.max(0, Math.min(100, usedPct)) / 100)
+    ).toFixed(2);
+
+    // --- 4a. 同步左侧多会话实时状态胶囊与浮层看板 ---
+    const rawRunningList =
+      Array.isArray(telemetry.runningConversations) && telemetry.runningConversations.length > 0
+        ? telemetry.runningConversations
+        : activeConv.isRunning || aggregated?.isRunning
+          ? [
+              {
+                cascadeId: activeConv.cascadeId || 'current',
+                title: activeConv.title || '当前会话',
+                isCurrentSelected: true,
+                isMainRunning: Boolean(activeConv.isRunning),
+                isRunning: true,
+                mainActivity: activeConv.liveActivity || aggregated?.liveActivity || null,
+                subagentCount: Math.max(0, (agents?.length || 1) - 1),
+                runningSubagentCount: (agents || []).filter((a) => !a.isMain && a.isRunning).length,
+                latestTokPerSec: overviewActive.latestTokPerSec ?? null,
+                contextUsedPct: usedPct,
+                subagents: (agents || [])
+                  .filter((a) => !a.isMain)
+                  .map((s, idx) => ({
+                    cascadeId: s.cascadeId || s.agentId,
+                    index: s.index || idx + 1,
+                    badgeText: s.badgeText || `子${idx + 1}`,
+                    shortLabel: s.shortLabel || `子代理 #${idx + 1}`,
+                    role: s.role || `子代理 #${idx + 1}`,
+                    isRunning: Boolean(s.isRunning),
+                    stepCount: Number(s.stepCount || 0),
+                    lastModifiedMs: s.lastModifiedMs || 0,
+                    liveActivity: s.liveActivity || {
+                      phase: s.isRunning ? 'thinking' : 'done',
+                      label: s.isRunning ? '推理中' : '已完成',
+                      detail: '',
+                      stepProgress: '',
+                      startedAtMs: s.lastModifiedMs || 0,
+                      signature: `${s.agentId}:${s.stepCount || 0}`,
+                    },
+                  })),
+              },
+            ]
+          : [];
+
+    const runningCount = rawRunningList.length;
+    const runningSubCount = rawRunningList.reduce(
+      (acc, item) => acc + Number(item.runningSubagentCount || 0),
+      0
+    );
+    const hasWaiting = rawRunningList.some((item) => item.mainActivity?.phase === 'waiting');
+
+    patchClasses(multiBtn, {
+      'is-running': runningCount > 0 && !hasWaiting,
+      'is-waiting': runningCount > 0 && hasWaiting,
+    });
+    const multiBtnText =
+      runningCount > 0
+        ? runningSubCount > 0
+          ? `${runningCount} 运行 · ${runningSubCount} 子`
+          : `${runningCount} 运行中`
+        : '0 运行中';
+    patchText(multiLabel, multiBtnText);
+
+    const hostRouteLower = String(
+      telSt.hostRouteConversationId || extractHostRouteCascadeId() || ''
+    ).toLowerCase();
+
+    patchText(
+      multiRunningMetaEl,
+      runningCount > 0
+        ? runningSubCount > 0
+          ? `${runningCount} 主会话 · ${runningSubCount} 子代理运行中`
+          : `${runningCount} 个会话运行中`
+        : '全部待命'
+    );
+    patchText(multiEmptyHintEl, '悬停速览 · 左键可固定');
+    patchAttr(multiEmptyEl, 'hidden', runningCount > 0);
+    patchAttr(multiRunningListEl, 'hidden', runningCount === 0);
+
+    const runningIdsLower = new Set(
+      rawRunningList.map((item) => String(item.cascadeId || '').toLowerCase())
+    );
+
+    if (runningCount === 0) {
+      stopMultiLiveTicker();
+      manualSubExpandMap.clear();
+    } else {
+      for (const cid of [...manualSubExpandMap.keys()]) {
+        if (!runningIdsLower.has(String(cid || '').toLowerCase())) {
+          manualSubExpandMap.delete(cid);
+        }
+      }
+
+      const activeTimerKeys = new Set();
+      for (const item of rawRunningList) {
+        activeTimerKeys.add(`main:${item.cascadeId}`);
+        const subCount = Number(item.subagentCount || item.subagents?.length || 0);
+        const runSubs = Number(item.runningSubagentCount || 0);
+        const isExp = manualSubExpandMap.has(item.cascadeId)
+          ? manualSubExpandMap.get(item.cascadeId)
+          : runSubs > 0;
+        if (subCount > 0 && isExp) {
+          for (const sub of item.subagents || []) {
+            if (sub?.isRunning) {
+              activeTimerKeys.add(`sub:${sub.cascadeId}`);
+            }
+          }
+        }
+      }
+
+      patchKeyedList(multiRunningListEl, rawRunningList, {
+        keyFn: (item) => item.cascadeId,
+        sigFn: (item) => {
+          const runSubs = Number(item.runningSubagentCount || 0);
+          const isExp = manualSubExpandMap.has(item.cascadeId)
+            ? manualSubExpandMap.get(item.cascadeId)
+            : runSubs > 0;
+          const isHere =
+            Boolean(hostRouteLower) &&
+            String(item.cascadeId || '').toLowerCase() === hostRouteLower;
+          const subSig = (item.subagents || [])
+            .map(
+              (s) =>
+                `${s.cascadeId}:${s.isRunning}:${s.stepCount}:${s.liveActivity?.signature || ''}:${s.liveActivity?.startedAtMs || 0}`
+            )
+            .join('|');
+          return `${item.cascadeId}:${item.title}:${isHere}:${item.isMainRunning}:${item.subagentCount}:${runSubs}:${isExp}:${item.latestTokPerSec ?? ''}:${item.contextUsedPct ?? ''}:${item.mainActivity?.signature || ''}:${item.mainActivity?.startedAtMs || 0}:${subSig}`;
+        },
+        createRow: createMultiLiveTaskCard,
+        updateRow: (refs, item) => {
+          const act = item.mainActivity || {
+            phase: 'thinking',
+            label: '推理中',
+            detail: '',
+            stepProgress: '',
+            startedAtMs: item.lastModifiedMs || 0,
+            signature: `fallback:${item.lastModifiedMs || 0}`,
+          };
+          const isWaiting = act.phase === 'waiting';
+          const isCompacting = act.phase === 'compacting';
+          patchClasses(refs.cardEl, {
+            'is-waiting': isWaiting,
+            'is-compacting': isCompacting,
+          });
+          patchClasses(refs.dotIcon, { 'is-pulsing': true });
+
+          const convTitle = item.title || item.cascadeId?.slice(0, 8) || '当前会话';
+          patchText(refs.titleEl, convTitle);
+          patchAttr(refs.titleEl, 'title', `点击在监控面板中检视会话：${convTitle}`);
+          refs.titleEl.onclick = (e) => {
+            e.stopPropagation();
+            inspectSessionInMonitor(item.cascadeId);
+          };
+
+          const isHere =
+            Boolean(hostRouteLower) &&
+            String(item.cascadeId || '').toLowerCase() === hostRouteLower;
+          patchAttr(refs.hereTagEl, 'hidden', !isHere);
+
+          const metricParts = [];
+          if (Number.isFinite(item.latestTokPerSec) && item.latestTokPerSec > 0) {
+            metricParts.push(
+              `${item.latestTokPerSec >= 100 ? Math.round(item.latestTokPerSec) : item.latestTokPerSec.toFixed(1)} t/s`
+            );
+          }
+          if (item.contextUsedPct != null && Number.isFinite(Number(item.contextUsedPct))) {
+            metricParts.push(`${Math.round(Number(item.contextUsedPct))}%`);
+          }
+          const metricsStr = metricParts.join(' · ');
+          patchAttr(refs.metricsEl, 'hidden', !metricsStr);
+          if (metricsStr) {
+            patchText(refs.metricsEl, metricsStr);
+          }
+
+          const subCount = Number(item.subagentCount || item.subagents?.length || 0);
+          const runSubCount = Number(item.runningSubagentCount || 0);
+          const isExpanded = manualSubExpandMap.has(item.cascadeId)
+            ? manualSubExpandMap.get(item.cascadeId)
+            : runSubCount > 0;
+          patchAttr(refs.mainBadge, 'hidden', subCount === 0);
+          patchAttr(refs.subToggleBtn, 'hidden', subCount === 0);
+          if (subCount > 0) {
+            const arrow = isExpanded ? '▾' : '▸';
+            const toggleText =
+              runSubCount > 0
+                ? `子代理 ${runSubCount}/${subCount} ${arrow}`
+                : `子代理 (${subCount}) ${arrow}`;
+            patchText(refs.subToggleBtn, toggleText);
+            patchClasses(refs.subToggleBtn, { 'is-expanded': isExpanded });
+            refs.subToggleBtn.onclick = (e) => {
+              e.stopPropagation();
+              manualSubExpandMap.set(item.cascadeId, !isExpanded);
+              renderCapsuleTelemetry();
+              if (multiOpen) {
+                positionFloatingElements();
+              }
+            };
+          }
+
+          const mainTimerKey = `main:${item.cascadeId}`;
+          activeTimerKeys.add(mainTimerKey);
+          bindMultiElapsedTimer(
+            mainTimerKey,
+            `${item.cascadeId}:${act.signature || act.label}`,
+            act.startedAtMs,
+            refs.elapsedEl
+          );
+
+          patchText(refs.mainPhase, act.label || '推理中');
+          const progText = act.stepProgress ? `[${act.stepProgress}]` : '';
+          patchAttr(refs.mainProgress, 'hidden', !progText);
+          if (progText) {
+            patchText(refs.mainProgress, progText);
+          }
+
+          const detailStr = act.detail || '';
+          patchAttr(refs.mainSep, 'hidden', !detailStr);
+          patchAttr(refs.mainDetail, 'hidden', !detailStr);
+          patchText(refs.mainDetail, detailStr);
+
+          const showSubs = subCount > 0 && isExpanded;
+          patchAttr(refs.subListEl, 'hidden', !showSubs);
+          if (showSubs) {
+            const subItems = item.subagents || [];
+            patchKeyedList(refs.subListEl, subItems, {
+              keyFn: (sub) => sub.cascadeId,
+              sigFn: (sub) =>
+                `${sub.cascadeId}:${sub.role}:${sub.isRunning}:${sub.stepCount}:${sub.liveActivity?.signature || ''}:${sub.isRunning ? multiTimersMap.has(`sub:${sub.cascadeId}`) : true}`,
+              createRow: createMultiLiveSubRow,
+              updateRow: (subRefs, sub) => {
+                const subAct = sub.liveActivity || {
+                  phase: sub.isRunning ? 'thinking' : 'done',
+                  label: sub.isRunning ? '推理中' : '已完成',
+                  detail: '',
+                  stepProgress: '',
+                  startedAtMs: sub.lastModifiedMs || 0,
+                };
+                patchClasses(subRefs.rowEl, { 'is-done': !sub.isRunning });
+                const subBadgeCls = getAgentBadgeClass(sub.index || 1, false);
+                patchAttr(subRefs.subBadge, 'class', `agent-badge ${subBadgeCls}`);
+                patchText(subRefs.subBadge, sub.badgeText || `子${sub.index || 1}`);
+                patchText(subRefs.subRole, sub.role || sub.shortLabel || '子代理');
+
+                const subProg = subAct.stepProgress ? ` [${subAct.stepProgress}]` : '';
+                const summaryText = sub.isRunning
+                  ? `${subAct.label || '运行中'}${subProg}${subAct.detail ? ` · ${subAct.detail}` : ''}`
+                  : `已完成 (${sub.stepCount || 0} 步)`;
+                patchText(subRefs.subSummary, summaryText);
+
+                const subTimerKey = `sub:${sub.cascadeId}`;
+                if (sub.isRunning) {
+                  activeTimerKeys.add(subTimerKey);
+                  bindMultiElapsedTimer(
+                    subTimerKey,
+                    `${sub.cascadeId}:${subAct.signature || subAct.label}`,
+                    subAct.startedAtMs || sub.lastModifiedMs,
+                    subRefs.subElapsed
+                  );
+                } else {
+                  multiTimersMap.delete(subTimerKey);
+                  patchText(subRefs.subElapsed, `${sub.stepCount || 0}步`);
+                }
+              },
+            });
+          }
+        },
+      });
+
+      for (const k of [...multiTimersMap.keys()]) {
+        if (!activeTimerKeys.has(k)) {
+          multiTimersMap.delete(k);
+        }
+      }
+      ensureMultiLiveTicker();
+    }
+
+    // --- 4b. 同步右侧指标胶囊与悬停全景三卡片 ---
+    const isRunning = Boolean(aggregated?.isRunning || activeConv.isRunning);
+    const tps =
+      capsuleScopedConv?.latestTokPerSec ??
+      aggregated?.latestTokPerSec ??
+      activeConv.latestTokPerSec ??
+      null;
+    const ttft =
+      capsuleScopedConv?.latestTtftSec ??
+      aggregated?.latestTtftSec ??
+      activeConv.latestTtftSec ??
+      null;
+    const capsuleStepCost =
+      capsuleScopedConv?.latestStepCostUsd ??
+      aggregated?.latestStepCostUsd ??
+      activeConv.latestStepCostUsd ??
+      null;
+
+    patchClasses(capsuleBtn, { 'is-running': isRunning });
+    applyCapsuleSlots(slotKeys, {
+      hasTelemetry: true,
+      usedPct,
+      dashOffset,
+      isRunning,
+      tps,
+      ttft,
+      stepCost: capsuleStepCost,
+      quotas: telemetry.quotas,
+    });
+
+    const hasUpdate = Boolean(telemetry.cloudStatus?.updateAvailable);
+    patchAttr(updateDot, 'hidden', !hasUpdate);
+
+    // --- 同步悬停三卡片全景概览（与 LiveOverviewView 保持完全一致的数据口径与视觉呈现） ---
+    const showUpstream = Boolean(telemetry.settings?.showUpstreamModel);
+    const activeModelDisplay =
+      (showUpstream
+        ? overviewActive.activeModelUpstream || overviewActive.activeModelShort
+        : overviewActive.activeModelShort) || '模型未知';
+
+    patchClasses(hoverPulseDot, { 'is-pulsing': Boolean(overviewActive.isRunning || isRunning) });
+    patchText(hoverTpsVal, formatMetric(overviewActive.latestTokPerSec, ' tok/s'));
+    const reason = speedReasonText(overviewActive.latestSpeedReason);
+    const modelAndAgent =
+      hasSubagents && overviewActive.activeAgentBadge
+        ? `[${overviewActive.activeAgentBadge}] ${activeModelDisplay}`
+        : activeModelDisplay;
+    patchText(hoverTpsSub, reason ? `${modelAndAgent} · ${reason}` : modelAndAgent);
+
+    patchText(hoverTtftVal, formatMetric(overviewActive.latestTtftSec, 's'));
+    patchText(hoverTtftSub, `均值 ${formatMetric(overviewActive.ttftSummary?.avgSec, 's')}`);
+
+    patchText(hoverAvgVal, formatMetric(overviewActive.avgTokPerSec, ' tok/s'));
+    patchText(hoverAvgSub, `有效 ${sampleSummary(overviewActive.speedSummary)}`);
+
+    const stepCost = overviewActive.latestStepCostUsd;
+    const hasAnySteps = Number(overviewActive.stepCount || 0) > 0;
+    patchText(
+      hoverCostVal,
+      !hasAnySteps && stepCost == null ? '—' : formatUsd(stepCost, { precise: true })
+    );
+    patchText(
+      hoverCacheSub,
+      `缓存 ${overviewActive.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(overviewActive.sessionCostUsd || 0, { unpricedCalls: overviewActive.sessionUnpricedCalls })}`
+    );
+
+    patchAttr(hoverCtxAgentBadge, 'hidden', !(hasSubagents && ctxAgent));
+    if (hasSubagents && ctxAgent) {
+      const badgeCls = getAgentBadgeClass(ctxAgent.index || 0, Boolean(ctxAgent.isMain));
+      patchAttr(hoverCtxAgentBadge, 'class', `agent-badge ${badgeCls}`);
+      patchText(hoverCtxAgentBadge, formatAgentLabel(ctxAgent));
+    }
+    patchText(
+      hoverCtxSummaryText,
+      `${formatTokens(totalTokens)} / ${formatTokens(limitTokens)} (${usedPct}%)`
+    );
+    hoverCtxSegmentBar.setProps({ context: { ...ctx, limitTokens, usedPct } });
+
+    const scoredChannels = CTX_CHANNEL_DEFS.map((ch, defaultOrder) => ({
+      ch,
+      defaultOrder,
+      val: ch.getValue(ctx),
+    }));
+    scoredChannels.sort((a, b) => b.val - a.val || a.defaultOrder - b.defaultOrder);
+    for (let i = 0; i < hoverLegendSlots.length; i += 1) {
+      const slot = hoverLegendSlots[i];
+      const entry = scoredChannels[i];
+      if (!slot || !entry) continue;
+      patchAttr(slot.swatchEl, 'class', `swatch ${entry.ch.segClass}`);
+      patchText(slot.labelEl, entry.ch.label);
+      patchText(slot.valEl, formatTokens(entry.val));
+    }
+
+    const quotas = telemetry.quotas || {};
+    const weekly = quotas.weekly || {};
+    const minuteTick = Number(telSt.minuteTick || Math.floor(Date.now() / 30000));
+    patchText(
+      hoverTierBadge,
+      `${telemetry.account?.tierName || 'Google AI'} · ${telemetry.account?.planName || 'Pro'}`
+    );
+    patchKeyedList(hoverPoolsListEl, buildQuotaPoolItems(quotas, minuteTick), {
+      keyFn: (item) => item.key,
+      sigFn: quotaPoolRowSig,
+      createRow: createPoolQuotaRow,
+      updateRow: syncPoolQuotaRow,
+    });
+    patchText(
+      hoverWkFootLeft,
+      `本周累计: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0, { unpricedCalls: weekly.unpricedCalls })})`
+    );
+    patchText(
+      hoverWkFootRight,
+      telemetry.account?.aiCredits > 0
+        ? `AI 积分: ${telemetry.account.aiCredits}`
+        : `本周调用: ${weekly.calls || 0} 次`
+    );
+  }
+
+  const unsubStore = telemetryStore.subscribe(
+    (st) => ({
+      syncState: st.syncState,
+      telemetry: st.telemetry,
+      minuteTick: st.minuteTick,
+      selectedConversationId: st.selectedConversationId,
+    }),
+    (slice) => {
+      if (slice.telemetry?.settings?.enableWindowOverlay === false) {
+        if (popoverOpen) setPopoverOpen(false);
+        if (multiOpen) setMultiOpen(false);
+      }
+      renderCapsuleTelemetry();
+    }
+  );
+
+  const unsubUiScope = uiStore.subscribe(
+    (st) => ({
+      selectedAgentScope: st.selectedAgentScope,
+      ctxInspectorAgentId: st.ctxInspectorAgentId,
+    }),
+    () => renderCapsuleTelemetry()
+  );
+
+  // --- 5. 宿主会话路由跟随与全局交互监听 ---
+  function syncHostRouteIfChanged() {
+    if (disposed) return;
+    const currentRouteId = extractHostRouteCascadeId();
+    if (currentRouteId === lastObservedRouteId) return;
+    lastObservedRouteId = currentRouteId;
+    const st = telemetryStore.getState();
+    const patch = { hostRouteConversationId: currentRouteId };
+    if (currentRouteId && st.selectedConversationId && st.selectedConversationId !== currentRouteId) {
+      patch.selectedConversationId = '';
+    }
+    uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' });
+    telemetryStore.setState(patch);
+    void fetchTelemetry({ force: false });
+  }
+
+  const onDocMouseDown = (e) => {
+    if (popoverOpen && !isEventInside(e, popoverEl) && !isEventInside(e, capsuleHost)) {
+      setPopoverOpen(false);
+    }
+    if (multiOpen && !isEventInside(e, multiPanelEl) && !isEventInside(e, capsuleHost)) {
+      setMultiOpen(false);
+    }
+  };
+
+  const onDocKeyDown = (e) => {
+    if (e.key === 'Escape' && !e.defaultPrevented) {
+      if (popoverOpen) {
+        setPopoverOpen(false);
+      }
+      if (multiOpen) {
+        setMultiOpen(false);
+      }
+    }
+  };
+
+  const onWindowPointerMove = (e) => recordPointerCoords(e);
+  const onWindowBlur = () => {
+    hasPointerCoords = false;
+    if (tooltipOpen) {
+      setTooltipOpen(false);
+    }
+    if (multiOpen && !multiPinned) {
+      setMultiOpen(false);
+    }
+  };
+  const onWindowResize = () => updateResponsiveLayout();
+  const onPopState = () => syncHostRouteIfChanged();
+  const onVisibilityChange = () => {
+    if (document.hidden) {
+      hasPointerCoords = false;
+      if (tooltipOpen) {
+        setTooltipOpen(false);
+      }
+      if (multiOpen && !multiPinned) {
+        setMultiOpen(false);
+      }
+      return;
+    }
+    if (!document.hidden && !disposed) {
+      syncHostRouteIfChanged();
+      void fetchTelemetry({ force: false });
+    }
+  };
+
+  let hostDomObserver = null;
+  try {
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => updateResponsiveLayout());
+      if (document.body) resizeObserver.observe(document.body);
+    }
+    if (typeof MutationObserver !== 'undefined' && document.body) {
+      hostDomObserver = new MutationObserver(() => {
+        syncHostRouteIfChanged();
+        const tb = findHostTitlebar();
+        if (
+          !capsuleHost.isConnected ||
+          !portalHost.isConnected ||
+          (tb && !tb.contains(capsuleHost)) ||
+          (!tb && capsuleHost.getAttribute('data-dock') === 'flow')
+        ) {
+          scheduleDockSync();
+        }
+      });
+      hostDomObserver.observe(document.body, { childList: true, subtree: true });
+    }
+  } catch {
+    // 忽略观察器初始化异常
+  }
+
+  document.addEventListener?.('mousedown', onDocMouseDown, true);
+  document.addEventListener?.('keydown', onDocKeyDown);
+  document.addEventListener?.('visibilitychange', onVisibilityChange);
+  window.addEventListener?.('pointermove', onWindowPointerMove, { passive: true });
+  window.addEventListener?.('blur', onWindowBlur);
+  window.addEventListener?.('resize', onWindowResize);
+  window.addEventListener?.('popstate', onPopState);
+  navigator?.windowControlsOverlay?.addEventListener?.('geometrychange', onWindowResize);
+
+  const watchdogTimer = setInterval(() => {
+    if (disposed) return;
+    syncHostRouteIfChanged();
+    if (!capsuleHost.isConnected || !portalHost.isConnected) {
+      ensureCapsuleDocked();
+    }
+  }, 1200);
+
+  ensureCapsuleDocked();
+  renderCapsuleTelemetry();
+  const allowMultiCarryOver =
+    telemetryStore.getState().telemetry?.settings?.showTopbarMultiSession !== false;
+  if (carryOverPopoverOpen) {
+    setPopoverOpen(true, { instant: true });
+  } else if (carryOverMultiPinnedOpen && allowMultiCarryOver) {
+    setMultiOpen(true, { pinned: true, instant: true });
+  } else if (carryOverMultiHoverOpen && allowMultiCarryOver) {
+    setMultiOpen(true, { pinned: false, instant: true });
+  } else if (carryOverTooltipOpen) {
+    setTooltipOpen(true, { instant: true });
+  }
+  const stopPolling = startAsyncTelemetryLoop(2000);
+
+  const handle = {
+    bundleVersion,
+    ensureAlive() {
+      if (disposed) return false;
+      return ensureCapsuleDocked();
+    },
+    updateBridge(nextBridge) {
+      if (disposed || !nextBridge || typeof nextBridge !== 'object') return false;
+      const port = Number(nextBridge.port || 0);
+      const token = String(nextBridge.token || '');
+      if (!Number.isInteger(port) || port <= 0 || !token) return false;
+      const cur = window.__AGUsageMonitorBridge || {};
+      const portChanged = Number(cur.port || 0) !== port;
+      cur.port = port;
+      cur.token = token;
+      if (portChanged && cur.transportMode !== 'cdp') {
+        cur.transportMode = 'http';
+      }
+      window.__AGUsageMonitorBridge = cur;
+      void fetchTelemetry({ force: false });
+      return true;
+    },
+    getTelemetrySnapshot() {
+      return telemetryStore.getState().telemetry;
+    },
+    getLastPointer() {
+      return hasPointerCoords ? { x: lastPointerX, y: lastPointerY } : null;
+    },
+    deliverRpc(responses) {
+      if (disposed) return 0;
+      return deliverCdpBridgeResponses(responses);
+    },
+    open() {
+      setPopoverOpen(true);
+    },
+    close() {
+      setPopoverOpen(false);
+    },
+    toggle() {
+      setPopoverOpen(!popoverOpen);
+    },
+    openMulti(pinned = true) {
+      setMultiOpen(true, { pinned: Boolean(pinned) });
+    },
+    closeMulti() {
+      setMultiOpen(false);
+    },
+    isOpen: () => popoverOpen,
+    isHoverOpen: () => tooltipOpen,
+    isMultiOpen: () => multiOpen,
+    isMultiHoverOpen: () => Boolean(multiOpen && !multiPinned),
+    isMultiPinnedOpen: () => Boolean(multiOpen && multiPinned),
+    getLayoutMode: () => layoutMode,
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      clearInterval(watchdogTimer);
+      if (hoverLeaveTimer) {
+        clearTimeout(hoverLeaveTimer);
+        hoverLeaveTimer = null;
+      }
+      if (multiLeaveTimer) {
+        clearTimeout(multiLeaveTimer);
+        multiLeaveTimer = null;
+      }
+      stopMultiLiveTicker();
+      if (dockRafId && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(dockRafId);
+        dockRafId = 0;
+      }
+      stopPolling();
+      stopAsyncTelemetryLoop();
+      unsubStore();
+      unsubUiScope();
+      try {
+        resizeObserver?.disconnect();
+      } catch {}
+      try {
+        hostDomObserver?.disconnect();
+      } catch {}
+      document.removeEventListener?.('mousedown', onDocMouseDown, true);
+      document.removeEventListener?.('keydown', onDocKeyDown);
+      document.removeEventListener?.('visibilitychange', onVisibilityChange);
+      window.removeEventListener?.('pointermove', onWindowPointerMove);
+      window.removeEventListener?.('blur', onWindowBlur);
+      window.removeEventListener?.('resize', onWindowResize);
+      window.removeEventListener?.('popstate', onPopState);
+      navigator?.windowControlsOverlay?.removeEventListener?.('geometrychange', onWindowResize);
+      try {
+        hoverCtxSegmentBar.destroy();
+      } catch {}
+      try {
+        appInstance.destroy();
+      } catch {}
+      try {
+        capsuleHost.remove();
+      } catch {}
+      try {
+        portalHost.remove();
+      } catch {}
+      if (window.__AGUsageMonitorOverlay === handle) {
+        delete window.__AGUsageMonitorOverlay;
+      }
+    },
+  };
+
+  window.__AGUsageMonitorOverlay = handle;
+  return handle;
+}
+
 // --- src/main.js ---
 /**
  * @fileoverview Async entry point for Antigravity Usage & Speed Monitor.
+ * Automatically branches between Auxiliary Sidebar Webview mode (`#app-root`)
+ * and Main Window Dual-Mount Overlay mode (`window.__AGUsageMonitorBridge`).
  */
 
 
@@ -5581,15 +8471,24 @@ async function bootstrapApp(mountTarget = document.getElementById('app-root')) {
   };
 }
 
+function startEntry() {
+  if (isWindowOverlayMode()) {
+    mountWindowOverlay();
+    return;
+  }
+  bootstrapApp();
+}
+
 function init() {
   if (typeof document === 'undefined') return;
   if (document.readyState === 'loading' && typeof document.addEventListener === 'function') {
     document.addEventListener('DOMContentLoaded', () => {
-      bootstrapApp();
+      startEntry();
     });
   } else {
-    bootstrapApp();
+    startEntry();
   }
 }
 
 init();
+})();

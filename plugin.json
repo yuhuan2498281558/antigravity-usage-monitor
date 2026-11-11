@@ -1,7 +1,7 @@
 {
   "name": "usage-monitor",
   "displayName": "Usage & Speed Monitor",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "实时查看生成速度、首字延迟、上下文占用、可用额度及历史用量。",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [

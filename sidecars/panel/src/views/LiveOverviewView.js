@@ -2,9 +2,9 @@
  * @fileoverview View 1: LiveOverviewView (实时监控视图).
  * 负责展示当前活跃会话的核心实时遥测指标：
  * 1. 4 格实时测速矩阵：实时吞吐 (TPS)、首 Token 延迟 (TTFT)、会话有效加权均速与本步费用/缓存命中率；
- * 2. 6 通道上下文窗口构成：自动锚定当前模型的上下文压缩基线 (`compactionLimitTokens`)，
- *    通过 6 段进度条与双列图例展示消息、系统工具、MCP 工具、Skill、系统提示词与用户规则的 Token 占用；
- * 3. 动态多配额池监控卡片：支持 Gemini、Pro 订阅专属独立 Argon 周配额池、Claude & GPT 等动态配额池，
+ * 2. 10 通道上下文窗口构成：自动锚定当前模型的上下文压缩基线 (`compactionLimitTokens`)，
+ *    通过 10 段进度条与双列图例展示模型回复、工具结果、用户消息、子代理通知、压缩摘要及系统提示词/工具/MCP/Skill/规则的 Token 占用；
+ * 3. 动态多配额池监控卡片：支持 Gemini、Pro 订阅专属独立 Argon/Carbon 周配额池、Claude & GPT 等动态配额池，
  *    自动适配 5h/每周双窗口或单窗口模式，并展示本机周累计消耗与 AI 积分脚标。
  */
 
@@ -52,6 +52,239 @@ function estPillWidth(text) {
   return Math.ceil(w);
 }
 
+/**
+ * 10 通道上下文窗口构成定义（供实时监控主视图与主窗口顶栏悬停概览卡共享）。
+ */
+export const CTX_CHANNEL_DEFS = [
+  {
+    key: 'assistant',
+    label: '模型回复',
+    segClass: 'seg-assistant',
+    title: '模型推理思考、回复正文与工具调用入参',
+    getValue: (c) => Number(c.assistantTokens || 0),
+  },
+  {
+    key: 'toolResults',
+    label: '工具结果',
+    segClass: 'seg-tool-results',
+    title: '文件读取、终端输出与工具执行返回内容',
+    getValue: (c) => Number(c.toolResultsTokens || 0),
+  },
+  {
+    key: 'userInput',
+    label: '用户消息',
+    segClass: 'seg-user-input',
+    title: '用户提问文本与上传附件',
+    getValue: (c) => Number(c.userInputTokens ?? c.messagesTokens ?? 0),
+  },
+  {
+    key: 'subagent',
+    label: '子代理通知',
+    segClass: 'seg-subagent-msg',
+    title: '子代理完成汇报与后台任务系统通知',
+    getValue: (c) => Number(c.subagentTokens || 0),
+  },
+  {
+    key: 'checkpoint',
+    label: '压缩摘要',
+    segClass: 'seg-checkpoint',
+    title: '自动上下文压缩生成的历史摘要检查点',
+    getValue: (c) => Number(c.checkpointTokens || 0),
+  },
+  {
+    key: 'systemPrompt',
+    label: '系统提示词',
+    segClass: 'seg-system-prompt',
+    title: '核心身份、终端沙箱、制品与环境提示词',
+    getValue: (c) => Number(c.systemPromptTokens || 0),
+  },
+  {
+    key: 'systemTools',
+    label: '系统工具',
+    segClass: 'seg-system-tools',
+    title: '内置系统工具 Schema 定义',
+    getValue: (c) => Number(c.systemToolsTokens || 0),
+  },
+  {
+    key: 'mcpTools',
+    label: 'MCP 工具',
+    segClass: 'seg-mcp-tools',
+    title: 'MCP 外部服务工具与资源定义',
+    getValue: (c) => Number(c.mcpToolsTokens || 0),
+  },
+  {
+    key: 'skills',
+    label: 'Skill',
+    segClass: 'seg-skills',
+    title: '已挂载的 Skills 技能索引与说明',
+    getValue: (c) => Number(c.skillsTokens || 0),
+  },
+  {
+    key: 'userRules',
+    label: '用户规则',
+    segClass: 'seg-user-rules',
+    title: '全局与工作区自定义规则 (user_rules)',
+    getValue: (c) => Number(c.userRulesTokens || 0),
+  },
+];
+
+/**
+ * 归一化动态配额池列表；在官方配额尚未返回时回退预占 Gemini 与 Claude & GPT 两个标准池槽位。
+ *
+ * @param {object|null|undefined} quotas
+ * @param {number} minuteTick
+ * @param {{ isPending?: boolean }} [options]
+ * @returns {Array<object>}
+ */
+export function buildQuotaPoolItems(quotas, minuteTick = 0, { isPending = false } = {}) {
+  const safeQuotas = quotas || {};
+  const activePool = safeQuotas.activePool || {};
+  const rawPools =
+    Array.isArray(safeQuotas.pools) && safeQuotas.pools.length > 0
+      ? safeQuotas.pools
+      : [
+          { poolKey: 'Gemini', poolLabel: 'Gemini', family: 'Gemini' },
+          { poolKey: 'Claude & GPT', poolLabel: 'Claude & GPT', family: 'Claude & GPT' },
+        ];
+  const weekly = safeQuotas.weekly || {};
+  const poolItems = rawPools.map((p) => {
+    const key = p.poolKey || p.family || p.poolLabel || 'Other';
+    const poolLabel = p.poolLabel || p.family || key;
+    const isActivePool =
+      Boolean(activePool.family) &&
+      (activePool.poolKey === key ||
+        activePool.family === p.family ||
+        (key === 'Claude & GPT' && ['Claude', 'GPT'].includes(activePool.family)));
+    return {
+      key,
+      poolLabel,
+      poolData: p,
+      fallbackWeekly: weekly,
+      isActivePool,
+      minuteTick,
+      isPending,
+    };
+  });
+  if (
+    weekly?.isOfficial === false &&
+    poolItems.length > 0 &&
+    !poolItems.some((item) => item.isActivePool)
+  ) {
+    poolItems[0].isActivePool = true;
+  }
+  return poolItems;
+}
+
+/**
+ * 创建单个配额池的 DOM 行结构，内含 5h 限额与每周限额两个可独立显隐的子窗口进度条。
+ */
+export function createPoolQuotaRow() {
+  const title5h = h('span', { text: '5h 限额' });
+  const meta5h = h('span', { className: 'panel-meta text-mono', text: '--' });
+  const fill5h = h('div', { className: 'progress-fill' });
+  const row5h = h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
+    h('div', { className: 'panel-header' }, [title5h, meta5h]),
+    h('div', { className: 'progress-track' }, [fill5h]),
+  ]);
+
+  const titleWk = h('span', { text: '每周限额' });
+  const metaWk = h('span', { className: 'panel-meta text-mono', text: '--' });
+  const fillWk = h('div', { className: 'progress-fill' });
+  const rowWk = h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
+    h('div', { className: 'panel-header' }, [titleWk, metaWk]),
+    h('div', { className: 'progress-track' }, [fillWk]),
+  ]);
+
+  const el = h('div', { style: 'display: flex; flex-direction: column; gap: 8px;' }, [
+    row5h,
+    rowWk,
+  ]);
+
+  return {
+    el,
+    refs: { row5h, title5h, meta5h, fill5h, rowWk, titleWk, metaWk, fillWk },
+  };
+}
+
+/**
+ * 同步单个配额池行的 5h 与每周窗口状态：
+ * - 对于仅有周限额的独立配额池（例如 Google AI Pro 账号下的 Argon 池或 Plus 档位）自动隐藏 5h 行；
+ * - 对于仅有 5h 限额的配额池自动隐藏每周行；
+ * - 若两个窗口均无数据（首次加载或拉取失败），同时保留两行以维持预占高度不跳动。
+ */
+export function syncPoolQuotaRow(refs, item, idx, rowEl) {
+  const { poolData, poolLabel, fallbackWeekly, isActivePool, isPending } = item;
+  patchAttr(
+    rowEl,
+    'style',
+    idx === 0
+      ? 'display: flex; flex-direction: column; gap: 8px;'
+      : 'display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-hairline);'
+  );
+
+  const has5h = poolData?.usedPct != null && poolData?.remainingPct != null;
+  const used5hVal = has5h ? Number(poolData.usedPct) : 0;
+  const rem5hVal = has5h ? Number(poolData.remainingPct) : 0;
+
+  const useCustomWeekly = Boolean(isActivePool && fallbackWeekly?.isOfficial === false);
+  const wkUsedRaw = useCustomWeekly
+    ? fallbackWeekly?.usedPct
+    : poolData?.weeklyUsedPct ?? (isActivePool ? fallbackWeekly?.usedPct : null);
+  const wkRemRaw = useCustomWeekly
+    ? fallbackWeekly?.remainingPct
+    : poolData?.weeklyRemainingPct ?? (isActivePool ? fallbackWeekly?.remainingPct : null);
+  const wkResetRaw = useCustomWeekly
+    ? fallbackWeekly?.resetTime || poolData?.weeklyResetTime
+    : poolData?.weeklyResetTime || (isActivePool ? fallbackWeekly?.resetTime : null);
+  const hasWk = wkUsedRaw != null && wkRemRaw != null;
+  const usedWkVal = hasWk ? Number(wkUsedRaw) : 0;
+  const remWkVal = hasWk ? Number(wkRemRaw) : 0;
+
+  // 在单窗口配额池（如 Pro 账号独立 Argon 周配额池或仅 5h 池）中隐藏不适用的另一窗口
+  const hide5h = !has5h && hasWk;
+  const hideWk = !hasWk && has5h;
+  refs.row5h.hidden = hide5h;
+  refs.row5h.style.display = hide5h ? 'none' : 'flex';
+  refs.rowWk.hidden = hideWk;
+  refs.rowWk.style.display = hideWk ? 'none' : 'flex';
+
+  const fallbackMetaText = isPending ? '读取中...' : '获取失败 (--%)';
+
+  patchText(refs.title5h, `5h 限额 (${poolLabel})`);
+  patchText(
+    refs.meta5h,
+    has5h
+      ? `${formatCountdown(poolData.resetTime)} · 已用 ${used5hVal.toFixed(1)}% (余 ${rem5hVal.toFixed(1)}%)`
+      : fallbackMetaText
+  );
+  patchStyleVar(refs.fill5h, '--fill-w', `${Math.min(100, used5hVal)}%`);
+  patchClasses(refs.fill5h, {
+    'tone-warn': used5hVal >= 60 && used5hVal < 85,
+    'tone-danger': used5hVal >= 85,
+  });
+
+  const customTitle =
+    isActivePool && fallbackWeekly?.isOfficial === false && fallbackWeekly?.title
+      ? fallbackWeekly.title
+      : `每周限额 (${poolLabel})`;
+  patchText(refs.titleWk, customTitle);
+  patchText(
+    refs.metaWk,
+    hasWk
+      ? `${formatCountdown(wkResetRaw)} · 已用 ${usedWkVal.toFixed(1)}% (余 ${remWkVal.toFixed(1)}%)`
+      : fallbackMetaText
+  );
+  patchStyleVar(refs.fillWk, '--fill-w', `${Math.min(100, usedWkVal)}%`);
+  patchClasses(refs.fillWk, {
+    'tone-warn': usedWkVal >= 60 && usedWkVal < 85,
+    'tone-danger': usedWkVal >= 85,
+  });
+}
+
+export function quotaPoolRowSig(item, idx) {
+  return `${idx}:${item.poolLabel}:${item.isActivePool}:${Boolean(item.isPending)}:${item.minuteTick}:${item.poolData?.usedPct}:${item.poolData?.remainingPct}:${item.poolData?.resetTime}:${item.poolData?.weeklyUsedPct}:${item.poolData?.weeklyRemainingPct}:${item.poolData?.weeklyResetTime}:${item.fallbackWeekly?.isOfficial}:${item.fallbackWeekly?.usedPct}:${item.fallbackWeekly?.remainingPct}:${item.fallbackWeekly?.resetTime}:${item.fallbackWeekly?.title}`;
+}
+
 export const LiveOverviewView = defineComponent({
   name: 'LiveOverviewView',
   setup({ onCleanup }) {
@@ -65,6 +298,7 @@ export const LiveOverviewView = defineComponent({
     const expandedTaskConvIds = new Set();
     const activityTimersMap = new Map();
     let liveTickTimer = null;
+    let countdownTickTimer = null;
 
     function bindLiveElapsedTimer(timerKey, sig, rawStartMs, targetEl) {
       const now = Date.now();
@@ -90,22 +324,51 @@ export const LiveOverviewView = defineComponent({
       }
     }
 
-    function stopLiveTicker() {
+    function pauseLiveTicker() {
       if (liveTickTimer) {
         clearInterval(liveTickTimer);
         liveTickTimer = null;
       }
+    }
+
+    function stopLiveTicker() {
+      pauseLiveTicker();
       activityTimersMap.clear();
     }
 
     function ensureLiveTicker() {
+      if (uiStore.getState().activeView !== 'overview' || activityTimersMap.size === 0) {
+        pauseLiveTicker();
+        return;
+      }
       if (!liveTickTimer) {
         liveTickTimer = setInterval(updateLiveElapsedDisplay, 1000);
       }
     }
 
+    function stopCountdownTicker() {
+      if (countdownTickTimer) {
+        clearInterval(countdownTickTimer);
+        countdownTickTimer = null;
+      }
+    }
+
+    function ensureCountdownTicker() {
+      if (uiStore.getState().activeView !== 'overview') {
+        stopCountdownTicker();
+        return;
+      }
+      if (!countdownTickTimer) {
+        countdownTickTimer = setInterval(() => {
+          if (uiStore.getState().activeView === 'overview' && latestData) {
+            renderData(latestData);
+          }
+        }, 30_000);
+      }
+    }
+
     function createLiveTaskCard() {
-      const dotIcon = createSvgIcon('dot', { size: 9 });
+      const dotIcon = createSvgIcon('dot', { size: 11 });
       patchClasses(dotIcon, { 'is-pulsing': true });
       const dotWrap = h('span', { className: 'live-activity-dot' }, [dotIcon]);
       const titleEl = h('strong', { className: 'live-task-title', text: '当前会话' });
@@ -125,7 +388,11 @@ export const LiveOverviewView = defineComponent({
         h('div', { className: 'live-task-header-right' }, [subToggleBtn, elapsedEl]),
       ]);
 
-      const mainBadge = h('span', { className: 'agent-badge badge-main', text: '主' });
+      const mainBadge = h('span', {
+        className: 'agent-badge badge-main',
+        hidden: true,
+        text: '主',
+      });
       const mainPhase = h('strong', { className: 'live-activity-phase', text: '推理中' });
       const mainProgress = h('span', {
         className: 'live-activity-progress text-mono',
@@ -158,6 +425,7 @@ export const LiveOverviewView = defineComponent({
           titleEl,
           subToggleBtn,
           elapsedEl,
+          mainBadge,
           mainPhase,
           mainProgress,
           mainSep,
@@ -205,7 +473,7 @@ export const LiveOverviewView = defineComponent({
     const avgVal = h('strong', { className: 'cell-value', text: '—' });
     const avgSub = h('span', { className: 'cell-sub', text: '有效样本 0/0 步' });
 
-    const costVal = h('strong', { className: 'cell-value', text: '$0.000' });
+    const costVal = h('strong', { className: 'cell-value', text: '—' });
     const cacheSub = h('span', { className: 'cell-sub accent-ok', text: '缓存 0% · 累计 $0.00' });
 
     const matrixEl = h('section', { className: 'telemetry-matrix', 'aria-label': '实时指标' }, [
@@ -256,78 +524,7 @@ export const LiveOverviewView = defineComponent({
       [ctxPillGroup]
     );
 
-    const ctxChannels = [
-      {
-        key: 'assistant',
-        label: '模型回复',
-        segClass: 'seg-assistant',
-        title: '模型推理思考、回复正文与工具调用入参',
-        getValue: (c) => Number(c.assistantTokens || 0),
-      },
-      {
-        key: 'toolResults',
-        label: '工具结果',
-        segClass: 'seg-tool-results',
-        title: '文件读取、终端输出与工具执行返回内容',
-        getValue: (c) => Number(c.toolResultsTokens || 0),
-      },
-      {
-        key: 'userInput',
-        label: '用户消息',
-        segClass: 'seg-user-input',
-        title: '用户提问文本与上传附件',
-        getValue: (c) => Number(c.userInputTokens ?? c.messagesTokens ?? 0),
-      },
-      {
-        key: 'subagent',
-        label: '子代理通知',
-        segClass: 'seg-subagent-msg',
-        title: '子代理完成汇报与后台任务系统通知',
-        getValue: (c) => Number(c.subagentTokens || 0),
-      },
-      {
-        key: 'checkpoint',
-        label: '压缩摘要',
-        segClass: 'seg-checkpoint',
-        title: '自动上下文压缩生成的历史摘要检查点',
-        getValue: (c) => Number(c.checkpointTokens || 0),
-      },
-      {
-        key: 'systemPrompt',
-        label: '系统提示词',
-        segClass: 'seg-system-prompt',
-        title: '核心身份、终端沙箱、制品与环境提示词',
-        getValue: (c) => Number(c.systemPromptTokens || 0),
-      },
-      {
-        key: 'systemTools',
-        label: '系统工具',
-        segClass: 'seg-system-tools',
-        title: '内置系统工具 Schema 定义',
-        getValue: (c) => Number(c.systemToolsTokens || 0),
-      },
-      {
-        key: 'mcpTools',
-        label: 'MCP 工具',
-        segClass: 'seg-mcp-tools',
-        title: 'MCP 外部服务工具与资源定义',
-        getValue: (c) => Number(c.mcpToolsTokens || 0),
-      },
-      {
-        key: 'skills',
-        label: 'Skill',
-        segClass: 'seg-skills',
-        title: '已挂载的 Skills 技能索引与说明',
-        getValue: (c) => Number(c.skillsTokens || 0),
-      },
-      {
-        key: 'userRules',
-        label: '用户规则',
-        segClass: 'seg-user-rules',
-        title: '全局与工作区自定义规则 (user_rules)',
-        getValue: (c) => Number(c.userRulesTokens || 0),
-      },
-    ].map((ch, idx) => {
+    const ctxChannels = CTX_CHANNEL_DEFS.map((ch, idx) => {
       const valEl = h('strong', { className: 'text-mono', text: '0' });
       const itemEl = h('div', { className: 'legend-item', title: ch.title }, [
         h('span', { className: 'legend-left' }, [
@@ -364,37 +561,6 @@ export const LiveOverviewView = defineComponent({
     const tierBadge = h('span', { className: 'panel-meta', text: 'Google AI · Pro' });
     const poolsListEl = h('div', { style: 'display: flex; flex-direction: column; gap: 0;' });
 
-    /**
-     * 创建单个配额池的 DOM 行结构，内含 5h 限额与每周限额两个可独立显隐的子窗口进度条。
-     */
-    function createPoolQuotaRow() {
-      const title5h = h('span', { text: '5h 限额' });
-      const meta5h = h('span', { className: 'panel-meta text-mono', text: '--' });
-      const fill5h = h('div', { className: 'progress-fill' });
-      const row5h = h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
-        h('div', { className: 'panel-header' }, [title5h, meta5h]),
-        h('div', { className: 'progress-track' }, [fill5h]),
-      ]);
-
-      const titleWk = h('span', { text: '每周限额' });
-      const metaWk = h('span', { className: 'panel-meta text-mono', text: '--' });
-      const fillWk = h('div', { className: 'progress-fill' });
-      const rowWk = h('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }, [
-        h('div', { className: 'panel-header' }, [titleWk, metaWk]),
-        h('div', { className: 'progress-track' }, [fillWk]),
-      ]);
-
-      const el = h('div', { style: 'display: flex; flex-direction: column; gap: 8px;' }, [
-        row5h,
-        rowWk,
-      ]);
-
-      return {
-        el,
-        refs: { row5h, title5h, meta5h, fill5h, rowWk, titleWk, metaWk, fillWk },
-      };
-    }
-
     const wkFootLeft = h('span', { className: 'text-muted', text: '本周累计: 0 ($0.00)' });
     const wkFootRight = h('span', { className: 'text-muted', text: '' });
 
@@ -424,75 +590,6 @@ export const LiveOverviewView = defineComponent({
       contentEl: overviewInner,
       className: 'view-pane',
     });
-
-    /**
-     * 同步单个配额池行的 5h 与每周窗口状态：
-     * - 对于仅有周限额的独立配额池（例如 Google AI Pro 账号下的 Argon 池或 Plus 档位）自动隐藏 5h 行；
-     * - 对于仅有 5h 限额的配额池自动隐藏每周行；
-     * - 若两个窗口均无数据（如首次拉取失败），则同时保留两行并显示“获取失败 (--%)”占位提示。
-     */
-    function syncPoolQuotaRow(refs, item, idx, rowEl) {
-      const { poolData, poolLabel, fallbackWeekly, isActivePool } = item;
-      patchAttr(
-        rowEl,
-        'style',
-        idx === 0
-          ? 'display: flex; flex-direction: column; gap: 8px;'
-          : 'display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-hairline);'
-      );
-
-      const has5h = poolData?.usedPct != null && poolData?.remainingPct != null;
-      const used5hVal = has5h ? Number(poolData.usedPct) : 0;
-      const rem5hVal = has5h ? Number(poolData.remainingPct) : 0;
-
-      const wkUsedRaw =
-        poolData?.weeklyUsedPct ?? (isActivePool ? fallbackWeekly?.usedPct : null);
-      const wkRemRaw =
-        poolData?.weeklyRemainingPct ?? (isActivePool ? fallbackWeekly?.remainingPct : null);
-      const wkResetRaw =
-        poolData?.weeklyResetTime || (isActivePool ? fallbackWeekly?.resetTime : null);
-      const hasWk = wkUsedRaw != null && wkRemRaw != null;
-      const usedWkVal = hasWk ? Number(wkUsedRaw) : 0;
-      const remWkVal = hasWk ? Number(wkRemRaw) : 0;
-
-      // 在单窗口配额池（如 Pro 账号独立 Argon 周配额池或仅 5h 池）中隐藏不适用的另一窗口
-      const hide5h = !has5h && hasWk;
-      const hideWk = !hasWk && has5h;
-      refs.row5h.hidden = hide5h;
-      refs.row5h.style.display = hide5h ? 'none' : 'flex';
-      refs.rowWk.hidden = hideWk;
-      refs.rowWk.style.display = hideWk ? 'none' : 'flex';
-
-      patchText(refs.title5h, `5h 限额 (${poolLabel})`);
-      patchText(
-        refs.meta5h,
-        has5h
-          ? `${formatCountdown(poolData.resetTime)} · 已用 ${used5hVal.toFixed(1)}% (余 ${rem5hVal.toFixed(1)}%)`
-          : '获取失败 (--%)'
-      );
-      patchStyleVar(refs.fill5h, '--fill-w', `${Math.min(100, used5hVal)}%`);
-      patchClasses(refs.fill5h, {
-        'tone-warn': used5hVal >= 60 && used5hVal < 85,
-        'tone-danger': used5hVal >= 85,
-      });
-
-      const customTitle =
-        isActivePool && fallbackWeekly?.isOfficial === false && fallbackWeekly?.title
-          ? fallbackWeekly.title
-          : `每周限额 (${poolLabel})`;
-      patchText(refs.titleWk, customTitle);
-      patchText(
-        refs.metaWk,
-        hasWk
-          ? `${formatCountdown(wkResetRaw)} · 已用 ${usedWkVal.toFixed(1)}% (余 ${remWkVal.toFixed(1)}%)`
-          : '获取失败 (--%)'
-      );
-      patchStyleVar(refs.fillWk, '--fill-w', `${Math.min(100, usedWkVal)}%`);
-      patchClasses(refs.fillWk, {
-        'tone-warn': usedWkVal >= 60 && usedWkVal < 85,
-        'tone-danger': usedWkVal >= 85,
-      });
-    }
 
     let latestData = null;
     let isDirty = false;
@@ -605,10 +702,10 @@ export const LiveOverviewView = defineComponent({
             const subSig = (item.subagents || [])
               .map(
                 (s) =>
-                  `${s.cascadeId}:${s.isRunning}:${s.stepCount}:${s.liveActivity?.signature || ''}`
+                  `${s.cascadeId}:${s.isRunning}:${s.stepCount}:${s.liveActivity?.signature || ''}:${s.liveActivity?.startedAtMs || 0}`
               )
               .join('|');
-            return `${item.cascadeId}:${item.title}:${item.isMainRunning}:${item.subagentCount}:${item.runningSubagentCount}:${isExp}:${item.mainActivity?.signature || ''}:${subSig}`;
+            return `${item.cascadeId}:${item.title}:${item.isMainRunning}:${item.subagentCount}:${item.runningSubagentCount}:${isExp}:${item.mainActivity?.signature || ''}:${item.mainActivity?.startedAtMs || 0}:${subSig}`;
           },
           createRow: createLiveTaskCard,
           updateRow: (refs, item) => {
@@ -622,7 +719,11 @@ export const LiveOverviewView = defineComponent({
             };
 
             const isWaiting = act.phase === 'waiting';
-            patchClasses(refs.cardEl, { 'is-waiting': isWaiting });
+            const isCompacting = act.phase === 'compacting';
+            patchClasses(refs.cardEl, {
+              'is-waiting': isWaiting,
+              'is-compacting': isCompacting,
+            });
             patchClasses(refs.dotIcon, { 'is-pulsing': true });
 
             const convTitle = item.title || item.cascadeId?.slice(0, 8) || '当前会话';
@@ -639,6 +740,7 @@ export const LiveOverviewView = defineComponent({
             const subCount = Number(item.subagentCount || item.subagents?.length || 0);
             const runSubCount = Number(item.runningSubagentCount || 0);
             const isExpanded = expandedTaskConvIds.has(item.cascadeId);
+            patchAttr(refs.mainBadge, 'hidden', subCount === 0);
             patchAttr(refs.subToggleBtn, 'hidden', subCount === 0);
             if (subCount > 0) {
               const arrow = isExpanded ? '▾' : '▸';
@@ -758,14 +860,19 @@ export const LiveOverviewView = defineComponent({
         ensureLiveTicker();
       }
 
-      // 1. 更新 4 格实时测速矩阵（展示当前会话全局汇总指标）
+      // 1. 更新 4 格实时测速矩阵（展示当前会话全局汇总指标，遵循模型名称格式设置）
+      const showUpstream = Boolean(data.settings?.showUpstreamModel);
+      const activeModelDisplay =
+        (showUpstream
+          ? active.activeModelUpstream || active.activeModelShort
+          : active.activeModelShort) || '模型未知';
       patchClasses(pulseDot, { 'is-pulsing': Boolean(active.isRunning) });
       patchText(tpsVal, formatMetric(active.latestTokPerSec, ' tok/s'));
       const reason = speedReasonText(active.latestSpeedReason);
       const modelAndAgent =
         hasSubagents && active.activeAgentBadge
-          ? `[${active.activeAgentBadge}] ${active.activeModelShort || '模型未知'}`
-          : active.activeModelShort || '模型未知';
+          ? `[${active.activeAgentBadge}] ${activeModelDisplay}`
+          : activeModelDisplay;
       patchText(tpsSub, reason ? `${modelAndAgent} · ${reason}` : modelAndAgent);
 
       patchText(ttftVal, formatMetric(active.latestTtftSec, 's'));
@@ -775,7 +882,11 @@ export const LiveOverviewView = defineComponent({
       patchText(avgSub, `有效 ${sampleSummary(active.speedSummary)}`);
 
       const stepCost = active.latestStepCostUsd;
-      patchText(costVal, formatUsd(stepCost, { precise: true }));
+      const hasAnySteps = Number(active.stepCount || 0) > 0;
+      patchText(
+        costVal,
+        !hasAnySteps && stepCost == null ? '—' : formatUsd(stepCost, { precise: true })
+      );
       patchText(
         cacheSub,
         `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
@@ -803,10 +914,13 @@ export const LiveOverviewView = defineComponent({
 
         const allAgentPills = agents.map((ag) => {
           const agPct = ag.context?.usedPct ?? 0;
+          const agModelDisplay =
+            (showUpstream ? ag.activeModelUpstream || ag.activeModelShort : ag.activeModelShort) ||
+            '模型未知';
           return {
             key: ag.agentId,
             label: `${ag.badgeText || ag.shortLabel} ${agPct}%`,
-            title: `${formatAgentLabel(ag)} (${ag.activeModelShort || '模型未知'} · ${ag.stepCount || 0}步)`,
+            title: `${formatAgentLabel(ag)} (${agModelDisplay} · ${ag.stepCount || 0}步)`,
             isActive: effectiveCtxScope === ag.agentId,
             mode: 'ctx-only',
           };
@@ -888,12 +1002,8 @@ export const LiveOverviewView = defineComponent({
               if (item.mode === 'toggle-expand') {
                 ctxPillsExpanded = !ctxPillsExpanded;
                 renderData(latestData);
-              } else if (item.mode === 'ctx-only') {
-                uiStore.setState({ ctxInspectorAgentId: item.key });
-              } else if (item.key === 'all') {
-                uiStore.setState({ selectedAgentScope: 'all', ctxInspectorAgentId: 'auto' });
               } else {
-                uiStore.setState({ selectedAgentScope: item.key });
+                uiStore.setState({ ctxInspectorAgentId: item.key });
               }
             };
           },
@@ -928,37 +1038,13 @@ export const LiveOverviewView = defineComponent({
         tierBadge,
         `${data.account?.tierName || 'Google AI'} · ${data.account?.planName || 'Pro'}`
       );
-      const activePool = quotas.activePool || {};
-      const rawPools = Array.isArray(quotas.pools) && quotas.pools.length > 0
-        ? quotas.pools
-        : [
-            { poolKey: 'Gemini', poolLabel: 'Gemini', family: 'Gemini' },
-            { poolKey: 'Claude & GPT', poolLabel: 'Claude & GPT', family: 'Claude & GPT' },
-          ];
       const weekly = quotas.weekly || {};
       const minuteTick = Math.floor(Date.now() / 30000);
-      const poolItems = rawPools.map((p) => {
-        const key = p.poolKey || p.family || p.poolLabel || 'Other';
-        const poolLabel = p.poolLabel || p.family || key;
-        const isActivePool =
-          Boolean(activePool.family) &&
-          (activePool.poolKey === key ||
-            activePool.family === p.family ||
-            (key === 'Claude & GPT' && ['Claude', 'GPT'].includes(activePool.family)));
-        return {
-          key,
-          poolLabel,
-          poolData: p,
-          fallbackWeekly: weekly,
-          isActivePool,
-          minuteTick,
-        };
-      });
+      const poolItems = buildQuotaPoolItems(quotas, minuteTick);
 
       patchKeyedList(poolsListEl, poolItems, {
         keyFn: (item) => item.key,
-        sigFn: (item, idx) =>
-          `${idx}:${item.poolLabel}:${item.isActivePool}:${item.minuteTick}:${item.poolData?.usedPct}:${item.poolData?.remainingPct}:${item.poolData?.resetTime}:${item.poolData?.weeklyUsedPct}:${item.poolData?.weeklyRemainingPct}:${item.poolData?.weeklyResetTime}:${item.fallbackWeekly?.isOfficial}:${item.fallbackWeekly?.usedPct}:${item.fallbackWeekly?.title}`,
+        sigFn: quotaPoolRowSig,
         createRow: createPoolQuotaRow,
         updateRow: syncPoolQuotaRow,
       });
@@ -974,12 +1060,13 @@ export const LiveOverviewView = defineComponent({
           : `本周调用: ${weekly.calls || 0} 次`
       );
 
+      ensureCountdownTicker();
       viewScrollbar.refresh();
     }
 
     const unsub = telemetryStore.subscribe(
-      (st) => st.telemetry,
-      (data) => {
+      (st) => ({ telemetry: st.telemetry, minuteTick: st.minuteTick }),
+      ({ telemetry: data }) => {
         latestData = data;
         if (uiStore.getState().activeView !== 'overview') {
           const stillRunning =
@@ -1011,12 +1098,18 @@ export const LiveOverviewView = defineComponent({
         prevCtxTarget = slice.ctxInspectorAgentId;
 
         if (slice.activeView !== 'overview') {
+          pauseLiveTicker();
+          stopCountdownTicker();
           if (scopeChanged) isDirty = true;
           return;
         }
+        ensureCountdownTicker();
         if ((isDirty || scopeChanged) && latestData) {
           isDirty = false;
           renderData(latestData);
+        } else if (activityTimersMap.size > 0) {
+          updateLiveElapsedDisplay();
+          ensureLiveTicker();
         }
       }
     );
@@ -1039,6 +1132,7 @@ export const LiveOverviewView = defineComponent({
 
     onCleanup(() => {
       stopLiveTicker();
+      stopCountdownTicker();
       unsub();
       unsubView();
       if (ro) ro.disconnect();

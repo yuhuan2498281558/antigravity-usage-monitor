@@ -3,14 +3,19 @@
  *
  * 负责：
  * 1. 扫描 `~/.gemini/antigravity/conversations` 下的本地 `.db` / `.pb` / `.db-wal` 会话文件及修改时间；
- * 2. 读取跨端共享的 `.deep_stats_cache.json`（兼容 IDE / CLI / Standalone 多端步骤数据合并）；
- * 3. 将 Language Server 摘要、本地磁盘文件与内存缓存三方会话列表对齐，并以受控并发（最多 4 路）
+ * 2. 读取跨端共享的 `.deep_stats_cache.json`（兼容 IDE / CLI / Standalone 多端步骤数据合并与账号归属隔离）；
+ * 3. 将 Language Server 摘要、本地磁盘文件与内存缓存三方会话列表按大小写不敏感键对齐，并以受控并发（最多 4 路）
  *    拉取新增或 Schema 过期的会话轨迹步骤，持久化至 `trajectory_usage_cache.json`。
  */
 
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { extractLiveActivity, extractModelSteps, parseIsoMs } from '../speed-metrics.mjs';
+import {
+  extractLiveActivity,
+  extractModelSteps,
+  getMaxMeaningfulStepIndex,
+  parseIsoMs,
+} from '../speed-metrics.mjs';
 import {
   BRAIN_DIR,
   CACHE_FILE,
@@ -31,7 +36,7 @@ import { formatGenericModelSlug, getBaseModelLabel } from './model-pricing.mjs';
  *
  * @returns {Map<string, number>}
  */
-export function discoverLocalConversationFiles() {
+function discoverLocalConversationFiles() {
   const map = new Map();
   if (!existsSync(CONVERSATIONS_DIR)) return map;
   try {
@@ -61,7 +66,7 @@ export function discoverLocalConversationFiles() {
  * 加载并解析跨端（IDE / Standalone / JetBrains）写入的 `.deep_stats_cache.json` 缓存。
  * 使用文件签名 (`mtimeMs + size`) 进行 Memoize，文件未变化时直接返回内存 Map。
  *
- * @returns {Map<string, {cascadeId: string, appSource: string, title: string, lastModifiedMs: number, steps: object[]}>}
+ * @returns {Map<string, {cascadeId: string, appSource: string, accountName: string, title: string, lastModifiedMs: number, steps: object[]}>}
  */
 export function loadExternalDeepStatsCache() {
   const sigParts = [];
@@ -90,6 +95,7 @@ export function loadExternalDeepStatsCache() {
   for (const filePath of existingFiles) {
     const raw = loadJson(filePath, null);
     if (!raw || typeof raw.perConvo !== 'object' || !raw.perConvo) continue;
+    const fileAccountName = String(raw.accountName || raw.email || '').trim();
 
     for (const item of Object.values(raw.perConvo)) {
       for (const e of item?.entries || []) {
@@ -118,14 +124,18 @@ export function loadExternalDeepStatsCache() {
       const existing = convos.get(mapKey);
       if (existing && existing.steps.length >= rawEntries.length) continue;
 
+      const itemAccountName = String(
+        item?.accountName || item?.email || fileAccountName || ''
+      ).trim();
+
       const steps = [];
       let lastModifiedMs = 0;
       for (let idx = 0; idx < rawEntries.length; idx++) {
         const e = rawEntries[idx];
-        const inputTokens = Math.max(0, Number(e?.inp) || 0);
-        const cacheReadTokens = Math.max(0, Number(e?.cache) || 0);
-        const responseTokens = Math.max(0, Number(e?.out) || 0);
-        const thinkingTokens = Math.max(0, Number(e?.reasoning) || 0);
+        const inputTokens = Math.max(0, Math.floor(Number(e?.inp) || 0));
+        const cacheReadTokens = Math.max(0, Math.floor(Number(e?.cache) || 0));
+        const responseTokens = Math.max(0, Math.floor(Number(e?.out) || 0));
+        const thinkingTokens = Math.max(0, Math.floor(Number(e?.reasoning) || 0));
         const outputTokens = responseTokens + thinkingTokens;
         if (inputTokens === 0 && cacheReadTokens === 0 && outputTokens === 0) continue;
         const createdAtMs = e?.ts ? Date.parse(e.ts) || 0 : 0;
@@ -155,6 +165,7 @@ export function loadExternalDeepStatsCache() {
         convos.set(mapKey, {
           cascadeId,
           appSource,
+          accountName: itemAccountName,
           title: titleMap[fullKey] || titleMap[cascadeId] || cascadeId.slice(0, 8),
           lastModifiedMs,
           steps,
@@ -172,6 +183,7 @@ const MAX_CONCURRENT_RPC = 4;
 const LEGACY_MIGRATION_BATCH_SIZE = 8;
 const MAX_SUBAGENT_RECONCILE_DEPTH = 4;
 const FAILED_RPC_COOLDOWN_MS = 60_000;
+const ACTIVE_FAILED_RPC_COOLDOWN_MS = 15_000;
 const TRANSCRIPT_TAIL_MAX_BYTES = 96 * 1024;
 const MAX_TRANSCRIPT_MEMO_ENTRIES = 64;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -277,6 +289,9 @@ function readTranscriptTailSteps(cascadeId, maxLines = 24) {
 function scoreLiveActivitySpecificity(act) {
   if (!act || typeof act !== 'object') return 0;
   const sig = String(act.signature || '');
+  if (sig.startsWith('compacting:') || sig.startsWith('compacting-done:')) {
+    return 5;
+  }
   if (
     sig.startsWith('planner-tool:') ||
     sig.startsWith('step-run:') ||
@@ -285,7 +300,6 @@ function scoreLiveActivitySpecificity(act) {
     return 4;
   }
   if (
-    sig.startsWith('compacting:') ||
     sig.startsWith('responding:') ||
     sig.startsWith('thinking:') ||
     sig.startsWith('responding-done:') ||
@@ -302,37 +316,35 @@ function scoreLiveActivitySpecificity(act) {
   return 1;
 }
 
-function extractActivityStepOrd(act) {
-  const m = String(act?.signature || '').match(/^[a-z0-9-]+:(\d+)(?::|$)/i);
-  return m ? Number(m[1]) : -1;
-}
-
 function resolveBestLiveActivity(cascadeId, rpcRawSteps, isRunning, fallbackMs) {
   if (!isRunning) return null;
-  const rpcAct =
-    Array.isArray(rpcRawSteps) && rpcRawSteps.length > 0
-      ? extractLiveActivity(rpcRawSteps, true, fallbackMs)
-      : null;
+  const hasRpcSteps = Array.isArray(rpcRawSteps) && rpcRawSteps.length > 0;
+  const rpcAct = hasRpcSteps ? extractLiveActivity(rpcRawSteps, true, fallbackMs) : null;
   const transcriptSteps = readTranscriptTailSteps(cascadeId);
   const transcriptAct =
     transcriptSteps.length > 0 ? extractLiveActivity(transcriptSteps, true, fallbackMs) : null;
 
   if (rpcAct && transcriptAct) {
-    const rpcMs = Number(rpcAct.startedAtMs || 0);
-    const transMs = Number(transcriptAct.startedAtMs || 0);
-    if (rpcMs > 0 && transMs > 0 && rpcMs !== transMs) {
-      return rpcMs > transMs ? rpcAct : transcriptAct;
+    // 1. 先按真实 Cortex 步骤序号对齐比较：尚未刷入 transcript.jsonl 的新步骤（如正在进行的 CHECKPOINT 压缩或流式回复）优先采用 RPC
+    const rpcStepIdx = getMaxMeaningfulStepIndex(rpcRawSteps);
+    const transStepIdx = getMaxMeaningfulStepIndex(transcriptSteps);
+    if (rpcStepIdx >= 0 && transStepIdx >= 0 && rpcStepIdx !== transStepIdx) {
+      return rpcStepIdx > transStepIdx ? rpcAct : transcriptAct;
     }
-    const rpcOrd = extractActivityStepOrd(rpcAct);
-    const transOrd = extractActivityStepOrd(transcriptAct);
-    if (rpcOrd >= 0 && transOrd >= 0 && rpcOrd !== transOrd) {
-      return rpcOrd > transOrd ? rpcAct : transcriptAct;
-    }
+
+    // 2. 同一步骤序号下优先采用语义更明确的状态（上下文压缩 > 工具执行 > 流式生成 > 工具后置思考）
     const rpcScore = scoreLiveActivitySpecificity(rpcAct);
     const transScore = scoreLiveActivitySpecificity(transcriptAct);
-    if (transScore > rpcScore) return transcriptAct;
-    if (rpcScore > transScore) return rpcAct;
-    // 同步骤、同优先级下优先采用包含完整 tool_calls 参数的 transcript.jsonl 解析结果
+    if (rpcScore !== transScore) {
+      return rpcScore > transScore ? rpcAct : transcriptAct;
+    }
+
+    // 3. 同一步骤且均为压缩态时，优先采用携带精确完成时刻的 RPC 状态；常规步骤则优先采用含完整参数的 transcript.jsonl
+    const rpcMs = Number(rpcAct.startedAtMs || 0);
+    const transMs = Number(transcriptAct.startedAtMs || 0);
+    if (rpcAct.phase === 'compacting' && rpcMs !== transMs) {
+      return rpcMs >= transMs ? rpcAct : transcriptAct;
+    }
     return transcriptAct;
   }
   return (
@@ -377,13 +389,11 @@ function mergeSubagentSpecs(primary, secondary) {
 
 /**
  * 从主/父会话的原始轨迹步骤 (`CORTEX_STEP_TYPE_INVOKE_SUBAGENT`) 中提取派生子代理列表。
- * Antigravity 重启后 `GetAllCascadeTrajectories` 不再返回历史子代理摘要，
- * 通过解析父轨迹内的 `invokeSubagent` 步骤即可完整找回所有子代理及其角色名称与启动顺序。
  *
  * @param {object[]} [rawSteps=[]]
  * @returns {Array<{ cascadeId: string, role: string, typeName: string, createdTimeMs: number, spawnOrder: number }>}
  */
-export function extractSubagentRefsFromSteps(rawSteps = []) {
+function extractSubagentRefsFromSteps(rawSteps = []) {
   const refsMap = new Map();
   let orderCounter = 0;
   for (const st of rawSteps || []) {
@@ -482,9 +492,10 @@ function extractTrajectorySubagentMeta(trajRes, fallback = {}) {
  * 选定当前活跃会话，并以最多 4 路并发增量同步更新了的会话轨迹。
  *
  * @param {{
- *   summariesObj: Record<string, object>,
- *   currentAccountName: string,
- *   requestedConvId: string
+ *   summariesObj?: Record<string, object>,
+ *   currentAccountName?: string,
+ *   requestedConvId?: string,
+ *   forceRefresh?: boolean
  * }} params
  * @returns {Promise<{
  *   conversations: object[],
@@ -496,34 +507,87 @@ export async function enumerateAndSyncConversations({
   summariesObj = {},
   currentAccountName = '',
   requestedConvId = '',
+  forceRefresh = false,
 }) {
   const nowSweepMs = Date.now();
-  for (const [k, ts] of failedFetchCooldownMap.entries()) {
-    if (nowSweepMs - ts >= FAILED_RPC_COOLDOWN_MS) {
-      failedFetchCooldownMap.delete(k);
+  if (forceRefresh) {
+    failedFetchCooldownMap.clear();
+  } else {
+    for (const [k, rec] of failedFetchCooldownMap.entries()) {
+      const failedAt = typeof rec === 'number' ? rec : rec?.failedAt || 0;
+      const cooldownMs = typeof rec === 'number' ? FAILED_RPC_COOLDOWN_MS : rec?.cooldownMs || FAILED_RPC_COOLDOWN_MS;
+      if (nowSweepMs - failedAt >= cooldownMs) {
+        failedFetchCooldownMap.delete(k);
+      }
     }
   }
+
+  let cacheDirty = cacheState.needsSave;
   const diskConvMap = discoverLocalConversationFiles();
-  const allCascadeIds = new Set([
-    ...Object.keys(summariesObj),
-    ...diskConvMap.keys(),
-    ...Object.keys(trajectoryCache),
-  ]);
-  const existingLowerIds = new Set(Array.from(allCascadeIds, (id) => id.toLowerCase()));
-  for (const entry of Object.values(trajectoryCache)) {
+
+  // 构建大小写不敏感索引，将同一会话的不同大小写键合并至唯一规范键（优先保留 summariesObj 中的原始键以兼容 RPC）
+  const canonicalIdByLower = new Map();
+  const summariesByLower = new Map();
+  for (const [rawId, summary] of Object.entries(summariesObj || {})) {
+    const lower = String(rawId || '').trim().toLowerCase();
+    if (!lower) continue;
+    canonicalIdByLower.set(lower, rawId);
+    summariesByLower.set(lower, summary);
+  }
+
+  for (const rawCacheKey of Object.keys(trajectoryCache)) {
+    const lower = String(rawCacheKey || '').trim().toLowerCase();
+    if (!lower) continue;
+    const existingCanon = canonicalIdByLower.get(lower);
+    if (!existingCanon) {
+      // 标准 UUID 统一收敛为小写键，避免大小写分裂产生双份条目
+      const normalizedKey = UUID_RE.test(rawCacheKey) ? lower : rawCacheKey;
+      if (normalizedKey !== rawCacheKey) {
+        trajectoryCache[normalizedKey] = trajectoryCache[rawCacheKey];
+        delete trajectoryCache[rawCacheKey];
+        cacheDirty = true;
+      }
+      canonicalIdByLower.set(lower, normalizedKey);
+    } else if (existingCanon !== rawCacheKey) {
+      const targetEntry = trajectoryCache[existingCanon];
+      const dupEntry = trajectoryCache[rawCacheKey];
+      if (!targetEntry || (dupEntry?.steps?.length || 0) > (targetEntry?.steps?.length || 0)) {
+        trajectoryCache[existingCanon] = dupEntry;
+      }
+      delete trajectoryCache[rawCacheKey];
+      cacheDirty = true;
+    }
+  }
+
+  for (const diskLowerId of diskConvMap.keys()) {
+    if (!canonicalIdByLower.has(diskLowerId)) {
+      canonicalIdByLower.set(diskLowerId, diskLowerId);
+    }
+  }
+
+  // 仅从归属于当前账号的缓存会话收集 subagentRefs，防止跨账号切换时将其他账号的子代理复活进当前会话列表
+  for (const [cacheKey, entry] of Object.entries(trajectoryCache)) {
+    const cacheKeyLower = String(cacheKey || '').toLowerCase();
+    if (
+      entry?.accountName &&
+      currentAccountName &&
+      entry.accountName !== currentAccountName &&
+      !summariesByLower.has(cacheKeyLower)
+    ) {
+      continue;
+    }
     for (const ref of entry?.subagentRefs || []) {
       const refCid = String(ref?.cascadeId || '').trim().toLowerCase();
-      if (refCid && !existingLowerIds.has(refCid)) {
-        allCascadeIds.add(refCid);
-        existingLowerIds.add(refCid);
+      if (refCid && !canonicalIdByLower.has(refCid)) {
+        canonicalIdByLower.set(refCid, refCid);
       }
     }
   }
 
   const reqLower = String(requestedConvId || '').trim().toLowerCase();
   const rawConversations = [];
-  for (const cascadeId of allCascadeIds) {
-    const item = summariesObj[cascadeId];
+  for (const [cidLower, cascadeId] of canonicalIdByLower.entries()) {
+    const item = summariesByLower.get(cidLower);
     const cached = trajectoryCache[cascadeId];
     if (
       cached?.accountName &&
@@ -533,7 +597,7 @@ export async function enumerateAndSyncConversations({
     ) {
       continue;
     }
-    const diskMtimeMs = diskConvMap.get(cascadeId) || 0;
+    const diskMtimeMs = diskConvMap.get(cidLower) || 0;
     const rawMeta = item?.trajectoryMetadata || item?.metadata || {};
     const parentConversationId = String(
       rawMeta.parentConversationId || cached?.parentConversationId || ''
@@ -549,7 +613,7 @@ export async function enumerateAndSyncConversations({
     const subagentRefs = Array.isArray(cached?.subagentRefs) ? cached.subagentRefs : null;
     const isSubagent =
       Boolean(parentConversationId) ||
-      Boolean(rootConversationId && rootConversationId !== cascadeId.toLowerCase());
+      Boolean(rootConversationId && rootConversationId !== cidLower);
 
     if (item) {
       const lastModifiedTime = item?.lastModifiedTime || item?.createdTime || '';
@@ -627,7 +691,6 @@ export async function enumerateAndSyncConversations({
 
   rawConversations.sort((a, b) => b.lastModifiedMs - a.lastModifiedMs);
 
-  let cacheDirty = cacheState.needsSave;
   const attemptedFetchIds = new Set();
   const nowPollMs = Date.now();
 
@@ -638,12 +701,13 @@ export async function enumerateAndSyncConversations({
   }
 
   function isFetchInCooldown(conv, sig) {
-    if (conv.status === 'CASCADE_RUN_STATUS_RUNNING') return false;
-    if (reqLower && conv.cascadeId.toLowerCase() === reqLower) return false;
+    if (forceRefresh) return false;
     const key = `${conv.cascadeId.toLowerCase()}::${sig}`;
-    const failedAt = failedFetchCooldownMap.get(key);
-    if (!failedAt) return false;
-    if (nowPollMs - failedAt >= FAILED_RPC_COOLDOWN_MS) {
+    const rec = failedFetchCooldownMap.get(key);
+    if (!rec) return false;
+    const failedAt = typeof rec === 'number' ? rec : rec.failedAt;
+    const cooldownMs = typeof rec === 'number' ? FAILED_RPC_COOLDOWN_MS : rec.cooldownMs;
+    if (nowPollMs - failedAt >= cooldownMs) {
       failedFetchCooldownMap.delete(key);
       return false;
     }
@@ -690,7 +754,10 @@ export async function enumerateAndSyncConversations({
           const sig = buildConvSig(conv);
           const cooldownKey = `${conv.cascadeId.toLowerCase()}::${sig}`;
           const isRunning = conv.status === 'CASCADE_RUN_STATUS_RUNNING';
+          const isReq = Boolean(reqLower && conv.cascadeId.toLowerCase() === reqLower);
           const prev = trajectoryCache[conv.cascadeId];
+          let partialTailSteps = [];
+          let hasTailStepInfo = false;
           try {
             const trajRes = await callLsRpc('GetCascadeTrajectory', { cascadeId: conv.cascadeId });
             if (!Array.isArray(trajRes?.trajectory?.steps)) {
@@ -698,6 +765,12 @@ export async function enumerateAndSyncConversations({
             }
             const rawSteps = trajRes.trajectory.steps;
             if (Number(trajRes.numTotalSteps) > rawSteps.length) {
+              if (rawSteps.length > 0) {
+                partialTailSteps = rawSteps;
+                const tailIdx =
+                  rawSteps[rawSteps.length - 1]?.metadata?.sourceTrajectoryStepInfo?.stepIndex;
+                hasTailStepInfo = Number.isFinite(Number(tailIdx));
+              }
               throw new Error('Incomplete trajectory; retaining cached usage');
             }
             failedFetchCooldownMap.delete(cooldownKey);
@@ -777,13 +850,17 @@ export async function enumerateAndSyncConversations({
             }
           } catch (err) {
             console.error(`Failed loading trajectory ${conv.cascadeId}: ${err.message}`);
+            if (!(isRunning && hasTailStepInfo)) {
+              const cooldownMs =
+                isRunning || isReq ? ACTIVE_FAILED_RPC_COOLDOWN_MS : FAILED_RPC_COOLDOWN_MS;
+              failedFetchCooldownMap.set(cooldownKey, { failedAt: nowPollMs, cooldownMs });
+            }
             if (!isRunning) {
-              failedFetchCooldownMap.set(cooldownKey, nowPollMs);
               liveActivityMemo.delete(conv.cascadeId.toLowerCase());
             } else {
               const fallbackLive = resolveBestLiveActivity(
                 conv.cascadeId,
-                [],
+                partialTailSteps,
                 true,
                 conv.lastModifiedMs || conv.createdTimeMs || 0
               );
@@ -859,15 +936,17 @@ export async function enumerateAndSyncConversations({
           const subCid = String(ref?.cascadeId || '').trim().toLowerCase();
           if (!subCid || subCid === parentId) continue;
 
+          const canonSubId = canonicalIdByLower.get(subCid) || subCid;
+          canonicalIdByLower.set(subCid, canonSubId);
           let subConv = byLowerId.get(subCid);
-          const subCached = trajectoryCache[subConv?.cascadeId || subCid];
+          const subCached = trajectoryCache[subConv?.cascadeId || canonSubId];
           if (!subConv) {
             const diskMtimeMs = diskConvMap.get(subCid) || 0;
             const lastStepMs = subCached?.steps?.[subCached.steps.length - 1]?.createdAtMs || 0;
             const stepCount = Number(subCached?.steps?.length || 0);
             subConv = {
-              cascadeId: subCid,
-              title: ref.role || subCached?.title || subCid.slice(0, 8),
+              cascadeId: canonSubId,
+              title: ref.role || subCached?.title || canonSubId.slice(0, 8),
               stepCount,
               rawStepCount: stepCount,
               status: 'IDLE',
@@ -1037,7 +1116,7 @@ export async function enumerateAndSyncConversations({
     }
   }
 
-  // 按最终收敛的 rootConversationId 将所有层级的子代理挂载至对应顶层根会话下
+  // 按最终收敛的 rootConversationId 将所有层级的子代理挂载至对应顶层根会话下；孤儿子代理绝不提升为顶层根会话
   const subagentsByRoot = new Map();
   const conversations = [];
 
@@ -1045,11 +1124,13 @@ export async function enumerateAndSyncConversations({
     const cid = conv.cascadeId.toLowerCase();
     const rootId = (conv.rootConversationId || conv.parentConversationId || '').toLowerCase();
     const rootTarget = byId.get(rootId);
-    if (conv.isSubagent && rootId && rootId !== cid && rootTarget && !rootTarget.isSubagent) {
-      if (!subagentsByRoot.has(rootId)) {
-        subagentsByRoot.set(rootId, []);
+    if (conv.isSubagent) {
+      if (rootId && rootId !== cid && rootTarget && !rootTarget.isSubagent) {
+        if (!subagentsByRoot.has(rootId)) {
+          subagentsByRoot.set(rootId, []);
+        }
+        subagentsByRoot.get(rootId).push(conv);
       }
-      subagentsByRoot.get(rootId).push(conv);
     } else {
       conversations.push(conv);
     }

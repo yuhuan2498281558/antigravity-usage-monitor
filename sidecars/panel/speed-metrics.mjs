@@ -72,6 +72,28 @@ function validCount(value) {
 }
 
 /**
+ * 将原始 Token 计数值安全归一化为非负整数；对负数、NaN、Infinity、空数组/对象或非法字符串统一回退为 0。
+ *
+ * @param {unknown} value
+ * @returns {number}
+ */
+function safeTokenCount(value) {
+  if (validCount(value)) {
+    return Number(value);
+  }
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value);
+  }
+  if (typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value.trim())) {
+    const num = Number(value.trim());
+    if (Number.isFinite(num) && num >= 0) {
+      return Math.floor(num);
+    }
+  }
+  return 0;
+}
+
+/**
  * 将 ISO-8601 时间戳解析为纳秒级 `BigInt` 时间戳。
  *
  * 为什么必须使用 `BigInt` 纳秒而非 `Number` 浮点数：
@@ -211,6 +233,30 @@ function classifyChatMessageChild(child) {
   }
   // GENERIC, VIEW_FILE, RUN_COMMAND, CODE_ACTION 等均为工具调用返回结果
   return 'toolResults';
+}
+
+/**
+ * 根据 `messagePrompts` 条目的来源与内容特征将其归类到对话上下文的 5 个细分通道。
+ *
+ * @param {object} m
+ * @returns {'toolResults'|'checkpoint'|'subagent'|'assistant'|'userInput'}
+ */
+function classifyMessagePrompt(m) {
+  const text = String(m?.prompt ?? m?.content ?? '');
+  const src = String(m?.source || '').toUpperCase();
+  if (src.includes('TOOL')) {
+    return 'toolResults';
+  }
+  if (text.startsWith('<CONTEXT_SUMMARY>')) {
+    return 'checkpoint';
+  }
+  if (text.includes('<SYSTEM_MESSAGE>')) {
+    return 'subagent';
+  }
+  if (src.includes('SYSTEM') || src.includes('ASSISTANT') || src.includes('MODEL')) {
+    return 'assistant';
+  }
+  return 'userInput';
 }
 
 /**
@@ -358,6 +404,50 @@ export function extractContextBreakdown(chat) {
         if (gTokens > childSum) {
           userInputTokens += gTokens - childSum;
         }
+      } else if (messagePrompts.length > 0) {
+        const mpBuckets = {
+          userInput: 0,
+          assistant: 0,
+          toolResults: 0,
+          subagent: 0,
+          checkpoint: 0,
+        };
+        let mpSum = 0;
+        for (const m of messagePrompts) {
+          const text = String(m?.prompt ?? m?.content ?? '');
+          const tok =
+            Number.isFinite(Number(m?.numTokens)) && Number(m?.numTokens) >= 0
+              ? Number(m.numTokens)
+              : estimateUtf8Tokens(text);
+          const bucketKey = classifyMessagePrompt(m);
+          mpBuckets[bucketKey] += tok;
+          mpSum += tok;
+        }
+        if (gTokens > 0 && mpSum > 0) {
+          const keys = ['userInput', 'assistant', 'toolResults', 'subagent', 'checkpoint'];
+          const scaled = {};
+          let assigned = 0;
+          let largestKey = 'userInput';
+          for (const k of keys) {
+            if (mpBuckets[k] > mpBuckets[largestKey]) largestKey = k;
+            scaled[k] = mpBuckets[k] > 0 ? Math.floor((mpBuckets[k] * gTokens) / mpSum) : 0;
+            assigned += scaled[k];
+          }
+          scaled[largestKey] += Math.max(0, gTokens - assigned);
+          userInputTokens += scaled.userInput;
+          assistantTokens += scaled.assistant;
+          toolResultsTokens += scaled.toolResults;
+          subagentTokens += scaled.subagent;
+          checkpointTokens += scaled.checkpoint;
+        } else if (mpSum > 0) {
+          userInputTokens += mpBuckets.userInput;
+          assistantTokens += mpBuckets.assistant;
+          toolResultsTokens += mpBuckets.toolResults;
+          subagentTokens += mpBuckets.subagent;
+          checkpointTokens += mpBuckets.checkpoint;
+        } else if (gTokens > 0) {
+          userInputTokens += gTokens;
+        }
       } else if (gTokens > 0) {
         userInputTokens += gTokens;
       }
@@ -408,15 +498,15 @@ export function extractContextBreakdown(chat) {
         Number.isFinite(Number(m?.numTokens)) && Number(m?.numTokens) >= 0
           ? Number(m.numTokens)
           : estimateUtf8Tokens(text);
-      const src = String(m?.source || '').toUpperCase();
-      if (src.includes('TOOL')) {
+      const bucketKey = classifyMessagePrompt(m);
+      if (bucketKey === 'toolResults') {
         toolResultsTokens += tok;
-      } else if (src.includes('SYSTEM') || src.includes('ASSISTANT') || src.includes('MODEL')) {
-        assistantTokens += tok;
-      } else if (text.startsWith('<CONTEXT_SUMMARY>')) {
+      } else if (bucketKey === 'checkpoint') {
         checkpointTokens += tok;
-      } else if (text.includes('<SYSTEM_MESSAGE>')) {
+      } else if (bucketKey === 'subagent') {
         subagentTokens += tok;
+      } else if (bucketKey === 'assistant') {
+        assistantTokens += tok;
       } else {
         userInputTokens += tok;
       }
@@ -484,20 +574,28 @@ export function extractContextBreakdown(chat) {
 export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
   const genByStep = new Map();
   let latestBreakdownChat = null;
+  let latestBreakdownStepIdx = -1;
 
   for (const gm of generatorMetadata || []) {
     if (!gm?.chatModel) {
       continue;
     }
+    let gmMaxIdx = -1;
     for (const index of gm?.stepIndices || []) {
-      genByStep.set(Number(index), gm);
+      const numIdx = Number(index);
+      genByStep.set(numIdx, gm);
+      if (Number.isFinite(numIdx) && numIdx > gmMaxIdx) {
+        gmMaxIdx = numIdx;
+      }
     }
     if (extractContextBreakdown(gm.chatModel)) {
       latestBreakdownChat = gm.chatModel;
+      latestBreakdownStepIdx = gmMaxIdx;
     }
   }
 
   const result = [];
+  let lastCompactionStepIdx = -1;
 
   rawSteps.forEach((s, index) => {
     const m = s?.metadata;
@@ -513,23 +611,32 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     const gm = inlineChat || genByStep.get(Number(stepIndex));
     const chat = gm?.chatModel;
     const p = s.plannerResponse || {};
-    const isCompactionStep = s.type === 'CORTEX_STEP_TYPE_CHECKPOINT';
+    const isCompactionStep = isCheckpointStep(s);
+    if (isCompactionStep && Number.isFinite(Number(stepIndex))) {
+      lastCompactionStepIdx = Math.max(lastCompactionStepIdx, Number(stepIndex));
+    }
 
-    const inputTokens = Number(u.inputTokens || 0);
-    const cacheReadTokens = Number(u.cacheReadTokens || 0);
-    const outputTokens = Number(u.outputTokens || 0);
-    const thinkingTokens = Number(
+    const inputTokens = safeTokenCount(u.inputTokens);
+    const cacheReadTokens = safeTokenCount(u.cacheReadTokens);
+    const outputTokens = safeTokenCount(u.outputTokens);
+    const rawThinkingTok = safeTokenCount(
       p.thinkingTokens ??
         u.thinkingOutputTokens ??
         chat?.usage?.thinkingOutputTokens ??
         0
     );
-    const responseTokens = Number(
+    const rawResponseTok =
       p.responseTokens ??
-        u.responseOutputTokens ??
-        chat?.usage?.responseOutputTokens ??
-        Math.max(0, outputTokens - thinkingTokens)
-    );
+      u.responseOutputTokens ??
+      chat?.usage?.responseOutputTokens;
+    const thinkingTokens =
+      rawResponseTok !== undefined && rawResponseTok !== null
+        ? rawThinkingTok
+        : Math.min(outputTokens, rawThinkingTok);
+    const responseTokens =
+      rawResponseTok !== undefined && rawResponseTok !== null
+        ? safeTokenCount(rawResponseTok)
+        : Math.max(0, outputTokens - thinkingTokens);
 
     const start = parseIsoMs(m.createdAt);
     const measuredDuration = requestDuration(
@@ -642,11 +749,13 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     });
   });
 
-  // 末尾步骤上下文回填：若最后一个步骤缺少 contextBreakdown，则使用同轨迹最近一次有效的 generatorMetadata 补齐
+  // 末尾步骤上下文回填：若最后一个非压缩步骤缺少 contextBreakdown，且最近一次有效的 generatorMetadata 未跨过压缩边界，则补齐
   if (
     result.length > 0 &&
+    !result[result.length - 1].isCompactionStep &&
     !result[result.length - 1].contextBreakdown &&
-    latestBreakdownChat
+    latestBreakdownChat &&
+    (lastCompactionStepIdx < 0 || latestBreakdownStepIdx > lastCompactionStepIdx)
   ) {
     const lastStep = result[result.length - 1];
     const fallbackBreakdown = extractContextBreakdown(latestBreakdownChat);
@@ -675,7 +784,7 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
  * - **第 3 轮（前向任意显式模型回退）**：若仍未找到，忽略 Provider 限制，向前查找最近的任意显式模型步骤；
  * - **第 4 轮（后向任意显式模型兜底）**：最后向后查找最近的任意显式模型步骤。
  *
- * 命中后将 `modelKey` 补齐并将 `modelSource` 标记为 `'inferred_compaction'`，同时补齐缺失的 `responseModel` 与 `modelDisplayName`。
+ * 命中后将 `modelKey` 补齐并将 `modelSource` 标记为 `'inferred_compaction'`，同时补齐同模型的 `responseModel` 与 `modelDisplayName`。
  *
  * @param {Array<object>} steps 已提取的步骤列表
  * @returns {Array<object>} 补齐压缩步骤模型归属后的步骤列表
@@ -710,11 +819,19 @@ export function inferCompactionStepModels(steps) {
       return step;
     }
 
+    const canDonate = (cand) => {
+      if (!isExplicitDonor(cand)) return false;
+      if (!needsModel) {
+        return cand.modelKey === step.modelKey && Boolean(cand.responseModel);
+      }
+      return true;
+    };
+
     let donor = null;
 
     // 第 1 轮：前向查找同 API Provider 的最近显式模型步骤
     for (let j = idx - 1; j >= 0; j--) {
-      if (isExplicitDonor(steps[j]) && isProviderCompatible(step, steps[j])) {
+      if (canDonate(steps[j]) && isProviderCompatible(step, steps[j])) {
         donor = steps[j];
         break;
       }
@@ -722,7 +839,7 @@ export function inferCompactionStepModels(steps) {
     // 第 2 轮：后向查找同 API Provider 的最近显式模型步骤
     if (!donor) {
       for (let j = idx + 1; j < steps.length; j++) {
-        if (isExplicitDonor(steps[j]) && isProviderCompatible(step, steps[j])) {
+        if (canDonate(steps[j]) && isProviderCompatible(step, steps[j])) {
           donor = steps[j];
           break;
         }
@@ -731,7 +848,7 @@ export function inferCompactionStepModels(steps) {
     // 第 3 轮：前向查找任意最近显式模型步骤
     if (!donor) {
       for (let j = idx - 1; j >= 0; j--) {
-        if (isExplicitDonor(steps[j])) {
+        if (canDonate(steps[j])) {
           donor = steps[j];
           break;
         }
@@ -740,7 +857,7 @@ export function inferCompactionStepModels(steps) {
     // 第 4 轮：后向查找任意最近显式模型步骤
     if (!donor) {
       for (let j = idx + 1; j < steps.length; j++) {
-        if (isExplicitDonor(steps[j])) {
+        if (canDonate(steps[j])) {
           donor = steps[j];
           break;
         }
@@ -751,12 +868,29 @@ export function inferCompactionStepModels(steps) {
       return step;
     }
 
+    const nextModelKey = needsModel ? donor.modelKey : step.modelKey;
+    const nextModelSource = needsModel ? 'inferred_compaction' : step.modelSource;
+    const donorSameModel = donor.modelKey === nextModelKey;
+    const nextResponseModel =
+      step.responseModel || (donorSameModel ? donor.responseModel || '' : '');
+    const nextDisplayName =
+      step.modelDisplayName || (donorSameModel ? donor.modelDisplayName || '' : '');
+
+    if (
+      nextModelKey === step.modelKey &&
+      nextModelSource === step.modelSource &&
+      nextResponseModel === (step.responseModel || '') &&
+      nextDisplayName === (step.modelDisplayName || '')
+    ) {
+      return step;
+    }
+
     return {
       ...step,
-      modelKey: needsModel ? donor.modelKey : step.modelKey,
-      modelSource: needsModel ? 'inferred_compaction' : step.modelSource,
-      responseModel: step.responseModel || donor.responseModel || '',
-      modelDisplayName: step.modelDisplayName || donor.modelDisplayName || '',
+      modelKey: nextModelKey,
+      modelSource: nextModelSource,
+      responseModel: nextResponseModel,
+      modelDisplayName: nextDisplayName,
     };
   });
 }
@@ -777,6 +911,9 @@ export function inferCompactionStepModels(steps) {
  * @returns {object} 迁移并清洗后的步骤对象
  */
 export function normalizeCachedStep(step) {
+  if (!step || typeof step !== 'object' || Array.isArray(step)) {
+    return null;
+  }
   if (step.modelIdentityVersion !== MODEL_IDENTITY_VERSION) {
     const ambiguous =
       !step.modelKey || step.modelKey === 'MODEL_PLACEHOLDER_M418';
@@ -809,6 +946,32 @@ export function normalizeCachedStep(step) {
     for (const k of DEAD_V3_KEYS) {
       delete step[k];
     }
+  }
+
+  const safeIn = safeTokenCount(step.inputTokens);
+  const safeCache = safeTokenCount(step.cacheReadTokens);
+  const safeOut = safeTokenCount(step.outputTokens);
+  const safeThink = safeTokenCount(step.thinkingTokens);
+  const safeResp =
+    step.responseTokens !== undefined && step.responseTokens !== null
+      ? safeTokenCount(step.responseTokens)
+      : Math.max(0, safeOut - safeThink);
+
+  if (
+    step.inputTokens !== safeIn ||
+    step.cacheReadTokens !== safeCache ||
+    step.outputTokens !== safeOut ||
+    step.thinkingTokens !== safeThink ||
+    step.responseTokens !== safeResp
+  ) {
+    step = {
+      ...step,
+      inputTokens: safeIn,
+      cacheReadTokens: safeCache,
+      outputTokens: safeOut,
+      thinkingTokens: safeThink,
+      responseTokens: safeResp,
+    };
   }
 
   if (step.measurementVersion === MEASUREMENT_VERSION) {
@@ -1190,7 +1353,23 @@ function isPlannerStep(step) {
 
 function isCheckpointStep(step) {
   const t = String(step?.type || '').toUpperCase();
-  return t === 'CORTEX_STEP_TYPE_CHECKPOINT' || t === 'CHECKPOINT';
+  if (
+    t === 'CORTEX_STEP_TYPE_CHECKPOINT' ||
+    t === 'CHECKPOINT' ||
+    t.includes('CHECKPOINT') ||
+    Boolean(step?.checkpoint && typeof step.checkpoint === 'object')
+  ) {
+    return true;
+  }
+  if (t.includes('SYSTEM') && typeof step?.content === 'string') {
+    return /^\s*#\s*Resuming from a compaction\b/i.test(step.content);
+  }
+  return false;
+}
+
+function isAuxiliaryMetaStep(step) {
+  const t = String(step?.type || '').toUpperCase();
+  return t.includes('MEMENTO') || t.includes('EPHEMERAL');
 }
 
 /**
@@ -1538,6 +1717,16 @@ export function summarizeToolCall(rawToolCall, fallbackStep = null) {
  *   signature: string
  * } | null}
  */
+export function getMaxMeaningfulStepIndex(rawSteps = []) {
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) return -1;
+  let idx = rawSteps.length - 1;
+  while (idx > 0 && isAuxiliaryMetaStep(rawSteps[idx]) && isRawStepComplete(rawSteps[idx])) {
+    idx--;
+  }
+  const numId = Number(getStepStableId(rawSteps[idx], idx));
+  return Number.isFinite(numId) ? numId : idx;
+}
+
 export function extractLiveActivity(rawSteps = [], isRunning = false, fallbackStartMs = 0) {
   if (!isRunning) return null;
   if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
@@ -1556,26 +1745,39 @@ export function extractLiveActivity(rawSteps = [], isRunning = false, fallbackSt
 
   let lastPlannerIdx = -1;
   let lastUserIdx = -1;
+  let lastCheckpointIdx = -1;
   for (let i = rawSteps.length - 1; i >= 0; i--) {
     const st = rawSteps[i];
     const t = String(st?.type || '').toUpperCase();
+    if (lastCheckpointIdx === -1 && isCheckpointStep(st)) {
+      lastCheckpointIdx = i;
+    }
     if (lastPlannerIdx === -1 && isPlannerStep(st)) {
       lastPlannerIdx = i;
     }
     if (lastUserIdx === -1 && t.includes('USER_INPUT')) {
       lastUserIdx = i;
     }
-    if (lastPlannerIdx !== -1 && lastUserIdx !== -1) break;
+    if (lastPlannerIdx !== -1 && lastUserIdx !== -1 && lastCheckpointIdx !== -1) break;
   }
 
-  const lastIdx = rawSteps.length - 1;
+  // 忽略末尾已完成的辅助元数据步骤（如 MEMENTO / EPHEMERAL_MESSAGE），避免掩盖正在运行或刚完成的压缩/工具步骤
+  let lastIdx = rawSteps.length - 1;
+  while (lastIdx > 0 && isAuxiliaryMetaStep(rawSteps[lastIdx]) && isRawStepComplete(rawSteps[lastIdx])) {
+    lastIdx--;
+  }
   const lastStep = rawSteps[lastIdx];
   const lastStepId = getStepStableId(lastStep, lastIdx);
   const lastComplete = isRawStepComplete(lastStep);
 
-  // 情况 A：最后一个步骤本身尚未完成（正在流式生成或正在执行该步骤）
+  // 情况 A：最后一个有效步骤本身尚未完成（正在流式生成、正在上下文压缩或正在执行工具）
   if (!lastComplete) {
-    const startMs = getRawStepStartMs(lastStep) || Math.floor(fallbackStartMs || 0);
+    const prevStepEndMs =
+      lastIdx > 0
+        ? getRawStepFinishMs(rawSteps[lastIdx - 1]) || getRawStepEndMs(rawSteps[lastIdx - 1])
+        : 0;
+    const startMs =
+      getRawStepStartMs(lastStep) || prevStepEndMs || Math.floor(fallbackStartMs || 0);
 
     if (isCheckpointStep(lastStep)) {
       return {
@@ -1643,10 +1845,10 @@ export function extractLiveActivity(rawSteps = [], isRunning = false, fallbackSt
       };
     }
 
-    // 末尾是未完成的工具执行步骤
+    // 末尾是未完成的工具执行步骤（仅关联压缩边界之后的最近一轮 PLANNER_RESPONSE）
     let matchedPlannerTool = null;
     let stepProgress = '';
-    if (lastPlannerIdx >= 0 && lastPlannerIdx > lastUserIdx) {
+    if (lastPlannerIdx >= 0 && lastPlannerIdx > lastUserIdx && lastPlannerIdx > lastCheckpointIdx) {
       const pTools = getStepPlannerToolCalls(rawSteps[lastPlannerIdx]);
       const toolStepsAfterPlanner = [];
       for (let k = lastPlannerIdx + 1; k <= lastIdx; k++) {
@@ -1669,8 +1871,7 @@ export function extractLiveActivity(rawSteps = [], isRunning = false, fallbackSt
       stepProgress = '';
     }
     const waiting = isWaitingStepStatus(lastStep?.status) || info.isAskUser;
-    const prevEndMs = lastIdx > 0 ? getRawStepFinishMs(rawSteps[lastIdx - 1]) : 0;
-    const resolvedStartMs = startMs || prevEndMs || 0;
+    const resolvedStartMs = startMs || prevStepEndMs || 0;
     const label = waiting && !info.isAskUser ? `等待确认 · ${info.label}` : info.label;
 
     return {
@@ -1683,8 +1884,49 @@ export function extractLiveActivity(rawSteps = [], isRunning = false, fallbackSt
     };
   }
 
-  // 情况 B：末尾步骤已是完成态 (DONE)，但整个会话仍处于 RUNNING 状态
-  if (lastPlannerIdx >= 0 && lastPlannerIdx > lastUserIdx) {
+  // 情况 A2：最新关键里程碑是已完成态 (DONE) 的上下文压缩步骤（如 transcript.jsonl 写入的 CHECKPOINT
+  // 或 RPC 压缩刚完成正组装压缩后上下文准备下一轮推理），严禁穿透回溯到压缩前的旧工具操作
+  if (lastCheckpointIdx >= 0 && lastCheckpointIdx > lastPlannerIdx && lastCheckpointIdx > lastUserIdx) {
+    let hasPostCheckpointToolStep = false;
+    for (let k = lastCheckpointIdx + 1; k <= lastIdx; k++) {
+      const kt = String(rawSteps[k]?.type || '').toUpperCase();
+      if (
+        !isCheckpointStep(rawSteps[k]) &&
+        !isAuxiliaryMetaStep(rawSteps[k]) &&
+        !kt.includes('GENERIC') &&
+        !kt.includes('SYSTEM')
+      ) {
+        hasPostCheckpointToolStep = true;
+        break;
+      }
+    }
+    if (!hasPostCheckpointToolStep) {
+      const cpStep = rawSteps[lastCheckpointIdx];
+      const cpStepId = getStepStableId(cpStep, lastCheckpointIdx);
+      const prevBeforeCpMs =
+        lastCheckpointIdx > 0
+          ? getRawStepFinishMs(rawSteps[lastCheckpointIdx - 1]) ||
+            getRawStepEndMs(rawSteps[lastCheckpointIdx - 1])
+          : 0;
+      const cpFinishMs = getRawStepFinishMs(cpStep);
+      const cpStartMs =
+        cpFinishMs ||
+        getRawStepStartMs(cpStep) ||
+        prevBeforeCpMs ||
+        Math.floor(fallbackStartMs || 0);
+      return {
+        phase: 'compacting',
+        label: '上下文压缩',
+        detail: cpFinishMs > 0 ? '已完成压缩，正在恢复推理' : '',
+        stepProgress: '',
+        startedAtMs: cpStartMs,
+        signature: cpFinishMs > 0 ? `compacting-done:${cpStepId}` : `compacting:${cpStepId}`,
+      };
+    }
+  }
+
+  // 情况 B：末尾步骤已是完成态 (DONE)，但整个会话仍处于 RUNNING 状态（仅在压缩边界之后匹配上一轮 PLANNER_RESPONSE）
+  if (lastPlannerIdx >= 0 && lastPlannerIdx > lastUserIdx && lastPlannerIdx > lastCheckpointIdx) {
     const plannerStep = rawSteps[lastPlannerIdx];
     const plannerStepId = getStepStableId(plannerStep, lastPlannerIdx);
     const pTools = getStepPlannerToolCalls(plannerStep);

@@ -1,9 +1,9 @@
 /**
- * @fileoverview 多时间窗口解析、用量桶累加、12 段趋势序列、月度序列与分模型/分来源聚合引擎。
+ * @fileoverview 多时间窗口解析、用量桶累加、趋势序列、月度序列与分模型/分来源聚合引擎。
  *
  * 负责将内存缓存 (`trajectoryCache`) 与外部深层统计缓存 (`loadExternalDeepStatsCache`)
  * 中的所有步骤按预设窗口（`all`, `5h`, `today`, `24h`, `week`, `7d`, `14d`, `30d`）与当前选定窗口
- * 进行一次遍历聚合，输出前端消费分析与模型明细所需的完整统计结构。
+ * 进行去重遍历聚合，输出前端消费分析与模型明细所需的完整统计结构。
  */
 
 import {
@@ -15,14 +15,26 @@ import { roundMetric, trajectoryCache } from './config.mjs';
 import { loadExternalDeepStatsCache } from './local-scanner.mjs';
 import { computeStepCost, resolveModelInfo } from './model-pricing.mjs';
 
+function safeTok(val) {
+  const n = Number(val);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
 /**
  * 获取本地当日 00:00:00.000 的毫秒时间戳。
  *
  * @param {Date|number} [now=new Date()]
  * @returns {number}
  */
-export function getStartOfLocalDayMs(now = new Date()) {
+function getStartOfLocalDayMs(now = new Date()) {
   const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function getStartOfLocalOffsetDaysMs(nowMs, offsetDays) {
+  const d = new Date(nowMs);
+  d.setDate(d.getDate() - offsetDays);
   d.setHours(0, 0, 0, 0);
   return d.getTime();
 }
@@ -48,7 +60,7 @@ export function getNextMondayResetIso(now = new Date()) {
  * @param {Date|number} [now=new Date()]
  * @returns {number}
  */
-export function getStartOfCurrentWeekMs(now = new Date()) {
+function getStartOfCurrentWeekMs(now = new Date()) {
   const d = new Date(now);
   const day = d.getDay(); // 0 = Sun, 1 = Mon
   const diffToMon = day === 0 ? -6 : 1 - day;
@@ -67,7 +79,7 @@ export function getStartOfCurrentWeekMs(now = new Date()) {
  * @param {{ fiveHourResetMs?: number, weeklyResetMs?: number }} [cycleAnchors={}]
  * @returns {{ key: string, label: string, startMs: number, endMs: number }}
  */
-export function resolveTimeWindow(
+function resolveTimeWindow(
   rangeKey = 'all',
   customStartMs = 0,
   customEndMs = 0,
@@ -79,7 +91,9 @@ export function resolveTimeWindow(
     case '5h': {
       const reset5hMs = cycleAnchors.fiveHourResetMs || 0;
       const start5hMs =
-        reset5hMs > nowMs ? reset5hMs - 5 * 3600 * 1000 : nowMs - 5 * 3600 * 1000;
+        reset5hMs > nowMs
+          ? Math.min(nowMs, reset5hMs - 5 * 3600 * 1000)
+          : nowMs - 5 * 3600 * 1000;
       return {
         key: '5h',
         label: reset5hMs > nowMs ? '当前 5h 周期' : '近 5 小时',
@@ -94,7 +108,9 @@ export function resolveTimeWindow(
     case 'week': {
       const resetWkMs = cycleAnchors.weeklyResetMs || 0;
       const startWkMs =
-        resetWkMs > nowMs ? resetWkMs - 7 * 24 * 3600 * 1000 : getStartOfCurrentWeekMs(now);
+        resetWkMs > nowMs
+          ? Math.min(nowMs, resetWkMs - 7 * 24 * 3600 * 1000)
+          : getStartOfCurrentWeekMs(now);
       return {
         key: 'week',
         label: resetWkMs > nowMs ? '当前周限周期' : '本周',
@@ -103,19 +119,24 @@ export function resolveTimeWindow(
       };
     }
     case '7d':
-      return { key: '7d', label: '近 7 天', startMs: nowMs - 7 * 24 * 3600 * 1000, endMs: nowMs };
+      return {
+        key: '7d',
+        label: '近 7 天',
+        startMs: getStartOfLocalOffsetDaysMs(nowMs, 7),
+        endMs: nowMs,
+      };
     case '14d':
       return {
         key: '14d',
         label: '近 14 天',
-        startMs: nowMs - 14 * 24 * 3600 * 1000,
+        startMs: getStartOfLocalOffsetDaysMs(nowMs, 14),
         endMs: nowMs,
       };
     case '30d':
       return {
         key: '30d',
         label: '近 30 天',
-        startMs: nowMs - 30 * 24 * 3600 * 1000,
+        startMs: getStartOfLocalOffsetDaysMs(nowMs, 30),
         endMs: nowMs,
       };
     case 'custom': {
@@ -137,7 +158,7 @@ export function resolveTimeWindow(
 /**
  * 创建一个空的用量统计累加桶。
  */
-export function createUsageBucket() {
+function createUsageBucket() {
   return {
     calls: 0,
     conversationsSet: new Set(),
@@ -149,12 +170,6 @@ export function createUsageBucket() {
     totalTokens: 0,
     costUsd: 0,
     savedCostUsd: 0,
-    geminiTokens: 0,
-    geminiCostUsd: 0,
-    geminiCalls: 0,
-    claudeGptTokens: 0,
-    claudeGptCostUsd: 0,
-    claudeGptCalls: 0,
   };
 }
 
@@ -167,33 +182,32 @@ export function createUsageBucket() {
  * @param {number|null} stepCost 单步美元成本（未知时为 `null`）
  * @param {string} cascadeId 会话标识
  */
-export function accumulateStepIntoBucket(bucket, st, mInfo, stepCost, cascadeId) {
-  const stepTotalTokens = st.inputTokens + st.cacheReadTokens + st.outputTokens;
-  const savedCost = mInfo.pricing
-    ? (st.cacheReadTokens / 1_000_000) * Math.max(0, mInfo.pricing.input - mInfo.pricing.cache)
+function accumulateStepIntoBucket(bucket, st, mInfo, stepCost, cascadeId) {
+  const inTok = safeTok(st?.inputTokens);
+  const cacheTok = safeTok(st?.cacheReadTokens);
+  const outTok = safeTok(st?.outputTokens);
+  const thinkTok = safeTok(st?.thinkingTokens);
+  const respTok =
+    st?.responseTokens !== undefined && st?.responseTokens !== null
+      ? safeTok(st.responseTokens)
+      : Math.max(0, outTok - thinkTok);
+
+  const stepTotalTokens = inTok + cacheTok + outTok;
+  const savedCost = mInfo?.pricing
+    ? (cacheTok / 1_000_000) * Math.max(0, mInfo.pricing.input - mInfo.pricing.cache)
     : 0;
   if (stepCost === null) bucket.unpricedCalls = (bucket.unpricedCalls || 0) + 1;
-  const resolvedCost = stepCost ?? 0;
+  const resolvedCost = Number.isFinite(stepCost) ? stepCost : 0;
   bucket.calls += 1;
   if (cascadeId) bucket.conversationsSet.add(cascadeId);
-  bucket.inputTokens += st.inputTokens;
-  bucket.cacheReadTokens += st.cacheReadTokens;
-  bucket.outputTokens += st.outputTokens;
-  bucket.thinkingTokens += st.thinkingTokens || 0;
-  bucket.responseTokens += st.responseTokens || 0;
+  bucket.inputTokens += inTok;
+  bucket.cacheReadTokens += cacheTok;
+  bucket.outputTokens += outTok;
+  bucket.thinkingTokens += thinkTok;
+  bucket.responseTokens += respTok;
   bucket.totalTokens += stepTotalTokens;
   bucket.costUsd += resolvedCost;
   bucket.savedCostUsd += savedCost;
-
-  if (mInfo.family === 'Gemini') {
-    bucket.geminiTokens += stepTotalTokens;
-    bucket.geminiCostUsd += resolvedCost;
-    bucket.geminiCalls += 1;
-  } else if (mInfo.family === 'Claude' || mInfo.family === 'GPT') {
-    bucket.claudeGptTokens += stepTotalTokens;
-    bucket.claudeGptCostUsd += resolvedCost;
-    bucket.claudeGptCalls += 1;
-  }
 }
 
 /**
@@ -201,7 +215,7 @@ export function accumulateStepIntoBucket(bucket, st, mInfo, stepCost, cascadeId)
  *
  * @param {ReturnType<typeof createUsageBucket>} bucket
  */
-export function finalizeUsageBucket(bucket) {
+function finalizeUsageBucket(bucket) {
   const promptTokens = bucket.inputTokens + bucket.cacheReadTokens;
   const cacheHitPct =
     promptTokens > 0 ? +((bucket.cacheReadTokens / promptTokens) * 100).toFixed(1) : 0;
@@ -218,12 +232,6 @@ export function finalizeUsageBucket(bucket) {
     unpricedCalls: bucket.unpricedCalls || 0,
     savedCostUsd: +bucket.savedCostUsd.toFixed(2),
     cacheHitPct,
-    geminiTokens: bucket.geminiTokens,
-    geminiCostUsd: +bucket.geminiCostUsd.toFixed(2),
-    geminiCalls: bucket.geminiCalls,
-    claudeGptTokens: bucket.claudeGptTokens,
-    claudeGptCostUsd: +bucket.claudeGptCostUsd.toFixed(2),
-    claudeGptCalls: bucket.claudeGptCalls,
   };
 }
 
@@ -236,8 +244,15 @@ export function finalizeUsageBucket(bucket) {
  * @param {number|null} stepCost
  */
 function accumulateStepIntoModelMap(perModelStats, st, mInfo, stepCost) {
-  const stepTotalTokens =
-    (st.inputTokens || 0) + (st.cacheReadTokens || 0) + (st.outputTokens || 0);
+  const inTok = safeTok(st?.inputTokens);
+  const cacheTok = safeTok(st?.cacheReadTokens);
+  const outTok = safeTok(st?.outputTokens);
+  const thinkTok = safeTok(st?.thinkingTokens);
+  const respTok =
+    st?.responseTokens !== undefined && st?.responseTokens !== null
+      ? safeTok(st.responseTokens)
+      : Math.max(0, outTok - thinkTok);
+  const stepTotalTokens = inTok + cacheTok + outTok;
   const unpriced = stepCost === null ? 1 : 0;
   const modelGroupKey = mInfo.baseLabel || mInfo.label;
 
@@ -269,13 +284,13 @@ function accumulateStepIntoModelMap(perModelStats, st, mInfo, stepCost) {
   accumulateSpeed(agg.speedAccumulator, st);
 
   agg.calls += 1;
-  agg.inputTokens += st.inputTokens || 0;
-  agg.cacheReadTokens += st.cacheReadTokens || 0;
-  agg.outputTokens += st.outputTokens || 0;
-  agg.thinkingTokens += st.thinkingTokens || 0;
-  agg.responseTokens += st.responseTokens || 0;
+  agg.inputTokens += inTok;
+  agg.cacheReadTokens += cacheTok;
+  agg.outputTokens += outTok;
+  agg.thinkingTokens += thinkTok;
+  agg.responseTokens += respTok;
   agg.totalTokens += stepTotalTokens;
-  agg.costUsd += stepCost ?? 0;
+  agg.costUsd += Number.isFinite(stepCost) ? stepCost : 0;
   agg.unpricedCalls = (agg.unpricedCalls || 0) + unpriced;
 }
 
@@ -309,13 +324,14 @@ function finalizeModelBreakdownMap(perModelStats) {
 /**
  * 针对给定步骤数组构建按模型聚合的统计列表（供单代理、主+子汇总及全局时间范围复用）。
  *
- * @param {object[]} steps
- * @param {Map<string, object>} dynamicModelMap
+ * @param {object[]} [steps=[]]
+ * @param {Map<string, object>} [dynamicModelMap=new Map()]
  * @returns {object[]}
  */
-export function buildScopedModelBreakdown(steps = [], dynamicModelMap) {
+export function buildScopedModelBreakdown(steps = [], dynamicModelMap = new Map()) {
   const perModelStats = new Map();
   for (const st of steps) {
+    if (!st || typeof st !== 'object') continue;
     const mInfo = resolveModelInfo(
       st.modelKey,
       dynamicModelMap,
@@ -330,7 +346,7 @@ export function buildScopedModelBreakdown(steps = [], dynamicModelMap) {
 }
 
 /**
- * 聚合所有预设时间窗口、当前选定窗口、12 段趋势图、年度月序列、来源占比与分模型统计。
+ * 聚合所有预设时间窗口、当前选定窗口、趋势图、年度月序列、来源占比与分模型统计。
  *
  * @param {{
  *   filterOpts?: { range?: string, startMs?: number, endMs?: number },
@@ -338,7 +354,7 @@ export function buildScopedModelBreakdown(steps = [], dynamicModelMap) {
  *   currentAccountName?: string,
  *   activeCascadeId?: string|null,
  *   activeFamilyCascadeIds?: Set<string>|null,
- *   dynamicModelMap: Map<string, object>
+ *   dynamicModelMap?: Map<string, object>
  * }} params
  */
 export function aggregateMultiWindowUsage({
@@ -347,8 +363,8 @@ export function aggregateMultiWindowUsage({
   currentAccountName = '',
   activeCascadeId = null,
   activeFamilyCascadeIds = null,
-  dynamicModelMap,
-}) {
+  dynamicModelMap = new Map(),
+} = {}) {
   const rawFamilyIds =
     activeFamilyCascadeIds instanceof Set
       ? Array.from(activeFamilyCascadeIds)
@@ -401,10 +417,41 @@ export function aggregateMultiWindowUsage({
   };
   const perSourceStats = new Map();
   const externalConvos = loadExternalDeepStatsCache();
+
+  // 构建大小写归一化的内存缓存与跨端深层缓存索引，彻底杜绝 `${appSource}:${cascadeId}` 键不匹配导致的双倍重复计费
+  const allLiveByLower = new Map();
+  for (const [rawId, entry] of Object.entries(trajectoryCache)) {
+    const cidLower = String(rawId || '').toLowerCase();
+    if (!cidLower || !entry || typeof entry !== 'object') continue;
+    const prev = allLiveByLower.get(cidLower);
+    if (!prev || (entry.steps?.length || 0) > (prev.steps?.length || 0)) {
+      allLiveByLower.set(cidLower, entry);
+    }
+  }
+
+  const externalByCid = new Map();
+  for (const ext of externalConvos.values()) {
+    const extCidLower = String(ext?.cascadeId || '').toLowerCase();
+    if (!extCidLower) continue;
+    const knownLive = allLiveByLower.get(extCidLower);
+    const ownerAccount = ext.accountName || knownLive?.accountName || '';
+    if (
+      ownerAccount &&
+      currentAccountName &&
+      ownerAccount !== currentAccountName &&
+      !familySet.has(extCidLower)
+    ) {
+      continue;
+    }
+    const prevExt = externalByCid.get(extCidLower);
+    if (!prevExt || (ext.steps?.length || 0) > (prevExt.steps?.length || 0)) {
+      externalByCid.set(extCidLower, ext);
+    }
+  }
+
   const allEntriesToAggregate = [];
 
-  for (const [cascadeId, entry] of Object.entries(trajectoryCache)) {
-    const cidLower = String(cascadeId || '').toLowerCase();
+  for (const [cidLower, entry] of allLiveByLower.entries()) {
     if (
       entry?.accountName &&
       currentAccountName &&
@@ -413,12 +460,12 @@ export function aggregateMultiWindowUsage({
     ) {
       continue;
     }
-    const extMatch = externalConvos.get(cascadeId) || externalConvos.get(cidLower);
+    const extMatch = externalByCid.get(cidLower);
     if (extMatch && (extMatch.steps?.length || 0) > (entry?.steps?.length || 0)) {
       continue;
     }
     const groupCascadeId = String(
-      entry?.rootConversationId || entry?.parentConversationId || cascadeId
+      entry?.rootConversationId || entry?.parentConversationId || cidLower
     ).toLowerCase();
     allEntriesToAggregate.push({
       cascadeId: groupCascadeId,
@@ -428,14 +475,13 @@ export function aggregateMultiWindowUsage({
     });
   }
 
-  for (const ext of externalConvos.values()) {
-    const extCidLower = String(ext.cascadeId || '').toLowerCase();
-    const liveEntry = trajectoryCache[ext.cascadeId] || trajectoryCache[extCidLower];
+  for (const [extCidLower, ext] of externalByCid.entries()) {
+    const liveEntry = allLiveByLower.get(extCidLower);
     if (liveEntry && (liveEntry.steps?.length || 0) >= (ext.steps?.length || 0)) {
       continue;
     }
     allEntriesToAggregate.push({
-      cascadeId: `${ext.appSource}:${extCidLower}`,
+      cascadeId: extCidLower,
       appSource: ext.appSource || 'ide',
       steps: ext.steps || [],
       isCurrentConv: familySet.has(extCidLower),
@@ -448,6 +494,7 @@ export function aggregateMultiWindowUsage({
     const srcName = SOURCE_LABELS[srcKey] || `Antigravity (${srcKey})`;
 
     for (const st of entry.steps || []) {
+      if (!st || typeof st !== 'object') continue;
       const mInfo = resolveModelInfo(
         st.modelKey,
         dynamicModelMap,
@@ -455,10 +502,19 @@ export function aggregateMultiWindowUsage({
         st.modelDisplayName,
         st.responseModel
       );
-      const stepTotalTokens = st.inputTokens + st.cacheReadTokens + st.outputTokens;
+      const inTok = safeTok(st.inputTokens);
+      const cacheTok = safeTok(st.cacheReadTokens);
+      const outTok = safeTok(st.outputTokens);
+      const thinkTok = safeTok(st.thinkingTokens);
+      const respTok =
+        st.responseTokens !== undefined && st.responseTokens !== null
+          ? safeTok(st.responseTokens)
+          : Math.max(0, outTok - thinkTok);
+      const stepTotalTokens = inTok + cacheTok + outTok;
       const stepCost = computeStepCost(st, mInfo.pricing);
+      const resolvedCost = Number.isFinite(stepCost) ? stepCost : 0;
       const unpriced = stepCost === null ? 1 : 0;
-      const tMs = st.createdAtMs || 0;
+      const tMs = Number(st.createdAtMs) > 0 ? Number(st.createdAtMs) : 0;
 
       if (tMs > 0) {
         const stepDate = new Date(tMs);
@@ -466,12 +522,12 @@ export function aggregateMultiWindowUsage({
           const mBucket = monthlySeries[stepDate.getMonth()];
           if (mBucket) {
             mBucket.calls += 1;
-            mBucket.inputTokens += st.inputTokens || 0;
-            mBucket.cacheReadTokens += st.cacheReadTokens || 0;
-            mBucket.responseTokens += st.responseTokens || 0;
-            mBucket.thinkingTokens += st.thinkingTokens || 0;
+            mBucket.inputTokens += inTok;
+            mBucket.cacheReadTokens += cacheTok;
+            mBucket.responseTokens += respTok;
+            mBucket.thinkingTokens += thinkTok;
             mBucket.totalTokens += stepTotalTokens;
-            mBucket.costUsd = +(mBucket.costUsd + (stepCost ?? 0)).toFixed(4);
+            mBucket.costUsd += resolvedCost;
             mBucket.unpricedCalls = (mBucket.unpricedCalls || 0) + unpriced;
           }
         }
@@ -479,7 +535,7 @@ export function aggregateMultiWindowUsage({
 
       for (const k of presetKeys) {
         const w = presetWindows[k];
-        if (k === 'all' || (tMs >= w.startMs && tMs <= w.endMs)) {
+        if (k === 'all' || (tMs > 0 && tMs >= w.startMs && tMs <= w.endMs)) {
           accumulateStepIntoBucket(accountBuckets[k], st, mInfo, stepCost, cascadeId);
           if (isCurrentConv) {
             accumulateStepIntoBucket(sessionBuckets[k], st, mInfo, stepCost, cascadeId);
@@ -489,7 +545,7 @@ export function aggregateMultiWindowUsage({
 
       const inSelectedWindow =
         selectedWindow.key === 'all' ||
-        (tMs >= selectedWindow.startMs && tMs <= selectedWindow.endMs);
+        (tMs > 0 && tMs >= selectedWindow.startMs && tMs <= selectedWindow.endMs);
 
       if (inSelectedWindow) {
         accumulateStepIntoBucket(selectedAccountBucket, st, mInfo, stepCost, cascadeId);
@@ -501,11 +557,10 @@ export function aggregateMultiWindowUsage({
           selectedWindowSteps.push({
             tMs,
             tokens: stepTotalTokens,
-            inputTokens: st.inputTokens || 0,
-            cacheReadTokens: st.cacheReadTokens || 0,
-            outputTokens:
-              (st.responseTokens || 0) + (st.thinkingTokens || 0) || st.outputTokens || 0,
-            costUsd: stepCost ?? 0,
+            inputTokens: inTok,
+            cacheReadTokens: cacheTok,
+            outputTokens: outTok,
+            costUsd: resolvedCost,
             unpricedCalls: unpriced,
           });
         }
@@ -524,17 +579,21 @@ export function aggregateMultiWindowUsage({
         }
         const sAgg = perSourceStats.get(srcKey);
         sAgg.calls += 1;
-        sAgg.inputTokens += st.inputTokens || 0;
-        sAgg.cacheReadTokens += st.cacheReadTokens || 0;
-        sAgg.responseTokens += st.responseTokens || 0;
-        sAgg.thinkingTokens += st.thinkingTokens || 0;
+        sAgg.inputTokens += inTok;
+        sAgg.cacheReadTokens += cacheTok;
+        sAgg.responseTokens += respTok;
+        sAgg.thinkingTokens += thinkTok;
         sAgg.totalTokens += stepTotalTokens;
-        sAgg.costUsd += stepCost ?? 0;
+        sAgg.costUsd += resolvedCost;
         sAgg.unpricedCalls = (sAgg.unpricedCalls || 0) + unpriced;
 
         accumulateStepIntoModelMap(perModelStats, st, mInfo, stepCost);
       }
     }
+  }
+
+  for (const mBucket of monthlySeries) {
+    mBucket.costUsd = +mBucket.costUsd.toFixed(4);
   }
 
   // 构建当前选定时间窗口的自适应自然整点/整日趋势序列 (trendSeries)
@@ -717,9 +776,12 @@ export function aggregateMultiWindowUsage({
       bucket.inputTokens += item.inputTokens || 0;
       bucket.cacheReadTokens += item.cacheReadTokens || 0;
       bucket.outputTokens += item.outputTokens || 0;
-      bucket.costUsd = +(bucket.costUsd + item.costUsd).toFixed(4);
+      bucket.costUsd += item.costUsd;
       bucket.unpricedCalls = (bucket.unpricedCalls || 0) + item.unpricedCalls;
       bucket.calls += 1;
+    }
+    for (const b of trendSeries) {
+      b.costUsd = +b.costUsd.toFixed(4);
     }
   }
 
