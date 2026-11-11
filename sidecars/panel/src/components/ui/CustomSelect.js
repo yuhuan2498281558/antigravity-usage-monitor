@@ -163,7 +163,9 @@ export const CustomSelect = defineComponent({
       const matchedOpt = options.find((o) => o.value === modelValue);
       const selectedOpt = matchedOpt || (!modelValue ? options[0] : undefined);
       const fallbackText = modelValue ? `${placeholder} (${String(modelValue).slice(0, 8)})` : placeholder;
-      patchText(triggerLabel, selectedOpt ? selectedOpt.label : fallbackText);
+      const labelText = selectedOpt ? selectedOpt.label : fallbackText;
+      patchText(triggerLabel, labelText);
+      patchAttr(triggerBtn, 'title', labelText);
       if (isOpen) {
         renderMenuOptions();
       }

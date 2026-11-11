@@ -215,7 +215,6 @@ export function createTrendAreaChart() {
     patchText(
       tipCostEl,
       formatUsd(slotCost, {
-        unpricedCalls: slot.unpricedCalls,
         precise: slotCost > 0 && slotCost < 0.1,
       })
     );

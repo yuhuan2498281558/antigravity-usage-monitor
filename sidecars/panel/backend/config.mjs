@@ -89,6 +89,22 @@ export const TOPBAR_SLOT_KEYS = Object.freeze([
 
 export const DEFAULT_TOPBAR_SLOTS = Object.freeze(['context', 'tps', 'quota_auto']);
 
+export const PLUGIN_UPDATE_MODES = Object.freeze(['off', 'manual', 'auto']);
+
+/**
+ * 归一化插件更新策略枚举（兼容历史 `autoUpdatePlugin` 布尔开关，默认 `'manual'`）。
+ *
+ * @param {unknown} mode
+ * @param {unknown} [legacyAutoUpdate]
+ * @returns {'off'|'manual'|'auto'}
+ */
+export function normalizePluginUpdateMode(mode, legacyAutoUpdate) {
+  const m = String(mode ?? '').trim().toLowerCase();
+  if (m === 'off' || m === 'manual' || m === 'auto') return m;
+  if (legacyAutoUpdate === true) return 'auto';
+  return 'manual';
+}
+
 /**
  * 归一化顶栏三槽位配置数组，兜底非法枚举值并保证至少保留一个可见槽位。
  *
@@ -115,7 +131,8 @@ const DEFAULT_SETTINGS = {
   weeklyCostBudget: 100,        // 自定义每周美元费用预算默认值 ($100，保留底层兼容)
   weeklyLimitMode: 'official',  // 'official' | 'custom_tokens' | 'custom_cost'
   showUpstreamModel: false,     // 是否显示上游真实 responseModel 名称
-  autoUpdatePlugin: false,      // 发现新版本且本地工作区干净时是否在后台自动更新插件
+  pluginUpdateMode: 'manual',   // 'off' | 'manual' | 'auto'（默认仅提示新版本，手动更新）
+  autoUpdatePlugin: false,      // 派生自 pluginUpdateMode === 'auto'，保留底层兼容
   enableWindowOverlay: true,    // 是否启用双栖模式（自动通过 CDP 在主窗口顶栏挂载胶囊与悬浮面板）
   showTopbarMultiSession: true, // 是否在顶栏左侧显示实时运行会话入口
   topbarCapsuleSlots: [...DEFAULT_TOPBAR_SLOTS], // 顶栏右侧胶囊三槽位指标与顺序
@@ -197,6 +214,10 @@ export function loadSettings() {
   const raw = loadJson(SETTINGS_FILE, {});
   const safeRaw = isPlainObject(raw) ? raw : {};
   const merged = { ...DEFAULT_SETTINGS, ...safeRaw };
+  const pluginUpdateMode = normalizePluginUpdateMode(
+    safeRaw.pluginUpdateMode,
+    safeRaw.autoUpdatePlugin
+  );
   return {
     weeklyTokenBudget: sanitizeSettingNumber(
       safeRaw.weeklyTokenBudget ?? safeRaw.weeklyTokenLimit ?? merged.weeklyTokenBudget,
@@ -208,7 +229,8 @@ export function loadSettings() {
     ),
     weeklyLimitMode: normalizeWeeklyLimitMode(merged.weeklyLimitMode),
     showUpstreamModel: merged.showUpstreamModel === true,
-    autoUpdatePlugin: merged.autoUpdatePlugin === true,
+    pluginUpdateMode,
+    autoUpdatePlugin: pluginUpdateMode === 'auto',
     enableWindowOverlay: merged.enableWindowOverlay !== false,
     showTopbarMultiSession: merged.showTopbarMultiSession !== false,
     topbarCapsuleSlots: normalizeTopbarCapsuleSlots(safeRaw.topbarCapsuleSlots),

@@ -9,6 +9,7 @@ import { h, patchAttr, patchClasses, patchText } from '../../core/domPatch.js';
 import { createSvgIcon, patchSvgIcon } from '../../icons/SvgIcon.js';
 import {
   fetchTelemetry,
+  normalizeClientUpdateMode,
   telemetryStore,
   triggerPluginUpdate,
 } from '../../store/telemetryStore.js';
@@ -175,9 +176,13 @@ export const TopSessionHeader = defineComponent({
       const aggregated = actConv?.aggregated;
 
       const cloudStatus = telemetry?.cloudStatus;
-      const hasUpdate = Boolean(cloudStatus?.updateAvailable);
-      patchAttr(updateBtn, 'hidden', !hasUpdate);
-      if (hasUpdate && !isHeaderUpdating) {
+      const updateMode = normalizeClientUpdateMode(
+        telemetry?.settings?.pluginUpdateMode,
+        telemetry?.settings?.autoUpdatePlugin
+      );
+      const showUpdate = Boolean(cloudStatus?.updateAvailable) && updateMode !== 'off';
+      patchAttr(updateBtn, 'hidden', !showUpdate);
+      if (showUpdate && !isHeaderUpdating) {
         patchText(
           updateBtnText,
           cloudStatus?.latestPluginVersion

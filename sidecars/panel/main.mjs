@@ -22,6 +22,7 @@ import {
   computeRuntimeCodeVersion,
   isPlainObject,
   loadSettings,
+  normalizePluginUpdateMode,
   normalizeTopbarCapsuleSlots,
   normalizeWeeklyLimitMode,
   saveJson,
@@ -186,6 +187,14 @@ function sanitizePositiveSettingNumber(val, fallback) {
 function executeSettingsAction(data) {
   const current = loadSettings();
   const payload = isPlainObject(data) ? data : {};
+  const nextPluginUpdateMode =
+    payload.pluginUpdateMode !== undefined
+      ? normalizePluginUpdateMode(payload.pluginUpdateMode)
+      : typeof payload.autoUpdatePlugin === 'boolean'
+        ? payload.autoUpdatePlugin
+          ? 'auto'
+          : 'manual'
+        : normalizePluginUpdateMode(current.pluginUpdateMode, current.autoUpdatePlugin);
   const updated = {
     weeklyTokenBudget: sanitizePositiveSettingNumber(
       payload.weeklyTokenBudget ?? payload.weeklyTokenLimit,
@@ -203,10 +212,8 @@ function executeSettingsAction(data) {
       typeof payload.showUpstreamModel === 'boolean'
         ? payload.showUpstreamModel
         : Boolean(current.showUpstreamModel),
-    autoUpdatePlugin:
-      typeof payload.autoUpdatePlugin === 'boolean'
-        ? payload.autoUpdatePlugin
-        : Boolean(current.autoUpdatePlugin),
+    pluginUpdateMode: nextPluginUpdateMode,
+    autoUpdatePlugin: nextPluginUpdateMode === 'auto',
     enableWindowOverlay:
       typeof payload.enableWindowOverlay === 'boolean'
         ? payload.enableWindowOverlay

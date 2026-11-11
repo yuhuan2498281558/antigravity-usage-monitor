@@ -69,6 +69,58 @@ test('BUG-01 & INCON-01: Google-proxied Claude/GPT/o-series never misclassify as
 
   const m20 = h.resolveModelInfo('MODEL_PLACEHOLDER_M20', new Map(), 'API_PROVIDER_GOOGLE_GEMINI');
   assert.equal(m20.modelId, 'gemini-3.5-flash');
+
+  // Gemini Hydrogen (3.8 Flash pricing) & Helix (3.5 Flash Lite pricing), shared Gemini pool
+  const dynHydrogenMap = new Map([
+    ['MODEL_PLACEHOLDER_M480', { modelId: '', label: 'Gemini 4 Hydrogen (High)' }],
+    ['MODEL_PLACEHOLDER_M481', { modelId: '', label: 'Gemini 4 Hydrogen (Low)' }],
+    ['MODEL_PLACEHOLDER_M482', { modelId: '', label: 'Gemini 4 Helix' }],
+  ]);
+  const hydroHigh = h.resolveModelInfo('MODEL_PLACEHOLDER_M480', dynHydrogenMap);
+  assert.equal(hydroHigh.family, 'Gemini');
+  assert.equal(hydroHigh.shortName, 'hydrogen-4-high');
+  assert.deepEqual(
+    { i: hydroHigh.pricing?.input, c: hydroHigh.pricing?.cache, o: hydroHigh.pricing?.output },
+    { i: 0.75, c: 0.075, o: 3.75 }
+  );
+  const hydroLow = h.resolveModelInfo('MODEL_PLACEHOLDER_M481', dynHydrogenMap);
+  assert.equal(hydroLow.shortName, 'hydrogen-4-low');
+  assert.deepEqual(
+    { i: hydroLow.pricing?.input, c: hydroLow.pricing?.cache, o: hydroLow.pricing?.output },
+    { i: 0.3, c: 0.03, o: 2.5 }
+  );
+  const hydroCodename = h.resolveModelInfo('gemini-hydrogen');
+  assert.equal(hydroCodename.family, 'Gemini');
+  assert.equal(hydroCodename.label, 'Gemini Hydrogen');
+  assert.equal(hydroCodename.pricing?.input, 0.75);
+
+  const helixInfo = h.resolveModelInfo('MODEL_PLACEHOLDER_M482', dynHydrogenMap);
+  assert.equal(helixInfo.family, 'Gemini');
+  assert.equal(helixInfo.shortName, 'helix-4');
+  assert.deepEqual(
+    { i: helixInfo.pricing?.input, c: helixInfo.pricing?.cache, o: helixInfo.pricing?.output },
+    { i: 0.3, c: 0.03, o: 2.5 }
+  );
+  const helixCodename = h.resolveModelInfo('gemini-helix');
+  assert.equal(helixCodename.family, 'Gemini');
+  assert.equal(helixCodename.label, 'Gemini Helix');
+  assert.equal(helixCodename.pricing?.output, 2.5);
+
+  const { quotaPoolsMap } = h.buildOfficialQuotaPools(null, [
+    {
+      modelOrAlias: { model: 'MODEL_PLACEHOLDER_M480' },
+      label: 'Gemini 4 Hydrogen (High)',
+      quotaInfo: { remainingFraction: 0.8, resetTime: new Date(nowMs + 3600_000).toISOString() },
+    },
+    {
+      modelOrAlias: { model: 'MODEL_PLACEHOLDER_M482' },
+      label: 'Gemini 4 Helix',
+      quotaInfo: { remainingFraction: 0.8, resetTime: new Date(nowMs + 3600_000).toISOString() },
+    },
+  ]);
+  assert.equal(quotaPoolsMap.has('Hydrogen'), false, 'Hydrogen has no dedicated quota pool');
+  assert.equal(quotaPoolsMap.has('Helix'), false, 'Helix has no dedicated quota pool');
+  assert.equal(quotaPoolsMap.get('Gemini')?.isAvailable, true);
 });
 
 test('BUG-02 & BUG-11: ide:<uuid> external sessions do not double-count live conversations, cross-account entries are isolated, and orphan subagents never leak to top-level list', async () => {
@@ -261,7 +313,7 @@ test('BUG-09, BUG-14 & BUG-15: SemVer 2.0 prerelease/build ordering, future-only
   assert.equal(formatCountdown(new Date(nowMs + 30_000).toISOString(), nowMs), '<1分钟后重置');
   assert.equal(formatCountdown('1969-12-31T23:59:59Z', nowMs), '未知重置时间');
   assert.equal(formatUsd(0.0004, { precise: true }), '<$0.001');
-  assert.equal(formatUsd(12.34, { unpricedCalls: 1, compactPending: true }), '$12.34+');
+  assert.equal(formatUsd(12.34, { unpricedCalls: 1, compactPending: true }), '$12.34');
   assert.equal(speedReasonText('short_timing'), '耗时过短 (<0.5s)');
 });
 

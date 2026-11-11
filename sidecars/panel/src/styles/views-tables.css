@@ -66,21 +66,40 @@
   background: var(--surface-hover);
 }
 
+.steps-panel-header {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.steps-panel-title {
+  flex: 0 0 auto;
+}
+
 .steps-header-controls {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
-  flex-wrap: wrap;
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.steps-header-controls .segmented {
+  flex-shrink: 0;
 }
 
 .steps-inline-scope-select {
-  flex: 1 1 120px;
-  min-width: 120px;
+  flex: 0 1 180px;
+  min-width: 72px;
+  max-width: 190px;
 }
 
 .steps-inline-scope-select .select-trigger {
   height: 22px;
   padding: 0 6px;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
   font-size: 11px;
   border: 1px solid var(--border-hairline);
   background: var(--surface-subtle);

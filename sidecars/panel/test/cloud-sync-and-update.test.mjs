@@ -275,3 +275,57 @@ test('performPluginUpdate pulls fast-forward when git worktree is clean, on main
   assert.equal(res.currentVersion, '1.4.0');
   assert.equal(gitCalls.length, 6); // status, rev-parse, fetch, show, merge-base, pull
 });
+
+test('pluginUpdateMode supports manual (default), auto, and off with legacy autoUpdatePlugin compatibility', async () => {
+  const defaultH = backendHarness();
+  assert.equal(defaultH.loadSettings().pluginUpdateMode, 'manual');
+  assert.equal(defaultH.loadSettings().autoUpdatePlugin, false);
+
+  const legacyAutoH = backendHarness({ settings: { autoUpdatePlugin: true } });
+  assert.equal(legacyAutoH.loadSettings().pluginUpdateMode, 'auto');
+  assert.equal(legacyAutoH.loadSettings().autoUpdatePlugin, true);
+
+  const offSettings = {};
+  let gitTriggered = false;
+  const offH = backendHarness({
+    settings: offSettings,
+    hasGitDir: true,
+    pluginRootPath: '/Users/test/.gemini/config/plugins/usage-monitor',
+    pluginManifest: { name: 'usage-monitor', version: '1.4.0' },
+    remoteFetch: async () => ({
+      ok: true,
+      json: async () => ({
+        schemaVersion: 1,
+        catalogVersion: '2026.11.11.9',
+        updatedAt: '2026-11-11T22:00:00+09:00',
+        latestPluginVersion: '1.5.0',
+        pricing: {
+          'gemini-4-argon': { input: 2.0, cache: 0.1, output: 10.0, short: 'argon-4', family: 'Gemini' },
+        },
+      }),
+    }),
+    execFileImpl: (_cmd, _args, opts, cb) => {
+      gitTriggered = true;
+      const fn = typeof opts === 'function' ? opts : cb;
+      fn(null, '', '');
+    },
+  });
+
+  const saveOff = offH.executeSettingsAction({ pluginUpdateMode: 'off' }).updated;
+  assert.equal(saveOff.pluginUpdateMode, 'off');
+  assert.equal(saveOff.autoUpdatePlugin, false);
+  Object.assign(offSettings, saveOff);
+
+  await offH.syncCloudCatalog({ force: true });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(gitTriggered, false, 'pluginUpdateMode=off must never trigger auto update');
+
+  const saveAuto = offH.executeSettingsAction({ pluginUpdateMode: 'auto' }).updated;
+  assert.equal(saveAuto.pluginUpdateMode, 'auto');
+  assert.equal(saveAuto.autoUpdatePlugin, true);
+  Object.assign(offSettings, saveAuto);
+
+  await offH.syncCloudCatalog({ force: true });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(gitTriggered, true, 'pluginUpdateMode=auto triggers background update check');
+});

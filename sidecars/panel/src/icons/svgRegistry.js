@@ -78,6 +78,9 @@ export const SVG_ICON_DEFS = Object.freeze({
   'arrow-down': [
     { tag: 'path', attrs: { d: 'M8 2.8v10.4M4.2 9.4L8 13.2l3.8-3.8' } },
   ],
+  'arrow-up': [
+    { tag: 'path', attrs: { d: 'M8 13.2V2.8M4.2 6.6L8 2.8l3.8 3.8' } },
+  ],
   dock: [
     { tag: 'rect', attrs: { x: '1.8', y: '2.5', width: '12.4', height: '11', rx: '1.5' } },
     { tag: 'path', attrs: { d: 'M1.8 6h12.4' } },

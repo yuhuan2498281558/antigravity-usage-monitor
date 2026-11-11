@@ -37,15 +37,14 @@ export function formatDateSpanBadge(startMs, endMs) {
   return `${s.getMonth() + 1}月${s.getDate()}日 ~ ${e.getMonth() + 1}月${e.getDate()}日`;
 }
 
-export function formatUsd(amount, { precise = false, unpricedCalls = 0, compactPending = false } = {}) {
+export function formatUsd(amount, { precise = false } = {}) {
   if (amount == null || !Number.isFinite(Number(amount))) return '待定';
   const val = Number(amount || 0);
-  const suffix = unpricedCalls > 0 ? (compactPending ? '+' : ' + 待定') : '';
   if (precise) {
-    if (val > 0 && val < 0.001) return `<$0.001${suffix}`;
-    return (val >= 1 ? `$${val.toFixed(2)}` : `$${val.toFixed(3)}`) + suffix;
+    if (val > 0 && val < 0.001) return '<$0.001';
+    return val >= 1 ? `$${val.toFixed(2)}` : `$${val.toFixed(3)}`;
   }
-  return `$${val.toFixed(2)}${suffix}`;
+  return `$${val.toFixed(2)}`;
 }
 
 export function speedReasonText(reason) {

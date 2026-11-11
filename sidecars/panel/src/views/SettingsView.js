@@ -12,6 +12,7 @@ import { createSvgIcon } from '../icons/SvgIcon.js';
 import {
   DEFAULT_CLIENT_TOPBAR_SLOTS,
   normalizeClientTopbarSlots,
+  normalizeClientUpdateMode,
   saveSettingsPatch,
   telemetryStore,
   triggerCloudSync,
@@ -54,10 +55,11 @@ const TOPBAR_SLOT_OPTIONS = [
   { value: 'none', label: '不显示' },
 ];
 
-/** 插件版本更新策略可选项 */
+/** 插件版本更新策略可选项（默认仅提示新版本、手动更新） */
 const AUTO_UPDATE_OPTIONS = [
-  { value: 'manual', label: '仅提示新版本，手动更新 (推荐)' },
-  { value: 'auto', label: '后台自动安装新版本' },
+  { value: 'manual', label: '仅提示新版本，手动更新' },
+  { value: 'auto', label: '自动更新' },
+  { value: 'off', label: '关闭更新' },
 ];
 
 /**
@@ -79,7 +81,7 @@ export const SettingsView = defineComponent({
   name: 'SettingsView',
   setup({ onCleanup }) {
     let draftShowUpstreamModel = false;
-    let draftAutoUpdatePlugin = false;
+    let draftPluginUpdateMode = 'manual';
     let draftEnableWindowOverlay = true;
     let draftShowTopbarMulti = true;
     let draftTopbarSlots = [...DEFAULT_CLIENT_TOPBAR_SLOTS];
@@ -375,18 +377,25 @@ export const SettingsView = defineComponent({
       icon: 'refresh',
       options: AUTO_UPDATE_OPTIONS,
       onUpdateModelValue: async (val) => {
-        const nextAuto = val === 'auto';
-        draftAutoUpdatePlugin = nextAuto;
-        autoUpdateSelect.setValue(nextAuto ? 'auto' : 'manual');
+        const nextMode = normalizeClientUpdateMode(val);
+        draftPluginUpdateMode = nextMode;
+        autoUpdateSelect.setValue(nextMode);
+        if (latestCloudStatus) {
+          renderCloudStatus(latestCloudStatus);
+        }
         showCloudFeedback('保存中…', 0);
         try {
           await saveSettingsPatch({
-            autoUpdatePlugin: nextAuto,
+            pluginUpdateMode: nextMode,
+            autoUpdatePlugin: nextMode === 'auto',
           });
           showCloudFeedback('已保存', 1800);
         } catch {
           if (latestSettings) {
             renderSettings(latestSettings);
+          }
+          if (latestCloudStatus) {
+            renderCloudStatus(latestCloudStatus);
           }
           showCloudFeedback('保存失败', 2500);
         }
@@ -395,7 +404,7 @@ export const SettingsView = defineComponent({
 
     const pricingCountVal = h('strong', { className: 'cell-value', text: '—' });
     const pricingSyncSub = h('span', { className: 'cell-sub', text: '读取中…' });
-    const versionVal = h('strong', { className: 'cell-value', text: 'v1.4.3' });
+    const versionVal = h('strong', { className: 'cell-value', text: 'v1.4.4' });
     const versionSub = h('span', { className: 'cell-sub', text: '检查中…' });
 
     const syncPricingBtnText = h('span', { text: '更新价格表' });
@@ -450,7 +459,7 @@ export const SettingsView = defineComponent({
                 return;
               }
               if (!cs?.updateAvailable) {
-                const curVer = cs?.currentPluginVersion || '1.4.3';
+                const curVer = cs?.currentPluginVersion || '1.4.4';
                 showCloudFeedback(`当前已是最新版本 (v${curVer})`, 4500);
                 return;
               }
@@ -486,7 +495,7 @@ export const SettingsView = defineComponent({
         cloudStatusMsg,
       ]),
       h('div', { className: 'form-row' }, [
-        h('span', { className: 'form-label', text: '自动更新' }),
+        h('span', { className: 'form-label', text: '更新方式' }),
         autoUpdateSelect.el,
       ]),
       h('div', { className: 'dual-grid' }, [
@@ -523,14 +532,17 @@ export const SettingsView = defineComponent({
     function renderSettings(settings) {
       if (!settings) return;
       draftShowUpstreamModel = Boolean(settings.showUpstreamModel);
-      draftAutoUpdatePlugin = Boolean(settings.autoUpdatePlugin);
+      draftPluginUpdateMode = normalizeClientUpdateMode(
+        settings.pluginUpdateMode,
+        settings.autoUpdatePlugin
+      );
       draftEnableWindowOverlay = settings.enableWindowOverlay !== false;
       draftShowTopbarMulti = settings.showTopbarMultiSession !== false;
       draftTopbarSlots = normalizeClientTopbarSlots(settings.topbarCapsuleSlots);
 
       windowMountSelect.setValue(draftEnableWindowOverlay ? 'dual' : 'sidebar');
       stepModelSelect.setValue(draftShowUpstreamModel ? 'upstream' : 'short');
-      autoUpdateSelect.setValue(draftAutoUpdatePlugin ? 'auto' : 'manual');
+      autoUpdateSelect.setValue(draftPluginUpdateMode);
       syncTopbarControls();
       viewScrollbar.refresh();
     }
@@ -550,15 +562,20 @@ export const SettingsView = defineComponent({
         `${srcLabel} · ${formatSyncTimeText(cs.lastSyncedAtMs, cs.catalogUpdatedAt)}`
       );
 
-      const curVer = cs.currentPluginVersion || '1.4.3';
+      const curVer = cs.currentPluginVersion || '1.4.4';
       const latVer = cs.latestPluginVersion || curVer;
       const modeTag = cs.installMode === 'git' ? 'Git' : 'ZIP';
       patchText(versionVal, `v${curVer}`);
-      if (cs.updateAvailable) {
+      if (cs.updateAvailable && draftPluginUpdateMode !== 'off') {
         patchText(versionSub, `可升级至 v${latVer} (${modeTag})`);
         patchClasses(versionSub, { 'accent-ok': true });
         patchText(updatePluginBtnText, `升级至 v${latVer}`);
         patchClasses(updatePluginBtn, { 'btn-primary': true, 'btn-secondary': false });
+      } else if (draftPluginUpdateMode === 'off') {
+        patchText(versionSub, `已关闭更新提醒 (${modeTag})`);
+        patchClasses(versionSub, { 'accent-ok': false });
+        patchText(updatePluginBtnText, cs.updateAvailable ? `手动升级 v${latVer}` : '检查更新');
+        patchClasses(updatePluginBtn, { 'btn-primary': false, 'btn-secondary': true });
       } else {
         patchText(versionSub, `已是最新 (${modeTag})`);
         patchClasses(versionSub, { 'accent-ok': false });

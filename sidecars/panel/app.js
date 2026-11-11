@@ -82,6 +82,9 @@ const SVG_ICON_DEFS = Object.freeze({
   'arrow-down': [
     { tag: 'path', attrs: { d: 'M8 2.8v10.4M4.2 9.4L8 13.2l3.8-3.8' } },
   ],
+  'arrow-up': [
+    { tag: 'path', attrs: { d: 'M8 13.2V2.8M4.2 6.6L8 2.8l3.8 3.8' } },
+  ],
   dock: [
     { tag: 'rect', attrs: { x: '1.8', y: '2.5', width: '12.4', height: '11', rx: '1.5' } },
     { tag: 'path', attrs: { d: 'M1.8 6h12.4' } },
@@ -565,15 +568,14 @@ function formatDateSpanBadge(startMs, endMs) {
   return `${s.getMonth() + 1}月${s.getDate()}日 ~ ${e.getMonth() + 1}月${e.getDate()}日`;
 }
 
-function formatUsd(amount, { precise = false, unpricedCalls = 0, compactPending = false } = {}) {
+function formatUsd(amount, { precise = false } = {}) {
   if (amount == null || !Number.isFinite(Number(amount))) return '待定';
   const val = Number(amount || 0);
-  const suffix = unpricedCalls > 0 ? (compactPending ? '+' : ' + 待定') : '';
   if (precise) {
-    if (val > 0 && val < 0.001) return `<$0.001${suffix}`;
-    return (val >= 1 ? `$${val.toFixed(2)}` : `$${val.toFixed(3)}`) + suffix;
+    if (val > 0 && val < 0.001) return '<$0.001';
+    return val >= 1 ? `$${val.toFixed(2)}` : `$${val.toFixed(3)}`;
   }
-  return `$${val.toFixed(2)}${suffix}`;
+  return `$${val.toFixed(2)}`;
 }
 
 function speedReasonText(reason) {
@@ -935,17 +937,32 @@ function normalizeClientTopbarSlots(raw) {
   return slots;
 }
 
+/**
+ * 归一化前端插件更新策略（`'off'` | `'manual'` | `'auto'`），兼容旧版布尔字段。
+ *
+ * @param {unknown} mode
+ * @param {unknown} [legacyAutoUpdate]
+ * @returns {'off'|'manual'|'auto'}
+ */
+function normalizeClientUpdateMode(mode, legacyAutoUpdate) {
+  const m = String(mode ?? '').trim().toLowerCase();
+  if (m === 'off' || m === 'manual' || m === 'auto') return m;
+  if (legacyAutoUpdate === true) return 'auto';
+  return 'manual';
+}
+
 function isEquivalentTelemetry(prev, next) {
   if (!prev || !next) return false;
   if (prev === next) return true;
 
-  // 1. 比对系统设置项（模型显示策略、周预算模式与额度、插件自动更新开关、双栖与顶栏槽位配置）
+  // 1. 比对系统设置项（模型显示策略、周预算模式与额度、插件更新策略、双栖与顶栏槽位配置）
   const pAct = prev.activeConversation;
   const nAct = next.activeConversation;
   if (prev.settings?.showUpstreamModel !== next.settings?.showUpstreamModel) return false;
   if (prev.settings?.weeklyLimitMode !== next.settings?.weeklyLimitMode) return false;
   if (prev.settings?.weeklyTokenBudget !== next.settings?.weeklyTokenBudget) return false;
   if (prev.settings?.weeklyCostBudget !== next.settings?.weeklyCostBudget) return false;
+  if ((prev.settings?.pluginUpdateMode ?? '') !== (next.settings?.pluginUpdateMode ?? '')) return false;
   if (prev.settings?.autoUpdatePlugin !== next.settings?.autoUpdatePlugin) return false;
   if (prev.settings?.enableWindowOverlay !== next.settings?.enableWindowOverlay) return false;
   if ((prev.settings?.showTopbarMultiSession !== false) !== (next.settings?.showTopbarMultiSession !== false)) {
@@ -1942,7 +1959,9 @@ const CustomSelect = defineComponent({
       const matchedOpt = options.find((o) => o.value === modelValue);
       const selectedOpt = matchedOpt || (!modelValue ? options[0] : undefined);
       const fallbackText = modelValue ? `${placeholder} (${String(modelValue).slice(0, 8)})` : placeholder;
-      patchText(triggerLabel, selectedOpt ? selectedOpt.label : fallbackText);
+      const labelText = selectedOpt ? selectedOpt.label : fallbackText;
+      patchText(triggerLabel, labelText);
+      patchAttr(triggerBtn, 'title', labelText);
       if (isOpen) {
         renderMenuOptions();
       }
@@ -2939,7 +2958,6 @@ function createTrendAreaChart() {
     patchText(
       tipCostEl,
       formatUsd(slotCost, {
-        unpricedCalls: slot.unpricedCalls,
         precise: slotCost > 0 && slotCost < 0.1,
       })
     );
@@ -3291,9 +3309,13 @@ const TopSessionHeader = defineComponent({
       const aggregated = actConv?.aggregated;
 
       const cloudStatus = telemetry?.cloudStatus;
-      const hasUpdate = Boolean(cloudStatus?.updateAvailable);
-      patchAttr(updateBtn, 'hidden', !hasUpdate);
-      if (hasUpdate && !isHeaderUpdating) {
+      const updateMode = normalizeClientUpdateMode(
+        telemetry?.settings?.pluginUpdateMode,
+        telemetry?.settings?.autoUpdatePlugin
+      );
+      const showUpdate = Boolean(cloudStatus?.updateAvailable) && updateMode !== 'off';
+      patchAttr(updateBtn, 'hidden', !showUpdate);
+      if (showUpdate && !isHeaderUpdating) {
         patchText(
           updateBtnText,
           cloudStatus?.latestPluginVersion
@@ -4251,7 +4273,7 @@ const LiveOverviewView = defineComponent({
       );
       patchText(
         cacheSub,
-        `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
+        `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0)}`
       );
 
       // 2. 更新 10 段上下文窗口构成与内嵌上下文窗口检视胶囊条
@@ -4413,7 +4435,7 @@ const LiveOverviewView = defineComponent({
 
       patchText(
         wkFootLeft,
-        `本周累计: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0, { unpricedCalls: weekly.unpricedCalls })})`
+        `本周累计: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0)})`
       );
       patchText(
         wkFootRight,
@@ -4906,7 +4928,7 @@ const ConsumptionView = defineComponent({
       patchText(refs.pctBadge, `${share.toFixed(1)}%`);
       patchText(refs.totalTokEl, showTokensInHeader ? formatTokensPrecise(total) : '');
       patchAttr(refs.totalTokEl, 'hidden', !showTokensInHeader);
-      patchText(refs.costEl, formatUsd(item.costUsd || 0, { unpricedCalls: item.unpricedCalls }));
+      patchText(refs.costEl, formatUsd(item.costUsd || 0));
 
       const responseTok =
         item.responseTokens != null
@@ -4966,8 +4988,8 @@ const ConsumptionView = defineComponent({
 
       patchText(heroTotalTokens, formatTokensPrecise(totalTokens));
       patchText(heroTotalCalls, `${acct.calls || 0} 次`);
-      patchText(heroCostUsd, formatUsd(costUsd, { unpricedCalls: acct.unpricedCalls }));
-      patchText(heroCostCny, acct.unpricedCalls > 0 ? `${acct.unpricedCalls} 步费用待定` : formatCnyApprox(costUsd));
+      patchText(heroCostUsd, formatUsd(costUsd));
+      patchText(heroCostCny, formatCnyApprox(costUsd));
 
       patchText(cacheHitPctEl, `${Number(acct.cacheHitPct ?? 0).toFixed(1)}%`);
       patchText(cacheTokensEl, `命中 ${formatTokensPrecise(cacheTokens)}`);
@@ -5091,11 +5113,7 @@ const ConsumptionView = defineComponent({
           const cVal = Number(m.costUsd || 0);
           patchText(
             col.costText,
-            m.unpricedCalls > 0
-              ? formatUsd(cVal, { unpricedCalls: m.unpricedCalls, compactPending: true })
-              : cVal >= 10
-                ? `$${Math.round(cVal)}`
-                : `$${cVal.toFixed(2)}`
+            cVal >= 10 ? `$${Math.round(cVal)}` : `$${cVal.toFixed(2)}`
           );
           patchText(col.tokText, formatTokensPrecise(mTot));
 
@@ -5261,8 +5279,8 @@ const StepsDetailView = defineComponent({
         style: 'flex: 1; min-height: 0; display: flex; flex-direction: column;',
       },
       [
-        h('div', { className: 'panel-header' }, [
-          h('span', { className: 'panel-title' }, [
+        h('div', { className: 'panel-header steps-panel-header' }, [
+          h('span', { className: 'panel-title steps-panel-title' }, [
             createSvgIcon('table', { size: 13 }),
             h('span', { text: '调用记录' }),
           ]),
@@ -5491,7 +5509,7 @@ const StepsDetailView = defineComponent({
           patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' tok/s'));
           patchText(refs.speedSub, `有效 ${sampleSummary(m.speedSummary)}`);
           patchText(refs.tdTokens, formatTokens(m.totalTokens || 0));
-          patchText(refs.tdCost, formatUsd(m.costUsd, { unpricedCalls: m.unpricedCalls }));
+          patchText(refs.tdCost, formatUsd(m.costUsd || 0));
         },
       });
 
@@ -5609,10 +5627,11 @@ const TOPBAR_SLOT_OPTIONS = [
   { value: 'none', label: '不显示' },
 ];
 
-/** 插件版本更新策略可选项 */
+/** 插件版本更新策略可选项（默认仅提示新版本、手动更新） */
 const AUTO_UPDATE_OPTIONS = [
-  { value: 'manual', label: '仅提示新版本，手动更新 (推荐)' },
-  { value: 'auto', label: '后台自动安装新版本' },
+  { value: 'manual', label: '仅提示新版本，手动更新' },
+  { value: 'auto', label: '自动更新' },
+  { value: 'off', label: '关闭更新' },
 ];
 
 /**
@@ -5634,7 +5653,7 @@ const SettingsView = defineComponent({
   name: 'SettingsView',
   setup({ onCleanup }) {
     let draftShowUpstreamModel = false;
-    let draftAutoUpdatePlugin = false;
+    let draftPluginUpdateMode = 'manual';
     let draftEnableWindowOverlay = true;
     let draftShowTopbarMulti = true;
     let draftTopbarSlots = [...DEFAULT_CLIENT_TOPBAR_SLOTS];
@@ -5930,18 +5949,25 @@ const SettingsView = defineComponent({
       icon: 'refresh',
       options: AUTO_UPDATE_OPTIONS,
       onUpdateModelValue: async (val) => {
-        const nextAuto = val === 'auto';
-        draftAutoUpdatePlugin = nextAuto;
-        autoUpdateSelect.setValue(nextAuto ? 'auto' : 'manual');
+        const nextMode = normalizeClientUpdateMode(val);
+        draftPluginUpdateMode = nextMode;
+        autoUpdateSelect.setValue(nextMode);
+        if (latestCloudStatus) {
+          renderCloudStatus(latestCloudStatus);
+        }
         showCloudFeedback('保存中…', 0);
         try {
           await saveSettingsPatch({
-            autoUpdatePlugin: nextAuto,
+            pluginUpdateMode: nextMode,
+            autoUpdatePlugin: nextMode === 'auto',
           });
           showCloudFeedback('已保存', 1800);
         } catch {
           if (latestSettings) {
             renderSettings(latestSettings);
+          }
+          if (latestCloudStatus) {
+            renderCloudStatus(latestCloudStatus);
           }
           showCloudFeedback('保存失败', 2500);
         }
@@ -5950,7 +5976,7 @@ const SettingsView = defineComponent({
 
     const pricingCountVal = h('strong', { className: 'cell-value', text: '—' });
     const pricingSyncSub = h('span', { className: 'cell-sub', text: '读取中…' });
-    const versionVal = h('strong', { className: 'cell-value', text: 'v1.4.3' });
+    const versionVal = h('strong', { className: 'cell-value', text: 'v1.4.4' });
     const versionSub = h('span', { className: 'cell-sub', text: '检查中…' });
 
     const syncPricingBtnText = h('span', { text: '更新价格表' });
@@ -6005,7 +6031,7 @@ const SettingsView = defineComponent({
                 return;
               }
               if (!cs?.updateAvailable) {
-                const curVer = cs?.currentPluginVersion || '1.4.3';
+                const curVer = cs?.currentPluginVersion || '1.4.4';
                 showCloudFeedback(`当前已是最新版本 (v${curVer})`, 4500);
                 return;
               }
@@ -6041,7 +6067,7 @@ const SettingsView = defineComponent({
         cloudStatusMsg,
       ]),
       h('div', { className: 'form-row' }, [
-        h('span', { className: 'form-label', text: '自动更新' }),
+        h('span', { className: 'form-label', text: '更新方式' }),
         autoUpdateSelect.el,
       ]),
       h('div', { className: 'dual-grid' }, [
@@ -6078,14 +6104,17 @@ const SettingsView = defineComponent({
     function renderSettings(settings) {
       if (!settings) return;
       draftShowUpstreamModel = Boolean(settings.showUpstreamModel);
-      draftAutoUpdatePlugin = Boolean(settings.autoUpdatePlugin);
+      draftPluginUpdateMode = normalizeClientUpdateMode(
+        settings.pluginUpdateMode,
+        settings.autoUpdatePlugin
+      );
       draftEnableWindowOverlay = settings.enableWindowOverlay !== false;
       draftShowTopbarMulti = settings.showTopbarMultiSession !== false;
       draftTopbarSlots = normalizeClientTopbarSlots(settings.topbarCapsuleSlots);
 
       windowMountSelect.setValue(draftEnableWindowOverlay ? 'dual' : 'sidebar');
       stepModelSelect.setValue(draftShowUpstreamModel ? 'upstream' : 'short');
-      autoUpdateSelect.setValue(draftAutoUpdatePlugin ? 'auto' : 'manual');
+      autoUpdateSelect.setValue(draftPluginUpdateMode);
       syncTopbarControls();
       viewScrollbar.refresh();
     }
@@ -6105,15 +6134,20 @@ const SettingsView = defineComponent({
         `${srcLabel} · ${formatSyncTimeText(cs.lastSyncedAtMs, cs.catalogUpdatedAt)}`
       );
 
-      const curVer = cs.currentPluginVersion || '1.4.3';
+      const curVer = cs.currentPluginVersion || '1.4.4';
       const latVer = cs.latestPluginVersion || curVer;
       const modeTag = cs.installMode === 'git' ? 'Git' : 'ZIP';
       patchText(versionVal, `v${curVer}`);
-      if (cs.updateAvailable) {
+      if (cs.updateAvailable && draftPluginUpdateMode !== 'off') {
         patchText(versionSub, `可升级至 v${latVer} (${modeTag})`);
         patchClasses(versionSub, { 'accent-ok': true });
         patchText(updatePluginBtnText, `升级至 v${latVer}`);
         patchClasses(updatePluginBtn, { 'btn-primary': true, 'btn-secondary': false });
+      } else if (draftPluginUpdateMode === 'off') {
+        patchText(versionSub, `已关闭更新提醒 (${modeTag})`);
+        patchClasses(versionSub, { 'accent-ok': false });
+        patchText(updatePluginBtnText, cs.updateAvailable ? `手动升级 v${latVer}` : '检查更新');
+        patchClasses(updatePluginBtn, { 'btn-primary': false, 'btn-secondary': true });
       } else {
         patchText(versionSub, `已是最新 (${modeTag})`);
         patchClasses(versionSub, { 'accent-ok': false });
@@ -6336,28 +6370,30 @@ const RING_CIRCUMFERENCE = +(2 * Math.PI * RING_RADIUS).toFixed(2);
 function computeCapsuleLayoutMode(availWidth, currentMode = 'wide', options = undefined) {
   if (availWidth == null || Number.isNaN(availWidth)) return 'wide';
   const showMulti = options?.showMulti !== false;
-  const effWidth = showMulti ? availWidth : availWidth + 76;
+  const updateReserve = options?.hasUpdate ? 52 : 0;
+  const baseEffWidth = showMulti ? availWidth : availWidth + 76;
+  const effWidth = baseEffWidth - updateReserve;
   if (currentMode === 'wide') {
-    if (effWidth < 78) return 'ring-only';
+    if (baseEffWidth < 78) return 'ring-only';
     if (effWidth < 196) return 'minimal';
     if (effWidth < 256) return 'compact';
     return 'wide';
   }
   if (currentMode === 'compact') {
     if (effWidth >= 272) return 'wide';
-    if (effWidth < 78) return 'ring-only';
+    if (baseEffWidth < 78) return 'ring-only';
     if (effWidth < 196) return 'minimal';
     return 'compact';
   }
   if (currentMode === 'minimal') {
     if (effWidth >= 272) return 'wide';
     if (effWidth >= 212) return 'compact';
-    if (effWidth < 78) return 'ring-only';
+    if (baseEffWidth < 78) return 'ring-only';
     return 'minimal';
   }
   if (effWidth >= 272) return 'wide';
   if (effWidth >= 212) return 'compact';
-  if (effWidth >= 92) return 'minimal';
+  if (baseEffWidth >= 92) return 'minimal';
   return 'ring-only';
 }
 
@@ -6641,9 +6677,16 @@ function mountWindowOverlay() {
     }
     const r = capsuleBtn.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return false;
+    let rightBound = r.right;
+    if (!topbarUpdateBtn.hasAttribute('hidden') && topbarUpdateBtn.getBoundingClientRect) {
+      const ur = topbarUpdateBtn.getBoundingClientRect();
+      if (ur.width > 0 && ur.height > 0) {
+        rightBound = Math.max(rightBound, ur.right);
+      }
+    }
     return (
       lastPointerX >= r.left - 1 &&
-      lastPointerX <= r.right + 1 &&
+      lastPointerX <= rightBound + 1 &&
       lastPointerY >= r.top - 1 &&
       lastPointerY <= r.bottom + 1
     );
@@ -6875,8 +6918,87 @@ function mountWindowOverlay() {
   const sep0 = h('span', { className: 'wm-sep wm-sep-speed', 'data-sep-for-rank': '2' });
   const sep1 = h('span', { className: 'wm-sep wm-sep-quota', 'data-sep-for-rank': '3' });
   let lastShowMulti = true;
+  let lastShowUpdate = false;
+  let isTopbarUpdating = false;
 
   const updateDot = h('span', { className: 'wm-update-dot', hidden: true });
+  const topbarUpdateIcon = createSvgIcon('arrow-down', { size: 10 });
+  const topbarUpdateLabel = h('span', { className: 'wm-update-label', text: '新版本' });
+  const topbarUpdateBtn = h(
+    'button',
+    {
+      type: 'button',
+      className: 'wm-update-btn',
+      hidden: true,
+      'aria-label': '发现新版本，点击更新',
+      title: '发现新版本，点击立即更新',
+      onClick: async (e) => {
+        e.stopPropagation();
+        if (isTopbarUpdating) return;
+        isTopbarUpdating = true;
+        patchClasses(topbarUpdateBtn, { 'is-updating': true });
+        patchSvgIcon(topbarUpdateIcon, 'refresh');
+        patchText(topbarUpdateLabel, '更新中…');
+        patchAttr(topbarUpdateBtn, 'disabled', true);
+        try {
+          const res = await triggerPluginUpdate();
+          if (!res?.ok) {
+            uiStore.setState({ activeView: 'settings' });
+            setPopoverOpen(true);
+          }
+        } catch {
+          uiStore.setState({ activeView: 'settings' });
+          setPopoverOpen(true);
+        } finally {
+          isTopbarUpdating = false;
+          patchClasses(topbarUpdateBtn, { 'is-updating': false });
+          patchSvgIcon(topbarUpdateIcon, 'arrow-down');
+          patchAttr(topbarUpdateBtn, 'disabled', false);
+          const cs = telemetryStore.getState().telemetry?.cloudStatus;
+          patchText(
+            topbarUpdateLabel,
+            cs?.latestPluginVersion ? `v${cs.latestPluginVersion}` : '新版本'
+          );
+        }
+      },
+      onMouseenter: (e) => {
+        recordPointerCoords(e);
+        if (hoverLeaveTimer) {
+          clearTimeout(hoverLeaveTimer);
+          hoverLeaveTimer = null;
+        }
+        if (!popoverOpen && !multiPinned) {
+          if (multiOpen) {
+            setMultiOpen(false);
+          }
+          setTooltipOpen(true);
+        }
+      },
+      onMouseleave: (e) => {
+        recordPointerCoords(e);
+        if (hoverLeaveTimer) {
+          clearTimeout(hoverLeaveTimer);
+        }
+        hoverLeaveTimer = setTimeout(() => {
+          hoverLeaveTimer = null;
+          if (disposed || popoverOpen) return;
+          let nativeHover = false;
+          try {
+            nativeHover = Boolean(
+              capsuleBtn.matches?.(':hover') || topbarUpdateBtn.matches?.(':hover')
+            );
+          } catch {
+            nativeHover = false;
+          }
+          if (nativeHover || isPointerStillInCapsule()) {
+            return;
+          }
+          setTooltipOpen(false);
+        }, 40);
+      },
+    },
+    [topbarUpdateIcon, topbarUpdateLabel]
+  );
 
   const capsuleBtn = h(
     'button',
@@ -6917,7 +7039,9 @@ function mountWindowOverlay() {
           if (disposed || popoverOpen) return;
           let nativeHover = false;
           try {
-            nativeHover = Boolean(capsuleBtn.matches?.(':hover'));
+            nativeHover = Boolean(
+              capsuleBtn.matches?.(':hover') || topbarUpdateBtn.matches?.(':hover')
+            );
           } catch {
             nativeHover = false;
           }
@@ -6932,6 +7056,7 @@ function mountWindowOverlay() {
   );
   capsuleShadow.appendChild(multiBtn);
   capsuleShadow.appendChild(capsuleBtn);
+  capsuleShadow.appendChild(topbarUpdateBtn);
 
   // --- 2. 创建 Body 顶层浮层 Portal Shadow Host ---
   const portalHost = document.createElement('div');
@@ -7058,13 +7183,33 @@ function mountWindowOverlay() {
     ]),
   ]);
 
+  const hoverUpdateVerText = h('span', { text: '发现新版本' });
+  const hoverUpdateHintText = h('span', {
+    className: 'wm-hover-update-hint',
+    text: '点击顶栏版本胶囊即可一键更新',
+  });
+  const hoverUpdateBar = h(
+    'div',
+    {
+      className: 'wm-hover-update-bar',
+      hidden: true,
+    },
+    [
+      h('span', { className: 'wm-hover-update-left' }, [
+        createSvgIcon('arrow-down', { size: 11 }),
+        hoverUpdateVerText,
+      ]),
+      hoverUpdateHintText,
+    ]
+  );
+
   const hoverTipEl = h(
     'div',
     {
       className: 'wm-hover-tip',
       hidden: true,
     },
-    [hoverMatrixEl, hoverCtxPanel, hoverQuotaPanel]
+    [hoverUpdateBar, hoverMatrixEl, hoverCtxPanel, hoverQuotaPanel]
   );
 
   // 左侧多会话实时看板浮层（活跃运行会话卡片 + 近期多窗口会话速览，全槽位预占、就地补丁更新）
@@ -7165,16 +7310,11 @@ function mountWindowOverlay() {
 
   const multiPinBadge = h('span', { className: 'wm-pin-badge', hidden: true, text: '已固定' });
   const multiRunningMetaEl = h('span', { className: 'panel-meta text-mono', text: '读取中...' });
-  const multiEmptyHintEl = h('span', {
-    className: 'wm-multi-empty-hint',
-    text: '悬停速览 · 左键固定',
-  });
   const multiEmptyEl = h('div', { className: 'wm-multi-empty' }, [
     h('span', { className: 'wm-multi-empty-left' }, [
       h('span', { className: 'wm-idle-dot' }),
       h('span', { text: '当前暂无在线运行的会话' }),
     ]),
-    multiEmptyHintEl,
   ]);
   const multiRunningListEl = h('div', {
     className: 'live-activity-list',
@@ -7348,6 +7488,11 @@ function mountWindowOverlay() {
         multiPanelEl.style.maxHeight = `${Math.max(240, vh - top - 12)}px`;
       }
 
+      const rightAnchorEdge =
+        !topbarUpdateBtn.hasAttribute('hidden') && topbarUpdateBtn.getBoundingClientRect
+          ? Math.max(bRect.right, topbarUpdateBtn.getBoundingClientRect().right || 0)
+          : bRect.right;
+
       if (popoverOpen) {
         const rawW =
           Number(popoverEl.offsetWidth) ||
@@ -7355,7 +7500,7 @@ function mountWindowOverlay() {
           defaultCardW;
         const panelW = Math.min(rawW, Math.max(280, vw - minLeft - 12));
         const top = Math.max(38, Math.min(vh - 140, Math.round(bRect.bottom + 6)));
-        let left = Math.round(bRect.right - panelW);
+        let left = Math.round(rightAnchorEdge - panelW);
         left = Math.min(left, vw - panelW - 12);
         left = Math.max(minLeft, left);
         popoverEl.style.top = `${top}px`;
@@ -7377,7 +7522,7 @@ function mountWindowOverlay() {
         if (top + tipH > vh - 8 && bRect.top > tipH + 12) {
           top = Math.round(bRect.top - tipH - 6);
         }
-        let left = Math.round(bRect.right - tipW);
+        let left = Math.round(rightAnchorEdge - tipW);
         left = Math.min(left, vw - tipW - 12);
         left = Math.max(minLeft, left);
         hoverTipEl.style.top = `${top}px`;
@@ -7393,9 +7538,14 @@ function mountWindowOverlay() {
     if (disposed) return;
     const titlebar = findHostTitlebar();
     const avail = measureAvailableTitlebarWidth(titlebar);
-    const showMulti =
-      telemetryStore.getState().telemetry?.settings?.showTopbarMultiSession !== false;
-    const nextMode = computeCapsuleLayoutMode(avail, layoutMode, { showMulti });
+    const curTel = telemetryStore.getState().telemetry;
+    const showMulti = curTel?.settings?.showTopbarMultiSession !== false;
+    const curUpdateMode = normalizeClientUpdateMode(
+      curTel?.settings?.pluginUpdateMode,
+      curTel?.settings?.autoUpdatePlugin
+    );
+    const hasUpdate = Boolean(curTel?.cloudStatus?.updateAvailable) && curUpdateMode !== 'off';
+    const nextMode = computeCapsuleLayoutMode(avail, layoutMode, { showMulti, hasUpdate });
     if (nextMode !== layoutMode) {
       layoutMode = nextMode;
       capsuleHost.setAttribute('data-layout', layoutMode);
@@ -7877,7 +8027,6 @@ function mountWindowOverlay() {
           : `${runningCount} 个会话运行中`
         : '全部待命'
     );
-    patchText(multiEmptyHintEl, '悬停速览 · 左键可固定');
     patchAttr(multiEmptyEl, 'hidden', runningCount > 0);
     patchAttr(multiRunningListEl, 'hidden', runningCount === 0);
 
@@ -8108,8 +8257,38 @@ function mountWindowOverlay() {
       quotas: telemetry.quotas,
     });
 
-    const hasUpdate = Boolean(telemetry.cloudStatus?.updateAvailable);
-    patchAttr(updateDot, 'hidden', !hasUpdate);
+    const updateMode = normalizeClientUpdateMode(
+      telemetry.settings?.pluginUpdateMode,
+      telemetry.settings?.autoUpdatePlugin
+    );
+    const showUpdatePrompt =
+      Boolean(telemetry.cloudStatus?.updateAvailable) && updateMode !== 'off';
+    const latestVer = telemetry.cloudStatus?.latestPluginVersion || '';
+    patchAttr(updateDot, 'hidden', !showUpdatePrompt);
+    patchAttr(topbarUpdateBtn, 'hidden', !showUpdatePrompt);
+    patchAttr(hoverUpdateBar, 'hidden', !showUpdatePrompt);
+    if (showUpdatePrompt) {
+      if (!isTopbarUpdating) {
+        patchText(topbarUpdateLabel, latestVer ? `v${latestVer}` : '新版本');
+      }
+      patchAttr(
+        topbarUpdateBtn,
+        'title',
+        latestVer ? `发现新版本 v${latestVer}，左键立即更新` : '发现新版本，左键立即更新'
+      );
+      patchText(
+        hoverUpdateVerText,
+        latestVer ? `发现新版本 v${latestVer}` : '发现新版本可用'
+      );
+      patchText(
+        hoverUpdateHintText,
+        latestVer ? `点击顶栏 v${latestVer} 即可更新` : '点击顶栏版本胶囊即可更新'
+      );
+    }
+    if (showUpdatePrompt !== lastShowUpdate) {
+      lastShowUpdate = showUpdatePrompt;
+      updateResponsiveLayout();
+    }
 
     // --- 同步悬停三卡片全景概览（与 LiveOverviewView 保持完全一致的数据口径与视觉呈现） ---
     const showUpstream = Boolean(telemetry.settings?.showUpstreamModel);
@@ -8141,7 +8320,7 @@ function mountWindowOverlay() {
     );
     patchText(
       hoverCacheSub,
-      `缓存 ${overviewActive.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(overviewActive.sessionCostUsd || 0, { unpricedCalls: overviewActive.sessionUnpricedCalls })}`
+      `缓存 ${overviewActive.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(overviewActive.sessionCostUsd || 0)}`
     );
 
     patchAttr(hoverCtxAgentBadge, 'hidden', !(hasSubagents && ctxAgent));
@@ -8186,7 +8365,7 @@ function mountWindowOverlay() {
     });
     patchText(
       hoverWkFootLeft,
-      `本周累计: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0, { unpricedCalls: weekly.unpricedCalls })})`
+      `本周累计: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0)})`
     );
     patchText(
       hoverWkFootRight,

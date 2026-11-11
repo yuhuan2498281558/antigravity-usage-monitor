@@ -817,8 +817,8 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
           },
           consumption: {
             selectedRange: { key: 'today', label: '今天', startMs: 1, endMs: 2 },
-            session: { totalTokens: 128000, costUsd: 0.42 },
-            account: { totalTokens: 500000, costUsd: 1.5 },
+            session: { totalTokens: 128000, costUsd: 0.42, unpricedCalls: 12 },
+            account: { totalTokens: 500000, costUsd: 1.5, unpricedCalls: 3993 },
             trendSeries: [],
             monthlySeries: [],
           },
@@ -949,7 +949,16 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
 
     // Verify hovering right capsule closes unpinned multi-session panel and opens rich 3-card hover overview HUD (.wm-hover-tip)
     assert.ok(hoverTipEl, 'Hover overview HUD mounted in portal shadow root');
-    assert.equal(hoverTipEl.children.length, 3, 'Hover HUD has 3 signature cards (matrix + context + quotas)');
+    assert.equal(
+      hoverTipEl.children.length,
+      4,
+      'Hover HUD has optional update banner + 3 signature cards (matrix + context + quotas)'
+    );
+    assert.equal(
+      multiPanelEl.querySelector('.wm-multi-empty-hint'),
+      null,
+      'Redundant hover/pin hint copy removed from multi-session empty state'
+    );
 
     capsuleBtn.dispatchEvent({ type: 'mouseenter', clientX: 960, clientY: 18 });
     assert.equal(ov.isMultiOpen(), false, 'Mutual exclusion closes unpinned multi-session panel');
@@ -1125,6 +1134,81 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     assert.equal(capSlots[0].getAttribute('data-metric'), 'context');
     assert.equal(capSlots[0].children.length, 2, 'Ring SVG re-attached on Slot 0');
     assert.equal(capSlots[0].querySelector('.wm-ctx-pct').textContent, '50%');
+
+    // Verify 3-tier update mode select (manual default -> off hides topbar/hover prompts -> auto -> manual)
+    const topbarUpdateBtn = capsuleHost.shadowRoot.querySelector('.wm-update-btn');
+    const hoverUpdateBar = hoverTipEl.querySelector('.wm-hover-update-bar');
+    const headerUpdateBtn = popoverEl.querySelector('.update-badge-btn');
+    assert.ok(topbarUpdateBtn, 'Topbar subtle update pill button mounted');
+    assert.ok(hoverUpdateBar, 'Hover card update banner mounted');
+    assert.equal(topbarUpdateBtn.hasAttribute('hidden'), false, 'Update pill visible in default manual mode');
+    assert.equal(topbarUpdateBtn.querySelector('.wm-update-label').textContent, 'v1.5.0');
+    assert.ok(
+      topbarUpdateBtn.children[0].children[0].getAttribute('d').includes('13.2l3.8-3.8'),
+      'Topbar update pill uses downward arrow matching panel & settings design language'
+    );
+    assert.equal(hoverUpdateBar.hasAttribute('hidden'), false, 'Hover update bar visible in default manual mode');
+    assert.ok(
+      hoverUpdateBar
+        .querySelector('.wm-hover-update-left')
+        .children[0].children[0].getAttribute('d')
+        .includes('13.2l3.8-3.8'),
+      'Hover update bar uses downward arrow matching panel & settings design language'
+    );
+    assert.equal(
+      hoverUpdateBar.querySelector('.wm-hover-update-left').children[1].textContent,
+      '发现新版本 v1.5.0'
+    );
+    assert.equal(
+      hoverUpdateBar.querySelector('.wm-hover-update-hint').textContent,
+      '点击顶栏 v1.5.0 即可更新'
+    );
+    assert.equal(headerUpdateBtn.hasAttribute('hidden'), false);
+
+    const updateModeSelectEl = settingsSelects[5];
+    assert.equal(updateModeSelectEl.querySelector('.select-label').textContent, '仅提示新版本，手动更新');
+    updateModeSelectEl.querySelector('.select-trigger').dispatchEvent({ type: 'click', stopPropagation() {} });
+    const updateOpts = updateModeSelectEl.querySelectorAll('.select-option');
+    assert.equal(updateOpts.length, 3, '3 update modes rendered (manual, auto, off)');
+    assert.equal(updateOpts[0].querySelector('.select-option-text').textContent, '仅提示新版本，手动更新');
+    assert.equal(updateOpts[1].querySelector('.select-option-text').textContent, '自动更新');
+    assert.equal(updateOpts[2].querySelector('.select-option-text').textContent, '关闭更新');
+
+    updateOpts[2].dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(mockSettings.pluginUpdateMode, 'off');
+    assert.equal(mockSettings.autoUpdatePlugin, false);
+    assert.equal(topbarUpdateBtn.hasAttribute('hidden'), true, 'Topbar update pill hidden when mode=off');
+    assert.equal(hoverUpdateBar.hasAttribute('hidden'), true, 'Hover update bar hidden when mode=off');
+    assert.equal(headerUpdateBtn.hasAttribute('hidden'), true, 'Header update button hidden when mode=off');
+
+    updateModeSelectEl.querySelector('.select-trigger').dispatchEvent({ type: 'click', stopPropagation() {} });
+    updateModeSelectEl.querySelectorAll('.select-option')[1].dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(mockSettings.pluginUpdateMode, 'auto');
+    assert.equal(mockSettings.autoUpdatePlugin, true);
+    assert.equal(topbarUpdateBtn.hasAttribute('hidden'), false, 'Topbar update pill restored when mode=auto');
+
+    updateModeSelectEl.querySelector('.select-trigger').dispatchEvent({ type: 'click', stopPropagation() {} });
+    updateModeSelectEl.querySelectorAll('.select-option')[0].dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 260));
+    assert.equal(mockSettings.pluginUpdateMode, 'manual');
+    assert.equal(mockSettings.autoUpdatePlugin, false);
+    assert.equal(topbarUpdateBtn.hasAttribute('hidden'), false, 'Topbar update pill visible when mode=manual');
+
+    // Verify ConsumptionView omits "+ 待定" / "3993 步费用待定" and StepsDetailView protects header title
+    pillTabs[1].dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 15));
+    const heroCostEl = popoverEl.querySelector('.cons-hero-cost');
+    assert.equal(heroCostEl.textContent, '$1.50', 'Consumption hero cost omits + 待定');
+    const heroCostBaseline = heroCostEl.parentElement;
+    assert.equal(
+      heroCostBaseline.children[1].textContent,
+      '≈ ¥11',
+      'Consumption sub-label renders CNY approx instead of 步费用待定'
+    );
+    assert.ok(popoverEl.querySelector('.steps-panel-header'), 'Steps header flex wrapper present');
+    assert.ok(popoverEl.querySelector('.steps-panel-title'), 'Steps title non-shrinking class present');
 
     // Verify bundle version bump NEVER calls window.location.reload() in overlay mode
     currentBundleVer = 'ver-200';
