@@ -119,8 +119,8 @@ export const StepsDetailView = defineComponent({
         style: 'flex: 1; min-height: 0; display: flex; flex-direction: column;',
       },
       [
-        h('div', { className: 'panel-header' }, [
-          h('span', { className: 'panel-title' }, [
+        h('div', { className: 'panel-header steps-panel-header' }, [
+          h('span', { className: 'panel-title steps-panel-title' }, [
             createSvgIcon('table', { size: 13 }),
             h('span', { text: '调用记录' }),
           ]),
@@ -349,7 +349,7 @@ export const StepsDetailView = defineComponent({
           patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' tok/s'));
           patchText(refs.speedSub, `有效 ${sampleSummary(m.speedSummary)}`);
           patchText(refs.tdTokens, formatTokens(m.totalTokens || 0));
-          patchText(refs.tdCost, formatUsd(m.costUsd, { unpricedCalls: m.unpricedCalls }));
+          patchText(refs.tdCost, formatUsd(m.costUsd || 0));
         },
       });
 

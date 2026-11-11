@@ -417,7 +417,7 @@ export const ConsumptionView = defineComponent({
       patchText(refs.pctBadge, `${share.toFixed(1)}%`);
       patchText(refs.totalTokEl, showTokensInHeader ? formatTokensPrecise(total) : '');
       patchAttr(refs.totalTokEl, 'hidden', !showTokensInHeader);
-      patchText(refs.costEl, formatUsd(item.costUsd || 0, { unpricedCalls: item.unpricedCalls }));
+      patchText(refs.costEl, formatUsd(item.costUsd || 0));
 
       const responseTok =
         item.responseTokens != null
@@ -477,8 +477,8 @@ export const ConsumptionView = defineComponent({
 
       patchText(heroTotalTokens, formatTokensPrecise(totalTokens));
       patchText(heroTotalCalls, `${acct.calls || 0} 次`);
-      patchText(heroCostUsd, formatUsd(costUsd, { unpricedCalls: acct.unpricedCalls }));
-      patchText(heroCostCny, acct.unpricedCalls > 0 ? `${acct.unpricedCalls} 步费用待定` : formatCnyApprox(costUsd));
+      patchText(heroCostUsd, formatUsd(costUsd));
+      patchText(heroCostCny, formatCnyApprox(costUsd));
 
       patchText(cacheHitPctEl, `${Number(acct.cacheHitPct ?? 0).toFixed(1)}%`);
       patchText(cacheTokensEl, `命中 ${formatTokensPrecise(cacheTokens)}`);
@@ -602,11 +602,7 @@ export const ConsumptionView = defineComponent({
           const cVal = Number(m.costUsd || 0);
           patchText(
             col.costText,
-            m.unpricedCalls > 0
-              ? formatUsd(cVal, { unpricedCalls: m.unpricedCalls, compactPending: true })
-              : cVal >= 10
-                ? `$${Math.round(cVal)}`
-                : `$${cVal.toFixed(2)}`
+            cVal >= 10 ? `$${Math.round(cVal)}` : `$${cVal.toFixed(2)}`
           );
           patchText(col.tokText, formatTokensPrecise(mTot));
 

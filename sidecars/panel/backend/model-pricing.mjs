@@ -48,6 +48,8 @@ function inferFamilyFromProviderOrKey(rawModelKey = '', modelId = '', apiProvide
     combined.includes('GEMINI') ||
     combined.includes('CARBON') ||
     combined.includes('ARGON') ||
+    combined.includes('HYDROGEN') ||
+    combined.includes('HELIX') ||
     combined.includes('FLASH') ||
     combined.includes('GOOGLE')
   ) {
@@ -104,12 +106,20 @@ export function formatGenericModelSlug(slug = '') {
     .trim()
     .replace(/^session-display:/i, '');
   if (!s || /^MODEL_PLACEHOLDER_/i.test(s)) return '';
-  const m = s.match(/^gemini-(\d+(?:\.\d+)?)-(pro|flash|argon|carbon)(?:-(lite))?$/i);
+  const m = s.match(
+    /^gemini-(\d+(?:\.\d+)?)-(pro|flash|argon|carbon|hydrogen|helix)(?:-(lite))?$/i
+  );
   if (m) {
     const ver = m[1];
     const tier = m[2].charAt(0).toUpperCase() + m[2].slice(1).toLowerCase();
     const lite = m[3] ? ' Lite' : '';
     return `Gemini ${ver} ${tier}${lite}`;
+  }
+  const codenameMatch = s.match(/^gemini-(hydrogen|helix)$/i);
+  if (codenameMatch) {
+    const codename =
+      codenameMatch[1].charAt(0).toUpperCase() + codenameMatch[1].slice(1).toLowerCase();
+    return `Gemini ${codename}`;
   }
   return '';
 }

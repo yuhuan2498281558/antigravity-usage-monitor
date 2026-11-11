@@ -177,9 +177,9 @@ test('empty session does not invent an Argon model or a model quota pool', async
   assert.equal(p.quotas.activePool.isAvailable,false); assert.equal(p.quotas.activePool.family,'Unknown');
 });
 
-test('unknown cost renders as pending, known subtotals disclose missing calls', () => {
+test('unknown single-step cost renders as pending while aggregate subtotals omit pending suffix', () => {
   assert.equal(formatUsd(null),'待定'); assert.equal(formatUsd(0),'$0.00');
-  assert.equal(formatUsd(0.1,{unpricedCalls:1}),'$0.10 + 待定');
+  assert.equal(formatUsd(0.1,{unpricedCalls:1}),'$0.10');
 });
 
 test('custom cost budget cannot claim a complete remaining percentage when prices are missing', async () => {

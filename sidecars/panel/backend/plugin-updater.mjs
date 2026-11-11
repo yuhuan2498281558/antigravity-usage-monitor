@@ -591,9 +591,13 @@ export async function syncCloudCatalog({ force = false, urls = CLOUD_CATALOG_URL
 
           const statusAfter = getCloudStatus();
           const settings = loadSettings();
+          const allowAutoUpdate =
+            settings.pluginUpdateMode !== undefined
+              ? settings.pluginUpdateMode === 'auto'
+              : Boolean(settings.autoUpdatePlugin);
           if (
             statusAfter.updateAvailable &&
-            settings.autoUpdatePlugin &&
+            allowAutoUpdate &&
             !pluginUpdateState.isUpdating &&
             pluginUpdateState.lastAutoAttemptVersion !== statusAfter.latestPluginVersion
           ) {

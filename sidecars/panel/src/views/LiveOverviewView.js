@@ -889,7 +889,7 @@ export const LiveOverviewView = defineComponent({
       );
       patchText(
         cacheSub,
-        `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0, { unpricedCalls: active.sessionUnpricedCalls })}`
+        `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0)}`
       );
 
       // 2. 更新 10 段上下文窗口构成与内嵌上下文窗口检视胶囊条
@@ -1051,7 +1051,7 @@ export const LiveOverviewView = defineComponent({
 
       patchText(
         wkFootLeft,
-        `本周累计: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0, { unpricedCalls: weekly.unpricedCalls })})`
+        `本周累计: ${formatTokens(weekly.tokens || 0)} (${formatUsd(weekly.costUsd || 0)})`
       );
       patchText(
         wkFootRight,

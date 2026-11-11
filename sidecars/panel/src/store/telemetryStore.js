@@ -74,17 +74,32 @@ export function normalizeClientTopbarSlots(raw) {
   return slots;
 }
 
+/**
+ * 归一化前端插件更新策略（`'off'` | `'manual'` | `'auto'`），兼容旧版布尔字段。
+ *
+ * @param {unknown} mode
+ * @param {unknown} [legacyAutoUpdate]
+ * @returns {'off'|'manual'|'auto'}
+ */
+export function normalizeClientUpdateMode(mode, legacyAutoUpdate) {
+  const m = String(mode ?? '').trim().toLowerCase();
+  if (m === 'off' || m === 'manual' || m === 'auto') return m;
+  if (legacyAutoUpdate === true) return 'auto';
+  return 'manual';
+}
+
 function isEquivalentTelemetry(prev, next) {
   if (!prev || !next) return false;
   if (prev === next) return true;
 
-  // 1. 比对系统设置项（模型显示策略、周预算模式与额度、插件自动更新开关、双栖与顶栏槽位配置）
+  // 1. 比对系统设置项（模型显示策略、周预算模式与额度、插件更新策略、双栖与顶栏槽位配置）
   const pAct = prev.activeConversation;
   const nAct = next.activeConversation;
   if (prev.settings?.showUpstreamModel !== next.settings?.showUpstreamModel) return false;
   if (prev.settings?.weeklyLimitMode !== next.settings?.weeklyLimitMode) return false;
   if (prev.settings?.weeklyTokenBudget !== next.settings?.weeklyTokenBudget) return false;
   if (prev.settings?.weeklyCostBudget !== next.settings?.weeklyCostBudget) return false;
+  if ((prev.settings?.pluginUpdateMode ?? '') !== (next.settings?.pluginUpdateMode ?? '')) return false;
   if (prev.settings?.autoUpdatePlugin !== next.settings?.autoUpdatePlugin) return false;
   if (prev.settings?.enableWindowOverlay !== next.settings?.enableWindowOverlay) return false;
   if ((prev.settings?.showTopbarMultiSession !== false) !== (next.settings?.showTopbarMultiSession !== false)) {

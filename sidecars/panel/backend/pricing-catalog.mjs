@@ -145,7 +145,7 @@ export function compareSemver(a, b) {
 export function readInstalledPluginVersion() {
   const manifest = loadJson(PLUGIN_MANIFEST_FILE, null);
   const ver = typeof manifest?.version === 'string' ? manifest.version.trim() : '';
-  return isValidSemver(ver) ? ver.replace(/^v/i, '') : '1.4.3';
+  return isValidSemver(ver) ? ver.replace(/^v/i, '') : '1.4.4';
 }
 
 function normalizeModelFamily(rawFamily) {

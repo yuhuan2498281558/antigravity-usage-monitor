@@ -32,6 +32,8 @@
 .steps-inline-scope-select .select-menu {
   left: auto;
   right: 0;
+  min-width: 220px;
+  max-width: min(320px, 82vw);
 }
 
 .session-left {
