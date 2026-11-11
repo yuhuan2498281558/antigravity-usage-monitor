@@ -10,7 +10,7 @@ import { createSvgIcon } from '../../icons/SvgIcon.js';
 
 export const CustomNumberInput = defineComponent({
   name: 'CustomNumberInput',
-  setup({ getProps, emit }) {
+  setup({ getProps, setProps, emit }) {
     function clampValue(raw) {
       const { min = -Infinity, max = Infinity, precision = 0 } = getProps();
       const num = Number(raw);
@@ -27,6 +27,7 @@ export const CustomNumberInput = defineComponent({
       const next = clampValue(current + direction * step * multiplier);
       syncFieldDisplay(next);
       if (next !== current) {
+        setProps({ modelValue: next });
         emit('update:modelValue', next);
       }
     }
@@ -80,11 +81,22 @@ export const CustomNumberInput = defineComponent({
     });
 
     function commitManualInput() {
-      const rawText = String(textField.value || '').replace(/[^0-9.-]/g, '');
-      const next = clampValue(rawText);
+      const raw = String(textField.value ?? '').trim();
+      if (!raw || !/\d/.test(raw)) {
+        syncFieldDisplay(getProps().modelValue);
+        return;
+      }
+      const cleaned = raw.replace(/[^0-9.-]/g, '');
+      const parsed = Number(cleaned);
+      if (!Number.isFinite(parsed)) {
+        syncFieldDisplay(getProps().modelValue);
+        return;
+      }
+      const next = clampValue(parsed);
       const prev = Number(getProps().modelValue);
       syncFieldDisplay(next);
       if (next !== prev) {
+        setProps({ modelValue: next });
         emit('update:modelValue', next);
       }
     }
@@ -107,10 +119,8 @@ export const CustomNumberInput = defineComponent({
       el: rootEl,
       refs: { decBtn, incBtn, textField },
       onPropsChange: () => syncFieldDisplay(),
-      getValue: () => clampValue(textField.value),
       methods: {
-        stepUp: (mult = 1) => applyStep(1, mult),
-        stepDown: (mult = 1) => applyStep(-1, mult),
+        commit: () => commitManualInput(),
       },
     };
   },

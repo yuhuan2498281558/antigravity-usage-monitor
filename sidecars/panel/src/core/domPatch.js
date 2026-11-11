@@ -53,18 +53,28 @@ export function patchText(el, nextValue) {
 export function patchAttr(el, attrName, nextValue) {
   if (!el) return false;
   if (nextValue === null || nextValue === undefined || nextValue === false) {
-    if (!el.hasAttribute(attrName)) {
-      return false;
+    let mutated = false;
+    if (el.hasAttribute(attrName)) {
+      el.removeAttribute(attrName);
+      mutated = true;
     }
-    el.removeAttribute(attrName);
-    return true;
+    if (attrName === 'value' && 'value' in el && el.value !== '') {
+      el.value = '';
+      mutated = true;
+    }
+    return mutated;
   }
   const strVal = nextValue === true ? '' : String(nextValue);
-  if (el.getAttribute(attrName) === strVal) {
-    return false;
+  let mutated = false;
+  if (el.getAttribute(attrName) !== strVal) {
+    el.setAttribute(attrName, strVal);
+    mutated = true;
   }
-  el.setAttribute(attrName, strVal);
-  return true;
+  if (attrName === 'value' && 'value' in el && el.value !== strVal) {
+    el.value = strVal;
+    mutated = true;
+  }
+  return mutated;
 }
 
 export function patchClasses(el, classMap) {
@@ -72,11 +82,14 @@ export function patchClasses(el, classMap) {
   let mutated = false;
   for (const [cls, active] of Object.entries(classMap)) {
     if (!cls) continue;
-    const has = el.classList.contains(cls);
     const shouldHave = Boolean(active);
-    if (has !== shouldHave) {
-      el.classList.toggle(cls, shouldHave);
-      mutated = true;
+    const tokens = String(cls).split(/\s+/).filter(Boolean);
+    for (const tok of tokens) {
+      const has = el.classList.contains(tok);
+      if (has !== shouldHave) {
+        el.classList.toggle(tok, shouldHave);
+        mutated = true;
+      }
     }
   }
   return mutated;
@@ -91,6 +104,25 @@ export function patchStyleVar(el, varName, nextValue) {
   }
   el.style.setProperty(varName, strVal);
   return true;
+}
+
+/**
+ * 判断事件是否发生在目标节点内部（兼容 Shadow DOM 的 `composedPath()` 穿透）。
+ *
+ * @param {Event|null|undefined} event
+ * @param {Node|null|undefined} element
+ * @returns {boolean}
+ */
+export function isEventInside(event, element) {
+  if (!event || !element) return false;
+  if (typeof event.composedPath === 'function') {
+    const path = event.composedPath();
+    if (Array.isArray(path) && path.includes(element)) {
+      return true;
+    }
+  }
+  const target = event.target;
+  return Boolean(target && typeof element.contains === 'function' && element.contains(target));
 }
 
 const keyedListState = new WeakMap();
@@ -108,11 +140,15 @@ export function patchKeyedList(container, items, { keyFn, sigFn, createRow, upda
   }
 
   const nextKeys = new Set();
+  const seenInPass = new Map();
   const orderedNodes = [];
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const key = String(keyFn(item, i));
+    const rawKey = String(keyFn(item, i));
+    const dupIdx = seenInPass.get(rawKey) || 0;
+    seenInPass.set(rawKey, dupIdx + 1);
+    const key = dupIdx === 0 ? rawKey : `${rawKey}__dup_${dupIdx}`;
     const sig = sigFn ? String(sigFn(item, i)) : JSON.stringify(item);
     nextKeys.add(key);
 

@@ -1,34 +1,57 @@
 /**
  * @fileoverview View 4: SettingsView (系统设置视图).
- * 采用定制的 `CustomSelect` 与 `CustomNumberInput` 替代所有原生表单控件，分为两个设置面板：
- * 1. 本地配额监控与预算表单：配置模型名称显示方式（内部代号/实际模型名）、周用量计算模式及自定义 Token/USD 预算；
- * 2. 云端价格同步与插件更新面板：配置插件自动更新策略、手动同步云端模型价格表，以及检查并执行 Git/ZIP 双模式插件升级。
+ * 采用定制的 `CustomSelect` 与 `SegmentedControl` 替代所有原生表单控件，分为三个单层细线设置面板：
+ * 1. 常规设置：配置面板挂载方式（双栖挂载 / 仅右侧辅助栏）与模型名称格式（精简代号 / 原始模型 ID）；
+ * 2. 顶部栏定制：控制左侧「实时运行会话」入口开关，以及自由定义右侧精简胶囊三个数值槽位的显示内容与左右顺序；
+ * 3. 版本更新：配置插件自动更新策略、手动同步云端模型价格表，以及检查并执行 Git/ZIP 双模式插件升级。
  */
 
 import { defineComponent } from '../core/component.js';
 import { h, patchAttr, patchClasses, patchText } from '../core/domPatch.js';
 import { createSvgIcon } from '../icons/SvgIcon.js';
 import {
+  DEFAULT_CLIENT_TOPBAR_SLOTS,
+  normalizeClientTopbarSlots,
   saveSettingsPatch,
   telemetryStore,
   triggerCloudSync,
   triggerPluginUpdate,
 } from '../store/telemetryStore.js';
 import { uiStore } from '../store/uiStore.js';
-import { CustomNumberInput } from '../components/ui/CustomNumberInput.js';
+import { CustomScrollbar } from '../components/ui/CustomScrollbar.js';
 import { CustomSelect } from '../components/ui/CustomSelect.js';
-
-/** 每周配额计算模式可选项 */
-const WEEKLY_MODE_OPTIONS = [
-  { value: 'official', label: '跟随官方额度' },
-  { value: 'custom_tokens', label: '自定义 Token 上限' },
-  { value: 'custom_cost', label: '自定义费用上限 (USD)' },
-];
+import { SegmentedControl } from '../components/ui/SegmentedControl.js';
 
 /** 步骤明细表中的模型名称显示方式可选项 */
 const STEP_MODEL_DISPLAY_OPTIONS = [
   { value: 'short', label: '精简代号 (如 argon-4-high)' },
   { value: 'upstream', label: '原始模型 ID (如 gemini-3.8-flash-n)' },
+];
+
+/** 面板挂载模式可选项（顶部栏 + 侧边栏 vs 仅侧边栏） */
+const WINDOW_MOUNT_OPTIONS = [
+  { value: 'dual', label: '双栖挂载 (顶部栏 + 侧边栏)' },
+  { value: 'sidebar', label: '仅侧边栏' },
+];
+
+/** 顶栏左侧实时运行会话入口显隐选项 */
+const TOPBAR_MULTI_TOGGLE_OPTIONS = [
+  { value: 'show', label: '显示' },
+  { value: 'hide', label: '隐藏' },
+];
+
+/** 顶栏右侧精简胶囊三槽位可选指标项 */
+const TOPBAR_SLOT_OPTIONS = [
+  { value: 'context', label: '上下文占用 (%)' },
+  { value: 'tps', label: '输出速度 (TPS)' },
+  { value: 'ttft', label: '首字延迟 (TTFT)' },
+  { value: 'cost', label: '本次费用 ($)' },
+  { value: 'quota_auto', label: '自动紧俏额度' },
+  { value: 'gemini_5h', label: 'Gemini 5h 额度' },
+  { value: 'gemini_weekly', label: 'Gemini 周额度' },
+  { value: 'claude_5h', label: 'Claude 5h 额度' },
+  { value: 'claude_weekly', label: 'Claude 周额度' },
+  { value: 'none', label: '不显示' },
 ];
 
 /** 插件版本更新策略可选项 */
@@ -55,20 +78,20 @@ function formatSyncTimeText(tsMs, updatedAt) {
 export const SettingsView = defineComponent({
   name: 'SettingsView',
   setup({ onCleanup }) {
-    // --- 面板 1：本地配额监控与预算表单状态与控件 ---
-    let draftMode = 'official';
-    let draftTokens = 150000000;
-    let draftCost = 100;
     let draftShowUpstreamModel = false;
     let draftAutoUpdatePlugin = false;
+    let draftEnableWindowOverlay = true;
+    let draftShowTopbarMulti = true;
+    let draftTopbarSlots = [...DEFAULT_CLIENT_TOPBAR_SLOTS];
     let statusTimer = null;
+    let topbarTimer = null;
     let cloudTimer = null;
-    let lastSyncedSettingsSig = '';
 
     const saveStatusText = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
+    const topbarStatusText = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
     const cloudStatusMsg = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
 
-    /** 在本地预算面板右上角展示短暂的保存状态提示 */
+    /** 在常规设置面板右上角展示短暂的保存状态提示 */
     function showSaveFeedback(text) {
       if (statusTimer) {
         clearTimeout(statusTimer);
@@ -80,6 +103,21 @@ export const SettingsView = defineComponent({
           statusTimer = null;
           patchText(saveStatusText, '');
         }, text === '保存失败' ? 2500 : 1500);
+      }
+    }
+
+    /** 在顶部栏定制面板右上角展示短暂的状态提示 */
+    function showTopbarFeedback(text, autoClearMs = 1500) {
+      if (topbarTimer) {
+        clearTimeout(topbarTimer);
+        topbarTimer = null;
+      }
+      patchText(topbarStatusText, text);
+      if (autoClearMs > 0) {
+        topbarTimer = setTimeout(() => {
+          topbarTimer = null;
+          patchText(topbarStatusText, '');
+        }, autoClearMs);
       }
     }
 
@@ -98,110 +136,54 @@ export const SettingsView = defineComponent({
       }
     }
 
-    const modeSelect = CustomSelect({
-      modelValue: draftMode,
-      icon: 'sliders',
-      options: WEEKLY_MODE_OPTIONS,
-      onUpdateModelValue: (val) => {
-        draftMode = val;
-      },
-    });
-
-    // 模型名显示方式切换后立即持久化并刷新遥测数据
-    const stepModelSelect = CustomSelect({
-      modelValue: 'short',
-      icon: 'table',
-      options: STEP_MODEL_DISPLAY_OPTIONS,
+    // --- 面板 1：常规设置 ---
+    const windowMountSelect = CustomSelect({
+      modelValue: 'dual',
+      icon: 'dock',
+      options: WINDOW_MOUNT_OPTIONS,
       onUpdateModelValue: async (val) => {
-        draftShowUpstreamModel = val === 'upstream';
-        if (latestSettings) {
-          lastSyncedSettingsSig = settingsSig({
-            ...latestSettings,
-            showUpstreamModel: draftShowUpstreamModel,
-          });
-        }
+        const nextEnable = val !== 'sidebar';
+        draftEnableWindowOverlay = nextEnable;
+        windowMountSelect.setValue(nextEnable ? 'dual' : 'sidebar');
         showSaveFeedback('保存中…');
         try {
           await saveSettingsPatch({
-            showUpstreamModel: draftShowUpstreamModel,
+            enableWindowOverlay: nextEnable,
           });
           showSaveFeedback('已保存');
         } catch {
+          if (latestSettings) {
+            renderSettings(latestSettings);
+          }
           showSaveFeedback('保存失败');
         }
       },
     });
 
-    // 插件自动更新策略切换后立即保存至后端
-    const autoUpdateSelect = CustomSelect({
-      modelValue: 'manual',
-      icon: 'refresh',
-      options: AUTO_UPDATE_OPTIONS,
+    const stepModelSelect = CustomSelect({
+      modelValue: 'short',
+      icon: 'table',
+      options: STEP_MODEL_DISPLAY_OPTIONS,
       onUpdateModelValue: async (val) => {
-        draftAutoUpdatePlugin = val === 'auto';
-        if (latestSettings) {
-          lastSyncedSettingsSig = settingsSig({
-            ...latestSettings,
-            autoUpdatePlugin: draftAutoUpdatePlugin,
-          });
-        }
-        showCloudFeedback('保存中…', 0);
+        const nextUpstream = val === 'upstream';
+        draftShowUpstreamModel = nextUpstream;
+        stepModelSelect.setValue(nextUpstream ? 'upstream' : 'short');
+        showSaveFeedback('保存中…');
         try {
           await saveSettingsPatch({
-            autoUpdatePlugin: draftAutoUpdatePlugin,
+            showUpstreamModel: nextUpstream,
           });
-          showCloudFeedback('已保存', 1800);
+          showSaveFeedback('已保存');
         } catch {
-          showCloudFeedback('保存失败', 2500);
+          if (latestSettings) {
+            renderSettings(latestSettings);
+          }
+          showSaveFeedback('保存失败');
         }
       },
     });
 
-    const tokenBudgetInput = CustomNumberInput({
-      modelValue: draftTokens,
-      min: 100000,
-      max: 10000000000,
-      step: 1000000,
-      onUpdateModelValue: (val) => {
-        draftTokens = val;
-      },
-    });
-
-    const costBudgetInput = CustomNumberInput({
-      modelValue: draftCost,
-      min: 1,
-      max: 100000,
-      step: 5,
-      onUpdateModelValue: (val) => {
-        draftCost = val;
-      },
-    });
-
-    const saveBtn = h(
-      'button',
-      {
-        type: 'button',
-        className: 'btn-primary',
-        onClick: async () => {
-          showSaveFeedback('保存中…');
-          try {
-            await saveSettingsPatch({
-              weeklyLimitMode: draftMode,
-              weeklyTokenBudget: draftTokens,
-              weeklyCostBudget: draftCost,
-              showUpstreamModel: draftShowUpstreamModel,
-              autoUpdatePlugin: draftAutoUpdatePlugin,
-            });
-            showSaveFeedback('已保存');
-          } catch {
-            showSaveFeedback('保存失败');
-          }
-        },
-      },
-      [createSvgIcon('check', { size: 13 }), h('span', { text: '保存设置' })]
-    );
-
-    const budgetPanel = h('section', { className: 'panel' }, [
+    const generalPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
           createSvgIcon('sliders', { size: 13 }),
@@ -210,30 +192,210 @@ export const SettingsView = defineComponent({
         saveStatusText,
       ]),
       h('div', { className: 'form-row' }, [
+        h('span', { className: 'form-label', text: '面板挂载方式' }),
+        windowMountSelect.el,
+      ]),
+      h('div', { className: 'form-row' }, [
         h('span', { className: 'form-label', text: '模型名称格式' }),
         stepModelSelect.el,
       ]),
-      h('div', { className: 'form-row' }, [
-        h('span', { className: 'form-label', text: '周额度基准' }),
-        modeSelect.el,
-      ]),
-      h('div', { className: 'dual-grid' }, [
-        h('div', { className: 'form-row' }, [
-          h('span', { className: 'form-label', text: '每周 Token 上限' }),
-          tokenBudgetInput.el,
-        ]),
-        h('div', { className: 'form-row' }, [
-          h('span', { className: 'form-label', text: '每周费用上限 ($)' }),
-          costBudgetInput.el,
-        ]),
-      ]),
-      h('div', { style: 'display: flex; justify-content: flex-end;' }, [saveBtn]),
     ]);
 
-    // --- 面板 2：版本更新面板 ---
+    // --- 面板 2：顶部栏定制（实时运行会话开关 + 右侧三槽位指标与顺序自定义） ---
+    const multiSessionToggle = SegmentedControl({
+      ariaLabel: '实时运行会话开关',
+      modelValue: 'show',
+      options: TOPBAR_MULTI_TOGGLE_OPTIONS,
+      onUpdateModelValue: async (val) => {
+        const nextShow = val !== 'hide';
+        draftShowTopbarMulti = nextShow;
+        syncTopbarControls();
+        showTopbarFeedback('保存中…', 0);
+        try {
+          await saveSettingsPatch({
+            showTopbarMultiSession: nextShow,
+          });
+          showTopbarFeedback('已保存', 1500);
+        } catch {
+          if (latestSettings) {
+            renderSettings(latestSettings);
+          }
+          showTopbarFeedback('保存失败', 2500);
+        }
+      },
+    });
+
+    async function persistTopbarSlots(nextRawSlots, noticeText = '') {
+      const normalized = normalizeClientTopbarSlots(nextRawSlots);
+      draftTopbarSlots = normalized;
+      syncTopbarControls();
+      showTopbarFeedback(noticeText || '保存中…', 0);
+      try {
+        await saveSettingsPatch({
+          topbarCapsuleSlots: normalized,
+        });
+        showTopbarFeedback(noticeText || '已保存', noticeText ? 2000 : 1500);
+      } catch {
+        if (latestSettings) {
+          renderSettings(latestSettings);
+        }
+        showTopbarFeedback('保存失败', 2500);
+      }
+    }
+
+    function handleSlotMetricChange(slotIndex, nextVal) {
+      const candidate = [...draftTopbarSlots];
+      candidate[slotIndex] = nextVal;
+      const wouldAllBeHidden = candidate.every((item) => item === 'none');
+      void persistTopbarSlots(
+        candidate,
+        wouldAllBeHidden ? '至少保留 1 项显示' : ''
+      );
+    }
+
+    function swapTopbarSlots(idxA, idxB) {
+      if (idxA < 0 || idxA > 2 || idxB < 0 || idxB > 2 || idxA === idxB) return;
+      const candidate = [...draftTopbarSlots];
+      const temp = candidate[idxA];
+      candidate[idxA] = candidate[idxB];
+      candidate[idxB] = temp;
+      void persistTopbarSlots(candidate);
+    }
+
+    const slotSelects = [0, 1, 2].map((idx) =>
+      CustomSelect({
+        modelValue: draftTopbarSlots[idx],
+        options: TOPBAR_SLOT_OPTIONS,
+        onUpdateModelValue: (val) => handleSlotMetricChange(idx, val),
+      })
+    );
+
+    const slotRows = [0, 1, 2].map((idx) => {
+      const upBtn = h(
+        'button',
+        {
+          type: 'button',
+          className: 'slot-move-btn',
+          disabled: idx === 0,
+          'aria-label': `槽位 ${idx + 1} 左移`,
+          title: idx === 0 ? '已在最左' : '上移 (在顶栏靠左)',
+          onClick: (e) => {
+            e.stopPropagation();
+            swapTopbarSlots(idx, idx - 1);
+          },
+        },
+        [createSvgIcon('chevron-up', { size: 12 })]
+      );
+
+      const downBtn = h(
+        'button',
+        {
+          type: 'button',
+          className: 'slot-move-btn',
+          disabled: idx === 2,
+          'aria-label': `槽位 ${idx + 1} 右移`,
+          title: idx === 2 ? '已在最右' : '下移 (在顶栏靠右)',
+          onClick: (e) => {
+            e.stopPropagation();
+            swapTopbarSlots(idx, idx + 1);
+          },
+        },
+        [createSvgIcon('chevron-down', { size: 12 })]
+      );
+
+      return h('div', { className: 'topbar-slot-row', 'data-slot-row': String(idx) }, [
+        h('span', { className: 'slot-index-badge', text: String(idx + 1) }),
+        slotSelects[idx].el,
+        h('span', { className: 'slot-order-btns' }, [upBtn, downBtn]),
+      ]);
+    });
+
+    const resetTopbarBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'btn-ghost-sm',
+        disabled: true,
+        onClick: async () => {
+          draftShowTopbarMulti = true;
+          draftTopbarSlots = [...DEFAULT_CLIENT_TOPBAR_SLOTS];
+          syncTopbarControls();
+          showTopbarFeedback('保存中…', 0);
+          try {
+            await saveSettingsPatch({
+              showTopbarMultiSession: true,
+              topbarCapsuleSlots: [...DEFAULT_CLIENT_TOPBAR_SLOTS],
+            });
+            showTopbarFeedback('已恢复默认', 1600);
+          } catch {
+            if (latestSettings) {
+              renderSettings(latestSettings);
+            }
+            showTopbarFeedback('保存失败', 2500);
+          }
+        },
+      },
+      [h('span', { text: '恢复默认' })]
+    );
+
+    function syncTopbarControls() {
+      multiSessionToggle.setValue(draftShowTopbarMulti ? 'show' : 'hide');
+      for (let i = 0; i < 3; i += 1) {
+        slotSelects[i].setValue(draftTopbarSlots[i]);
+      }
+      const isDefault =
+        draftShowTopbarMulti === true &&
+        draftTopbarSlots[0] === DEFAULT_CLIENT_TOPBAR_SLOTS[0] &&
+        draftTopbarSlots[1] === DEFAULT_CLIENT_TOPBAR_SLOTS[1] &&
+        draftTopbarSlots[2] === DEFAULT_CLIENT_TOPBAR_SLOTS[2];
+      patchAttr(resetTopbarBtn, 'disabled', isDefault);
+    }
+
+    const topbarPanel = h('section', { className: 'panel topbar-config-panel' }, [
+      h('div', { className: 'panel-header' }, [
+        h('span', { className: 'panel-title' }, [
+          createSvgIcon('dock', { size: 13 }),
+          h('span', { text: '顶部栏定制' }),
+        ]),
+        h('span', { className: 'topbar-header-right' }, [topbarStatusText, resetTopbarBtn]),
+      ]),
+      h('div', { className: 'settings-inline-row' }, [
+        h('span', { className: 'form-label', text: '实时运行会话' }),
+        multiSessionToggle.el,
+      ]),
+      h('div', { className: 'form-row' }, [
+        h('span', { className: 'form-label', text: '胶囊数值与顺序 (左 → 右)' }),
+        h('div', { className: 'topbar-slot-list' }, slotRows),
+      ]),
+    ]);
+
+    // --- 面板 3：版本更新面板 ---
+    const autoUpdateSelect = CustomSelect({
+      modelValue: 'manual',
+      icon: 'refresh',
+      options: AUTO_UPDATE_OPTIONS,
+      onUpdateModelValue: async (val) => {
+        const nextAuto = val === 'auto';
+        draftAutoUpdatePlugin = nextAuto;
+        autoUpdateSelect.setValue(nextAuto ? 'auto' : 'manual');
+        showCloudFeedback('保存中…', 0);
+        try {
+          await saveSettingsPatch({
+            autoUpdatePlugin: nextAuto,
+          });
+          showCloudFeedback('已保存', 1800);
+        } catch {
+          if (latestSettings) {
+            renderSettings(latestSettings);
+          }
+          showCloudFeedback('保存失败', 2500);
+        }
+      },
+    });
+
     const pricingCountVal = h('strong', { className: 'cell-value', text: '—' });
     const pricingSyncSub = h('span', { className: 'cell-sub', text: '读取中…' });
-    const versionVal = h('strong', { className: 'cell-value', text: 'v1.4.1' });
+    const versionVal = h('strong', { className: 'cell-value', text: 'v1.4.3' });
     const versionSub = h('span', { className: 'cell-sub', text: '检查中…' });
 
     const syncPricingBtnText = h('span', { text: '更新价格表' });
@@ -288,7 +450,7 @@ export const SettingsView = defineComponent({
                 return;
               }
               if (!cs?.updateAvailable) {
-                const curVer = cs?.currentPluginVersion || '1.4.1';
+                const curVer = cs?.currentPluginVersion || '1.4.3';
                 showCloudFeedback(`当前已是最新版本 (v${curVer})`, 4500);
                 return;
               }
@@ -342,38 +504,35 @@ export const SettingsView = defineComponent({
       h('div', { className: 'cloud-actions-row' }, [syncPricingBtn, updatePluginBtn]),
     ]);
 
-    const rootEl = h('div', { className: 'view-pane' }, [budgetPanel, cloudPanel]);
+    const settingsInner = h(
+      'div',
+      {
+        style: 'display: flex; flex-direction: column; gap: var(--space-3); padding-bottom: 2px;',
+      },
+      [generalPanel, topbarPanel, cloudPanel]
+    );
+    const viewScrollbar = CustomScrollbar({
+      contentEl: settingsInner,
+      className: 'view-pane',
+    });
 
     let latestSettings = null;
     let latestCloudStatus = null;
-    let isDirty = false;
-
-    /** 生成设置项签名，避免轮询返回相同配置时覆盖用户正在编辑的草稿值 */
-    function settingsSig(s) {
-      if (!s) return '';
-      return `${s.weeklyLimitMode}:${s.weeklyTokenBudget}:${s.weeklyCostBudget}:${Boolean(s.showUpstreamModel)}:${Boolean(s.autoUpdatePlugin)}`;
-    }
 
     /** 将后端返回的最新设置同步至表单控件 */
     function renderSettings(settings) {
       if (!settings) return;
-      const nextSig = settingsSig(settings);
-      if (nextSig === lastSyncedSettingsSig) return;
-      lastSyncedSettingsSig = nextSig;
-      draftMode =
-        settings.weeklyLimitMode === 'custom_tokens' ||
-        settings.weeklyLimitMode === 'custom_cost'
-          ? settings.weeklyLimitMode
-          : 'official';
-      draftTokens = Number(settings.weeklyTokenBudget || 150000000);
-      draftCost = Number(settings.weeklyCostBudget || 100);
       draftShowUpstreamModel = Boolean(settings.showUpstreamModel);
       draftAutoUpdatePlugin = Boolean(settings.autoUpdatePlugin);
-      modeSelect.setValue(draftMode);
+      draftEnableWindowOverlay = settings.enableWindowOverlay !== false;
+      draftShowTopbarMulti = settings.showTopbarMultiSession !== false;
+      draftTopbarSlots = normalizeClientTopbarSlots(settings.topbarCapsuleSlots);
+
+      windowMountSelect.setValue(draftEnableWindowOverlay ? 'dual' : 'sidebar');
       stepModelSelect.setValue(draftShowUpstreamModel ? 'upstream' : 'short');
       autoUpdateSelect.setValue(draftAutoUpdatePlugin ? 'auto' : 'manual');
-      tokenBudgetInput.setValue(draftTokens);
-      costBudgetInput.setValue(draftCost);
+      syncTopbarControls();
+      viewScrollbar.refresh();
     }
 
     /** 将云端价格表统计与插件版本对比状态同步至云端面板 */
@@ -391,7 +550,7 @@ export const SettingsView = defineComponent({
         `${srcLabel} · ${formatSyncTimeText(cs.lastSyncedAtMs, cs.catalogUpdatedAt)}`
       );
 
-      const curVer = cs.currentPluginVersion || '1.4.1';
+      const curVer = cs.currentPluginVersion || '1.4.3';
       const latVer = cs.latestPluginVersion || curVer;
       const modeTag = cs.installMode === 'git' ? 'Git' : 'ZIP';
       patchText(versionVal, `v${curVer}`);
@@ -410,6 +569,7 @@ export const SettingsView = defineComponent({
       if (!cloudTimer && (cs.lastUpdateError || (cs.lastUpdateResult?.ok === false && cs.lastUpdateResult?.message))) {
         showCloudFeedback(cs.lastUpdateError || cs.lastUpdateResult.message, 5500);
       }
+      viewScrollbar.refresh();
     }
 
     const unsub = telemetryStore.subscribe(
@@ -420,42 +580,51 @@ export const SettingsView = defineComponent({
       (slice) => {
         latestSettings = slice.settings;
         latestCloudStatus = slice.cloudStatus;
-        if (uiStore.getState().activeView !== 'settings') {
-          isDirty = true;
-          return;
-        }
-        isDirty = false;
         renderSettings(slice.settings);
-        renderCloudStatus(slice.cloudStatus);
+        if (uiStore.getState().activeView === 'settings') {
+          renderCloudStatus(slice.cloudStatus);
+        }
       }
     );
 
     const unsubView = uiStore.subscribe(
       (st) => st.activeView,
       (activeView) => {
-        if (activeView === 'settings' && isDirty) {
-          isDirty = false;
+        if (activeView === 'settings') {
           if (latestSettings) renderSettings(latestSettings);
           if (latestCloudStatus) renderCloudStatus(latestCloudStatus);
+          viewScrollbar.refresh();
         }
       }
     );
 
     onCleanup(() => {
       if (statusTimer) clearTimeout(statusTimer);
+      if (topbarTimer) clearTimeout(topbarTimer);
       if (cloudTimer) clearTimeout(cloudTimer);
       unsub();
       unsubView();
-      modeSelect.destroy();
+      windowMountSelect.destroy();
       stepModelSelect.destroy();
+      multiSessionToggle.destroy();
+      for (const sel of slotSelects) {
+        sel.destroy();
+      }
       autoUpdateSelect.destroy();
-      tokenBudgetInput.destroy();
-      costBudgetInput.destroy();
+      viewScrollbar.destroy();
     });
 
     return {
-      el: rootEl,
-      refs: { modeSelect, stepModelSelect, autoUpdateSelect, tokenBudgetInput, costBudgetInput },
+      el: viewScrollbar.el,
+      refs: {
+        windowMountSelect,
+        stepModelSelect,
+        multiSessionToggle,
+        slotSelects,
+        resetTopbarBtn,
+        autoUpdateSelect,
+        viewScrollbar,
+      },
     };
   },
 });

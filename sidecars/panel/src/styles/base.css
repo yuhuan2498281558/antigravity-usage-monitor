@@ -40,6 +40,11 @@ button,
 input {
   font-family: inherit;
   font-size: inherit;
+  font-stretch: inherit;
+  font-variation-settings: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  font-variant-numeric: inherit;
   color: inherit;
 }
 

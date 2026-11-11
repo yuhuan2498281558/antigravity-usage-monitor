@@ -113,22 +113,64 @@ export const TopSessionHeader = defineComponent({
         lastActiveCascadeId = currentCascadeId;
       }
 
+      const actConv = telemetry?.activeConversation;
       const convs = telemetry?.conversations || [];
-      const latestTitle = convs[0]?.title ? `最新 (${convs[0].title})` : '跟随最新会话';
+      const hostRouteId = telSt.hostRouteConversationId || '';
+      const hostMatchedConv = hostRouteId
+        ? convs.find((c) => c.cascadeId === hostRouteId) ||
+          (actConv?.cascadeId === hostRouteId ? actConv : null)
+        : null;
+      const defaultOptLabel = hostRouteId
+        ? hostMatchedConv?.title
+          ? `当前窗口 (${hostMatchedConv.title})`
+          : `当前窗口 (${hostRouteId.slice(0, 8)})`
+        : convs[0]?.title
+          ? `最新 (${convs[0].title})`
+          : '跟随最新会话';
+      const defaultOptMeta = hostRouteId
+        ? hostMatchedConv
+          ? formatConvOptionMeta({
+              stepCount: hostMatchedConv.stepCount,
+              subagentCount: hostMatchedConv.subagentCount,
+              totalStepCount: hostMatchedConv.totalStepCount ?? hostMatchedConv.totalStepsAllAgents,
+            })
+          : ''
+        : convs[0]
+          ? formatConvOptionMeta(convs[0])
+          : '';
       const options = [
-        { value: '', label: latestTitle, meta: convs[0] ? formatConvOptionMeta(convs[0]) : '' },
+        { value: '', label: defaultOptLabel, meta: defaultOptMeta },
         ...convs.map((c) => ({
           value: c.cascadeId,
           label: c.title || c.cascadeId.slice(0, 8),
           meta: formatConvOptionMeta(c),
         })),
       ];
+      const lockedId = telSt.selectedConversationId;
+      if (lockedId && !convs.some((c) => c.cascadeId === lockedId)) {
+        const isLoadedLocked = actConv?.cascadeId === lockedId;
+        const lockedTitle =
+          isLoadedLocked && actConv?.title
+            ? actConv.title
+            : `已锁定会话 (${String(lockedId).slice(0, 8)})`;
+        const lockedMeta = isLoadedLocked
+          ? formatConvOptionMeta({
+              stepCount: actConv.stepCount,
+              subagentCount: actConv.subagentCount,
+              totalStepCount: actConv.totalStepsAllAgents,
+            })
+          : '已锁定';
+        options.splice(1, 0, {
+          value: lockedId,
+          label: lockedTitle,
+          meta: lockedMeta,
+        });
+      }
       convSelect.setProps({
         modelValue: telSt.selectedConversationId,
         options,
       });
 
-      const actConv = telemetry?.activeConversation;
       const hasSubagents = Boolean(actConv?.hasSubagents || (actConv?.subagentCount || 0) > 0);
       const aggregated = actConv?.aggregated;
 
@@ -211,6 +253,7 @@ export const TopSessionHeader = defineComponent({
     const unsubTelemetry = telemetryStore.subscribe(
       (st) => ({
         selectedConversationId: st.selectedConversationId,
+        hostRouteConversationId: st.hostRouteConversationId,
         syncState: st.syncState,
         telemetry: st.telemetry,
       }),

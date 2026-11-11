@@ -6,7 +6,7 @@
 const pendingJobs = new Set();
 let isFlushPending = false;
 
-export function scheduleAsyncJob(job) {
+function scheduleAsyncJob(job) {
   pendingJobs.add(job);
   if (!isFlushPending) {
     isFlushPending = true;
@@ -14,7 +14,7 @@ export function scheduleAsyncJob(job) {
   }
 }
 
-export function flushAsyncJobs() {
+function flushAsyncJobs() {
   isFlushPending = false;
   const jobs = Array.from(pendingJobs);
   pendingJobs.clear();
@@ -23,7 +23,7 @@ export function flushAsyncJobs() {
   }
 }
 
-export function isShallowEqual(a, b) {
+function isShallowEqual(a, b) {
   if (Object.is(a, b)) return true;
   if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) {
     return false;
@@ -55,6 +55,19 @@ export function createReactiveStore(initialState) {
     return state;
   }
 
+  function notifyAll() {
+    for (const sub of Array.from(subscribers)) {
+      if (!subscribers.has(sub)) continue;
+      const nextSlice = sub.selector(state);
+      const equal = sub.compare(sub.lastSlice, nextSlice);
+      if (!equal) {
+        const prevSlice = sub.lastSlice;
+        sub.lastSlice = nextSlice;
+        sub.listener(nextSlice, prevSlice);
+      }
+    }
+  }
+
   function setState(patchOrUpdater, { sync = false } = {}) {
     const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(state) : patchOrUpdater;
     if (!patch || typeof patch !== 'object') return;
@@ -71,18 +84,6 @@ export function createReactiveStore(initialState) {
       return;
     }
     state = nextState;
-
-    const notifyAll = () => {
-      for (const sub of subscribers) {
-        const nextSlice = sub.selector(state);
-        const equal = sub.compare(sub.lastSlice, nextSlice);
-        if (!equal) {
-          const prevSlice = sub.lastSlice;
-          sub.lastSlice = nextSlice;
-          sub.listener(nextSlice, prevSlice);
-        }
-      }
-    };
 
     if (sync) {
       notifyAll();

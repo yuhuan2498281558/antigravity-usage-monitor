@@ -1,16 +1,14 @@
 /**
  * @fileoverview 遥测载荷组装器与并发请求合并入口。
  *
- * 将原来超过 1,000 行的 `buildTelemetryPayloadInternal` 拆解为清晰的子阶段：
- * 1. 拉取用户状态、轨迹摘要与官方实时配额摘要（含账号切换自动穿透缓存）；
+ * 将遥测构建拆解为清晰的子阶段：
+ * 1. 拉取用户状态、轨迹摘要与官方实时配额摘要（含账号切换缓存校验）；
  * 2. 调用 `buildOfficialQuotaPools` 构建动态模型映射与多模型配额池；
  * 3. 调用 `enumerateAndSyncConversations` 枚举会话并增量更新轨迹缓存；
- * 4. 调用 `enrichActiveConversationSteps` 与 `extractActiveContextTelemetry` 计算当前活跃会话指标与上下文拆解；
- * 5. 调用 `aggregateMultiWindowUsage` 完成全量多窗口聚合，并组装最终前端遥测 JSON。
+ * 4. 调用 `enrichActiveConversationSteps` 与 `extractActiveContextTelemetry` 计算当前活跃会话指标与 10 通道上下文拆解；
+ * 5. 调用 `aggregateMultiWindowUsage` 完成全量多窗口聚合，并组装精简的前端遥测 JSON。
  */
 
-import { statSync } from 'node:fs';
-import { join } from 'node:path';
 import {
   extractLiveActivity,
   parseIsoMs,
@@ -19,7 +17,7 @@ import {
   summarizeTtft,
 } from '../speed-metrics.mjs';
 import {
-  HERE,
+  computeRuntimeCodeVersion,
   inFlightRequests,
   loadSettings,
   quotaSummaryCache,
@@ -27,7 +25,7 @@ import {
   trajectoryCache,
 } from './config.mjs';
 import { enumerateAndSyncConversations } from './local-scanner.mjs';
-import { callLsRpc, diagnostics, getOfficialQuotaSummary } from './ls-rpc.mjs';
+import { callLsRpc, getOfficialQuotaSummary } from './ls-rpc.mjs';
 import {
   computeStepCost,
   isArgonModelIdentifier,
@@ -43,6 +41,22 @@ import {
 } from './usage-aggregator.mjs';
 
 const MAX_RECENT_CONVERSATIONS = 30;
+const POOL_PRIORITY_ORDER = ['Gemini', 'Argon', 'Carbon', 'Claude & GPT'];
+
+function roundSessionCost(val) {
+  if (!Number.isFinite(val) || val <= 0) return 0;
+  return val < 0.01 ? +val.toFixed(4) : +val.toFixed(2);
+}
+
+function findTrajectoryCacheEntry(cascadeId) {
+  if (!cascadeId) return null;
+  if (trajectoryCache[cascadeId]) return trajectoryCache[cascadeId];
+  const targetLower = String(cascadeId).toLowerCase();
+  for (const [k, v] of Object.entries(trajectoryCache)) {
+    if (k.toLowerCase() === targetLower) return v;
+  }
+  return null;
+}
 
 /**
  * 构建全局 `modelKey -> responseModel` 已知映射表（单次轮询仅扫描一次 `trajectoryCache`）。
@@ -62,15 +76,16 @@ function buildKnownUpstreamModelMap() {
 }
 
 /**
- * 为当前活跃会话的步骤补充模型标签、上游响应模型、单步费用、缓存命中率与生成速率指标。
+ * 为当前活跃会话的步骤补充模型标签、上游响应模型、单步费用、缓存命中率与生成速率指标，
+ * 并剔除前端未使用的冗余诊断字段以减小 JSON 体积。
  *
  * @param {object[]} activeSteps 当前会话的原始缓存步骤
- * @param {Map<string, object>} dynamicModelMap 动态模型字典
+ * @param {Map<string, object>} [dynamicModelMap=new Map()] 动态模型字典
  * @param {Map<string, string>} [sharedUpstreamMap=null] 预先构建的已知上游模型映射表
  */
-export function enrichActiveConversationSteps(
+function enrichActiveConversationSteps(
   activeSteps,
-  dynamicModelMap,
+  dynamicModelMap = new Map(),
   sharedUpstreamMap = null
 ) {
   const sessionSpeed = summarizeSpeed(activeSteps);
@@ -80,7 +95,6 @@ export function enrichActiveConversationSteps(
   let sessionInputTokens = 0;
   let sessionCacheReadTokens = 0;
 
-  // 记录已知的 modelKey -> 最近观测到的上游 responseModel，避免正在生成的步骤因尚未收到 generatorMetadata 而闪烁
   const knownUpstreamByModelKey = sharedUpstreamMap || buildKnownUpstreamModelMap();
   for (const s of activeSteps) {
     if (s?.modelKey && s.modelKey !== 'unknown' && s.responseModel) {
@@ -123,8 +137,15 @@ export function enrichActiveConversationSteps(
       (mInfo.modelId && mInfo.modelId !== 'unknown' ? mInfo.modelId : mInfo.shortName);
     const modelUpstream = st.isCompactionStep ? `${rawUpstreamModel}·压缩` : rawUpstreamModel;
 
+    const {
+      viewableDelaySec: _viewableDelaySec,
+      ttftSource: _ttftSource,
+      speedBasis: _speedBasis,
+      ...serializedStep
+    } = st;
+
     return {
-      ...st,
+      ...serializedStep,
       responseModel: st.responseModel || '',
       modelUpstream,
       modelLabel: st.isCompactionStep ? `${mInfo.label} [自动压缩]` : mInfo.label,
@@ -160,22 +181,25 @@ export function enrichActiveConversationSteps(
 }
 
 /**
- * 从当前活跃会话的最新步骤提取上下文 6 维拆解、自动压缩水位与缓存命中率。
+ * 从当前活跃会话的最新步骤提取上下文 10 通道拆解、自动压缩水位与缓存命中率。
  *
  * @param {object[]} enrichedActiveSteps
  * @param {object|null} latestEnriched
  * @param {number} sessionInputTokens
  * @param {number} sessionCacheReadTokens
  */
-export function extractActiveContextTelemetry(
+function extractActiveContextTelemetry(
   enrichedActiveSteps,
   latestEnriched,
   sessionInputTokens,
   sessionCacheReadTokens
 ) {
   let latestBreakdown = latestEnriched?.contextBreakdown || null;
-  if (!latestBreakdown) {
+  if (!latestBreakdown && !latestEnriched?.isCompactionStep) {
     for (let i = enrichedActiveSteps.length - 1; i >= 0; i--) {
+      if (enrichedActiveSteps[i]?.isCompactionStep) {
+        break;
+      }
       if (enrichedActiveSteps[i]?.contextBreakdown) {
         latestBreakdown = enrichedActiveSteps[i].contextBreakdown;
         break;
@@ -221,10 +245,10 @@ export function extractActiveContextTelemetry(
 
   const latestPromptTokens = ctxCached + ctxFreshInput;
   const latestCacheHitPct =
-    latestPromptTokens > 0 ? Math.round((ctxCached / latestPromptTokens) * 100) : 0;
+    latestPromptTokens > 0 ? +((ctxCached / latestPromptTokens) * 100).toFixed(1) : 0;
   const sessionPromptTokens = sessionCacheReadTokens + sessionInputTokens;
   const sessionCacheHitPct =
-    sessionPromptTokens > 0 ? Math.round((sessionCacheReadTokens / sessionPromptTokens) * 100) : 0;
+    sessionPromptTokens > 0 ? +((sessionCacheReadTokens / sessionPromptTokens) * 100).toFixed(1) : 0;
 
   return {
     latestCacheHitPct,
@@ -256,7 +280,7 @@ export function extractActiveContextTelemetry(
 }
 
 /**
- * 构建单个代理（主代理或子代理）的标准遥测单元对象，消除主/子代理 25 字段重复组装。
+ * 构建单个代理（主代理或子代理）的标准遥测单元对象。
  */
 function buildAgentUnitTelemetry({
   agentId,
@@ -330,12 +354,16 @@ function buildAgentUnitTelemetry({
       speedSummary: enrichedRes.sessionSpeed,
       ttftSummary: enrichedRes.sessionTtft,
       latestStepCostUsd: enrichedRes.latestEnriched?.costUsd ?? null,
-      sessionCostUsd: +enrichedRes.sessionCostUsd.toFixed(2),
+      sessionCostUsd: roundSessionCost(enrichedRes.sessionCostUsd),
       sessionUnpricedCalls: enrichedRes.sessionUnpricedCalls,
       latestCacheHitPct: ctxRes.latestCacheHitPct,
       sessionCacheHitPct: ctxRes.sessionCacheHitPct,
       activeModelShort: enrichedRes.latestEnriched?.modelShort || '模型未知',
       activeModelLabel: enrichedRes.latestEnriched?.modelLabel || '模型未知',
+      activeModelUpstream:
+        enrichedRes.latestEnriched?.modelUpstream ||
+        enrichedRes.latestEnriched?.modelShort ||
+        '模型未知',
       context: ctxRes.context,
       ...(includeRecentSteps ? { recentSteps: taggedSteps.slice().reverse() } : {}),
       modelBreakdown,
@@ -348,7 +376,7 @@ function buildAgentUnitTelemetry({
  * 构建完整的前端遥测载荷（核心内部实现，直接供单元测试沙箱调用）。
  *
  * @param {string} requestedConvId 请求指定的会话 ID（为空时自动选定最近活跃会话）
- * @param {boolean} [forceQuotaRefresh=false] 是否强制穿透官方配额 10 秒缓存
+ * @param {boolean} [forceQuotaRefresh=false] 是否强制穿透官方配额缓存与失败退避
  * @param {{ range?: string, startMs?: number, endMs?: number }} [filterOpts={}] 时间范围筛选选项
  * @returns {Promise<object>}
  */
@@ -368,17 +396,24 @@ export async function buildTelemetryPayloadInternal(
   const currentAccountName = userStatus?.email || userStatus?.name || '';
   let officialQuotaInfo = initialOfficialQuotaInfo;
 
-  // 若检测到登录账号在 10 秒缓存期内发生切换，先清空旧账号配额缓存再立即强制刷新，防止刷新失败时串号
+  // 若检测到账号发生切换：仅当并发的 initialOfficialQuotaInfo 命中了旧账号本地缓存 (fromCache === true) 时才需清空并重刷；
+  // 若本轮已经实时穿透请求了上游 RPC (fromCache === false)，直接更新归属账号即可，避免二次重复 RPC
   const accountChanged = Boolean(
     currentAccountName &&
       quotaSummaryCache.accountName &&
       quotaSummaryCache.accountName !== currentAccountName
   );
   if (accountChanged) {
-    quotaSummaryCache.data = null;
-    quotaSummaryCache.ts = 0;
-    quotaSummaryCache.accountName = currentAccountName;
-    officialQuotaInfo = await getOfficialQuotaSummary(true);
+    if (initialOfficialQuotaInfo?.fromCache) {
+      quotaSummaryCache.data = null;
+      quotaSummaryCache.ts = 0;
+      quotaSummaryCache.lastAttemptTs = 0;
+      quotaSummaryCache.error = null;
+      quotaSummaryCache.accountName = currentAccountName;
+      officialQuotaInfo = await getOfficialQuotaSummary(true);
+    } else {
+      quotaSummaryCache.accountName = currentAccountName;
+    }
   } else if (currentAccountName && officialQuotaInfo?.data && !officialQuotaInfo.refreshFailed) {
     quotaSummaryCache.accountName = currentAccountName;
   }
@@ -387,7 +422,7 @@ export async function buildTelemetryPayloadInternal(
   const clientConfigs = userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
 
   // 1. 构建官方实时配额池与动态模型目录
-  const { dynamicModelMap, quotaPoolsMap, modelQuotas } = buildOfficialQuotaPools(
+  const { dynamicModelMap, quotaPoolsMap } = buildOfficialQuotaPools(
     officialQuota,
     clientConfigs
   );
@@ -398,11 +433,12 @@ export async function buildTelemetryPayloadInternal(
       summariesObj: allTrajRes?.trajectorySummaries || {},
       currentAccountName,
       requestedConvId,
+      forceRefresh: forceQuotaRefresh,
     });
 
-  // 3. 计算当前活跃根会话及其子代理的步骤指标、6 通道上下文拆解与按模型汇总
+  // 3. 计算当前活跃根会话及其子代理的步骤指标、10 通道上下文拆解与按模型汇总
   const knownUpstreamByModelKey = buildKnownUpstreamModelMap();
-  const activeEntry = activeCascadeId ? trajectoryCache[activeCascadeId] : null;
+  const activeEntry = findTrajectoryCacheEntry(activeCascadeId);
   const activeSteps = activeEntry?.steps || [];
   const mainUnit = buildAgentUnitTelemetry({
     agentId: 'main',
@@ -420,7 +456,6 @@ export async function buildTelemetryPayloadInternal(
     fallbackLastModMs: activeConvSummary?.lastModifiedMs || activeEntry?.lastModifiedMs || 0,
     dynamicModelMap,
     knownUpstreamByModelKey,
-    // 主代理步骤通过 activeConversation.recentSteps 下发一次，避免 JSON 重复序列化
     includeRecentSteps: false,
   });
 
@@ -452,7 +487,7 @@ export async function buildTelemetryPayloadInternal(
     const subSum = subagentSummaries[idx];
     const subCid = subSum.cascadeId;
     activeFamilyCascadeIds.add(String(subCid || '').toLowerCase());
-    const subEntry = trajectoryCache[subCid] || null;
+    const subEntry = findTrajectoryCacheEntry(subCid);
     const subRawSteps = subEntry?.steps || [];
     allCombinedRawSteps.push(...subRawSteps);
 
@@ -520,7 +555,6 @@ export async function buildTelemetryPayloadInternal(
         .sort((a, b) => (b.lastModifiedMs || 0) - (a.lastModifiedMs || 0))[0] ||
       mainAgentTelemetry;
 
-    // 若刚启动的子代理尚无已完成步骤 (stepCount === 0)，实时速率与上下文回退取最近有步骤的代理，避免闪现空白
     const agentsWithSteps = allAgents.filter((a) => a.stepCount > 0);
     const latestMetricAgent =
       latestActiveAgent.stepCount > 0
@@ -531,7 +565,7 @@ export async function buildTelemetryPayloadInternal(
             .sort((a, b) => (b.lastModifiedMs || 0) - (a.lastModifiedMs || 0))[0] ||
           latestActiveAgent;
 
-    const totalCostUsd = +totalRawSessionCostUsd.toFixed(2);
+    const totalCostUsd = roundSessionCost(totalRawSessionCostUsd);
     const totalUnpricedCalls = allAgents.reduce(
       (sum, a) => sum + (a.sessionUnpricedCalls || 0),
       0
@@ -539,7 +573,7 @@ export async function buildTelemetryPayloadInternal(
     const totalFamilyPromptTokens = totalFamilyInputTokens + totalFamilyCacheReadTokens;
     const combinedSessionCacheHitPct =
       totalFamilyPromptTokens > 0
-        ? Math.round((totalFamilyCacheReadTokens / totalFamilyPromptTokens) * 100)
+        ? +((totalFamilyCacheReadTokens / totalFamilyPromptTokens) * 100).toFixed(1)
         : 0;
 
     const runningSubs = subAgentTelemetries.filter((a) => a.isRunning);
@@ -591,18 +625,22 @@ export async function buildTelemetryPayloadInternal(
       sessionCacheHitPct: combinedSessionCacheHitPct,
       activeModelShort: latestMetricAgent.activeModelShort,
       activeModelLabel: latestMetricAgent.activeModelLabel,
+      activeModelUpstream: latestMetricAgent.activeModelUpstream,
       context: latestMetricAgent.context,
       modelBreakdown: combinedModelBreakdown,
       lastModifiedMs: latestActiveAgent.lastModifiedMs,
     };
   }
 
-  // 4. 识别当前活跃会话家族绑定的模型池及其官方 5h / 周限重置锚点
+  // 4. 识别当前活跃会话家族绑定的模型池（与 quota-pools.mjs 保持一致，将 Other 第三方模型归入 Claude & GPT）
   const latestFamilyStep =
     allCombinedEnrichedSteps.length > 0
       ? allCombinedEnrichedSteps[allCombinedEnrichedSteps.length - 1]
       : latestEnriched;
-  const latestIsCarbon = latestFamilyStep
+  const hasResolvedStepModel = Boolean(
+    latestFamilyStep && latestFamilyStep.modelKey && latestFamilyStep.modelKey !== 'unknown'
+  );
+  const latestIsCarbon = hasResolvedStepModel
     ? isCarbonModelIdentifier(
         latestFamilyStep.modelKey,
         latestFamilyStep.responseModel,
@@ -610,7 +648,7 @@ export async function buildTelemetryPayloadInternal(
         latestFamilyStep.modelLabel
       )
     : false;
-  const latestIsArgon = latestFamilyStep
+  const latestIsArgon = hasResolvedStepModel
     ? isArgonModelIdentifier(
         latestFamilyStep.modelKey,
         latestFamilyStep.responseModel,
@@ -619,14 +657,15 @@ export async function buildTelemetryPayloadInternal(
       )
     : false;
   const rawActiveFamily = latestFamilyStep?.family || 'Other';
-  const activePoolKey =
-    latestIsCarbon && quotaPoolsMap.has('Carbon')
+  const activePoolKey = !hasResolvedStepModel
+    ? 'Unknown'
+    : latestIsCarbon && quotaPoolsMap.has('Carbon')
       ? 'Carbon'
       : latestIsArgon && quotaPoolsMap.has('Argon')
         ? 'Argon'
         : rawActiveFamily === 'Gemini'
           ? 'Gemini'
-          : ['Claude', 'GPT'].includes(rawActiveFamily)
+          : ['Claude', 'GPT', 'Other'].includes(rawActiveFamily)
             ? 'Claude & GPT'
             : 'Unknown';
   const matchedActivePool = quotaPoolsMap.get(activePoolKey) || null;
@@ -646,12 +685,27 @@ export async function buildTelemetryPayloadInternal(
         resetTime: matchedActivePool.weeklyResetTime,
       }
     : null;
+
+  // 全局账号周期锚点采用稳定的配额池优先级（Gemini -> Argon -> Carbon -> Claude & GPT），
+  // 防止切换不同会话时全局消费统计（consumption.presets.week / 5h）因重置时间偏移而突变
+  let accountFiveHourResetMs = 0;
+  let accountWeeklyResetMs = 0;
+  for (const pk of POOL_PRIORITY_ORDER) {
+    const pool = quotaPoolsMap.get(pk);
+    if (!pool) continue;
+    if (!accountFiveHourResetMs && pool.resetTime) {
+      accountFiveHourResetMs = parseIsoMs(pool.resetTime);
+    }
+    if (!accountWeeklyResetMs && pool.weeklyResetTime) {
+      accountWeeklyResetMs = parseIsoMs(pool.weeklyResetTime);
+    }
+  }
   const cycleAnchors = {
-    fiveHourResetMs: parseIsoMs(activeLive5h?.resetTime),
-    weeklyResetMs: parseIsoMs(activeLiveWeekly?.resetTime),
+    fiveHourResetMs: accountFiveHourResetMs || parseIsoMs(activeLive5h?.resetTime),
+    weeklyResetMs: accountWeeklyResetMs || parseIsoMs(activeLiveWeekly?.resetTime),
   };
 
-  // 5. 多时间窗口聚合（预设窗口 + 当前选定窗口 + 12 段趋势 + 月序列 + 来源与模型拆解）
+  // 5. 多时间窗口聚合（预设窗口 + 当前选定窗口 + 趋势 + 月序列 + 来源与模型拆解）
   const {
     selectedWindow,
     trendStartMs,
@@ -663,7 +717,6 @@ export async function buildTelemetryPayloadInternal(
     sourcesBreakdown,
     currentYear,
     monthlySeries,
-    todayBucket,
     weekBucket,
     modelBreakdown,
   } = aggregateMultiWindowUsage({
@@ -707,7 +760,7 @@ export async function buildTelemetryPayloadInternal(
   };
 
   const fallbackWeeklyPct =
-    settings.weeklyLimitMode === 'custom_cost' || settings.weeklyLimitMode === 'cost'
+    settings.weeklyLimitMode === 'custom_cost'
       ? weekBucket.unpricedCalls > 0
         ? null
         : Math.min(
@@ -739,18 +792,132 @@ export async function buildTelemetryPayloadInternal(
       ? Math.max(0, Math.floor(100 - fallbackWeeklyPct))
       : null;
 
-  // 提取真实的 Google One AI Credits（忽略旧版硬编码的 500 prompt credits）
   const g1CreditEntry = (userStatus?.userTier?.availableCredits || []).find(
     (c) => c?.creditType === 'GOOGLE_ONE_AI'
   );
   const realAiCredits = Number(g1CreditEntry?.creditAmount || 0);
+  const uiBundleVersion = computeRuntimeCodeVersion();
 
-  let uiBundleVersion = 0;
-  try {
-    uiBundleVersion = statSync(join(HERE, 'app.js')).mtimeMs || 0;
-  } catch {
-    // 忽略 stat 异常
-  }
+  const rawTierName = userStatus?.userTier?.name || '';
+  const inferredPlanFallback = /\bfree\b/i.test(rawTierName)
+    ? 'Free'
+    : /\bultra\b/i.test(rawTierName)
+      ? 'Ultra'
+      : 'Pro';
+  const resolvedPlanName = userStatus?.planStatus?.planInfo?.planName || inferredPlanFallback;
+
+  // 预计算近期会话与运行中会话的轻量缓存速览指标（零额外 RPC 开销）
+  const quickStatsMemo = new Map();
+  const getConversationQuickStats = (rootConv) => {
+    const cidKey = String(rootConv?.cascadeId || '').toLowerCase();
+    if (cidKey && quickStatsMemo.has(cidKey)) {
+      return quickStatsMemo.get(cidKey);
+    }
+    const rootEntry = findTrajectoryCacheEntry(rootConv?.cascadeId);
+    const rootSteps = rootEntry?.steps || [];
+    const rawSubs = Array.isArray(rootConv?.subagents) ? rootConv.subagents : [];
+
+    let totalCost = 0;
+    let unpricedCalls = 0;
+    const accumulateStepsCost = (steps) => {
+      for (const st of steps) {
+        const mInfo = resolveModelInfo(
+          st.modelKey,
+          dynamicModelMap,
+          st.apiProvider,
+          st.modelDisplayName,
+          st.responseModel
+        );
+        const c = computeStepCost(st, mInfo.pricing);
+        if (c === null) unpricedCalls += 1;
+        else totalCost += c;
+      }
+    };
+    accumulateStepsCost(rootSteps);
+
+    const lastRootStep = rootSteps.length > 0 ? rootSteps[rootSteps.length - 1] : null;
+    let bestMetricStep = lastRootStep;
+    let bestMetricRunning = rootConv?.status === 'CASCADE_RUN_STATUS_RUNNING' && Boolean(lastRootStep);
+
+    for (const subSum of rawSubs) {
+      const subEntry = findTrajectoryCacheEntry(subSum?.cascadeId);
+      const subSteps = subEntry?.steps || [];
+      if (subSteps.length === 0) continue;
+      accumulateStepsCost(subSteps);
+      const lastSub = subSteps[subSteps.length - 1];
+      const subRunning = subSum?.status === 'CASCADE_RUN_STATUS_RUNNING';
+      if (
+        !bestMetricStep ||
+        (subRunning && !bestMetricRunning) ||
+        (subRunning === bestMetricRunning &&
+          (lastSub.createdAtMs || 0) >= (bestMetricStep.createdAtMs || 0))
+      ) {
+        bestMetricStep = lastSub;
+        bestMetricRunning = subRunning;
+      }
+    }
+
+    let contextUsedPct = null;
+    if (lastRootStep) {
+      const limitTokens = Number(lastRootStep.maxContextBudgetTokens || 256000);
+      const cb = lastRootStep.contextBreakdown;
+      const cbTotal = cb
+        ? Number(cb.messagesTokens || 0) +
+          Number(cb.systemToolsTokens || 0) +
+          Number(cb.mcpToolsTokens || 0) +
+          Number(cb.skillsTokens || 0) +
+          Number(cb.systemPromptTokens || 0) +
+          Number(cb.userRulesTokens || 0)
+        : 0;
+      const fallbackTotal =
+        Number(lastRootStep.inputTokens || 0) +
+        Number(lastRootStep.cacheReadTokens || 0) +
+        Number(lastRootStep.thinkingTokens || 0) +
+        Number(lastRootStep.responseTokens || 0);
+      const usedTokens = Number(
+        cbTotal > 0 ? cbTotal : lastRootStep.estimatedContextTokens || fallbackTotal
+      );
+      contextUsedPct =
+        limitTokens > 0 ? Math.min(100, +((usedTokens / limitTokens) * 100).toFixed(1)) : 0;
+    }
+
+    let modelShort = '';
+    let modelUpstream = '';
+    let latestTokPerSec = null;
+    if (bestMetricStep) {
+      const mInfo = resolveModelInfo(
+        bestMetricStep.modelKey,
+        dynamicModelMap,
+        bestMetricStep.apiProvider,
+        bestMetricStep.modelDisplayName,
+        bestMetricStep.responseModel
+      );
+      const resolvedResp =
+        bestMetricStep.responseModel ||
+        (bestMetricStep.modelKey && bestMetricStep.modelKey !== 'unknown'
+          ? knownUpstreamByModelKey.get(bestMetricStep.modelKey) || ''
+          : '');
+      modelShort = mInfo.shortName || '';
+      modelUpstream =
+        resolvedResp ||
+        (mInfo.modelId && mInfo.modelId !== 'unknown' ? mInfo.modelId : mInfo.shortName) ||
+        '';
+      latestTokPerSec = roundMetric(speedMetric(bestMetricStep).value);
+    }
+
+    const stats = {
+      modelShort,
+      modelUpstream,
+      latestTokPerSec,
+      contextUsedPct,
+      sessionCostUsd: roundSessionCost(totalCost),
+      sessionUnpricedCalls: unpricedCalls,
+    };
+    if (cidKey) {
+      quickStatsMemo.set(cidKey, stats);
+    }
+    return stats;
+  };
 
   // 7. 构建所有正在运行的主进程（根会话）及其子代理缩略状态列表
   const runningConversations = [];
@@ -762,13 +929,13 @@ export async function buildTelemetryPayloadInternal(
       continue;
     }
 
-    const rootEntry = trajectoryCache[rootConv.cascadeId] || null;
+    const rootEntry = findTrajectoryCacheEntry(rootConv.cascadeId);
     const rootFallbackMs =
       rootConv.lastModifiedMs || rootEntry?.lastModifiedMs || rootConv.createdTimeMs || 0;
 
     const subItems = rawSubs.map((subSum, idx) => {
       const subCid = subSum.cascadeId;
-      const subEntry = trajectoryCache[subCid] || null;
+      const subEntry = findTrajectoryCacheEntry(subCid);
       const subSpec = subSum.subagentSpec || subEntry?.subagentSpec || null;
       const rawRole =
         subSpec?.role ||
@@ -812,7 +979,6 @@ export async function buildTelemetryPayloadInternal(
       ? rootConv.liveActivity || extractLiveActivity([], true, rootFallbackMs)
       : null;
 
-    // 若主代理正在调用 invoke_subagent 但新子代理轨迹尚未出现在 rawSubs 中，生成临时子代理占位项
     const runningSubCount = subItems.filter((s) => s.isRunning).length;
     if (
       isMainRunning &&
@@ -857,6 +1023,7 @@ export async function buildTelemetryPayloadInternal(
           }
         : extractLiveActivity([], true, rootFallbackMs));
 
+    const qStats = getConversationQuickStats(rootConv);
     runningConversations.push({
       cascadeId: rootConv.cascadeId,
       title: rootConv.title || rootConv.cascadeId.slice(0, 8),
@@ -873,6 +1040,12 @@ export async function buildTelemetryPayloadInternal(
       subagentCount: subItems.length,
       runningSubagentCount: runningSubList.length,
       subagents: subItems,
+      modelShort: qStats.modelShort,
+      modelUpstream: qStats.modelUpstream,
+      latestTokPerSec: qStats.latestTokPerSec,
+      contextUsedPct: qStats.contextUsedPct,
+      sessionCostUsd: qStats.sessionCostUsd,
+      sessionUnpricedCalls: qStats.sessionUnpricedCalls,
     });
   }
 
@@ -881,25 +1054,37 @@ export async function buildTelemetryPayloadInternal(
     uiBundleVersion,
     settings,
     cloudStatus: getCloudStatus(),
-    diagnostics: diagnostics.status(),
     account: {
       name: userStatus?.name || '',
-      tierName: userStatus?.userTier?.name || 'Google AI',
-      planName: userStatus?.planStatus?.planInfo?.planName || 'Pro',
+      tierName: rawTierName || 'Google AI',
+      planName: resolvedPlanName,
       aiCredits: realAiCredits > 0 ? realAiCredits : null,
       totalConversations: conversations.length,
     },
     runningConversations,
-    conversations: conversations.slice(0, MAX_RECENT_CONVERSATIONS).map((c) => ({
-      cascadeId: c.cascadeId,
-      title: c.title,
-      stepCount: c.stepCount,
-      subagentCount: c.subagentCount || 0,
-      totalStepCount: c.totalStepCount || c.stepCount || 0,
-      status: c.status,
-      lastModifiedTime: c.lastModifiedTime,
-      lastModifiedMs: c.lastModifiedMs,
-    })),
+    conversations: conversations.slice(0, MAX_RECENT_CONVERSATIONS).map((c) => {
+      const qStats = getConversationQuickStats(c);
+      const rawSubs = Array.isArray(c.subagents) ? c.subagents : [];
+      const runningSubCount = rawSubs.filter((s) => s.status === 'CASCADE_RUN_STATUS_RUNNING').length;
+      return {
+        cascadeId: c.cascadeId,
+        title: c.title,
+        stepCount: c.stepCount,
+        subagentCount: c.subagentCount || 0,
+        runningSubagentCount: runningSubCount,
+        totalStepCount: c.totalStepCount || c.stepCount || 0,
+        isRunning: c.status === 'CASCADE_RUN_STATUS_RUNNING' || runningSubCount > 0,
+        status: c.status,
+        lastModifiedTime: c.lastModifiedTime,
+        lastModifiedMs: c.groupLastModifiedMs || c.lastModifiedMs,
+        modelShort: qStats.modelShort,
+        modelUpstream: qStats.modelUpstream,
+        latestTokPerSec: qStats.latestTokPerSec,
+        contextUsedPct: qStats.contextUsedPct,
+        sessionCostUsd: qStats.sessionCostUsd,
+        sessionUnpricedCalls: qStats.sessionUnpricedCalls,
+      };
+    }),
     activeConversation: {
       cascadeId: activeCascadeId,
       title: activeConvSummary?.title || '当前会话',
@@ -917,12 +1102,14 @@ export async function buildTelemetryPayloadInternal(
       speedSummary: sessionSpeed,
       ttftSummary: sessionTtft,
       latestStepCostUsd: latestEnriched?.costUsd ?? null,
-      sessionCostUsd: +sessionCostUsd.toFixed(2),
+      sessionCostUsd: roundSessionCost(sessionCostUsd),
       sessionUnpricedCalls,
       latestCacheHitPct,
       sessionCacheHitPct,
       activeModelShort: latestEnriched?.modelShort || '模型未知',
       activeModelLabel: latestEnriched?.modelLabel || '模型未知',
+      activeModelUpstream:
+        latestEnriched?.modelUpstream || latestEnriched?.modelShort || '模型未知',
       context,
       recentSteps: enrichedActiveSteps.slice().reverse(),
       modelBreakdown: mainModelBreakdown,
@@ -937,9 +1124,7 @@ export async function buildTelemetryPayloadInternal(
         endMs: trendEndMs,
       },
       session: finalizedSelectedSession,
-      sessionAllTime: finalizedPresets.all.session,
       account: finalizedSelectedAccount,
-      accountAllTime: finalizedPresets.all.account,
       presets: finalizedPresets,
       trendSeries,
       sourcesBreakdown,
@@ -960,7 +1145,6 @@ export async function buildTelemetryPayloadInternal(
         const order = { Gemini: 0, Argon: 1, Carbon: 2, 'Claude & GPT': 3 };
         return (order[a.family] ?? 99) - (order[b.family] ?? 99);
       }),
-      models: modelQuotas.sort((a, b) => String(a.label).localeCompare(String(b.label))),
       weekly: {
         isOfficial: useOfficialWeekly,
         poolFamily: activePoolKey,
@@ -980,12 +1164,6 @@ export async function buildTelemetryPayloadInternal(
             ? getNextMondayResetIso()
             : null,
       },
-      today: {
-        calls: todayBucket.calls,
-        tokens: todayBucket.totalTokens,
-        costUsd: todayBucket.costUsd,
-        unpricedCalls: todayBucket.unpricedCalls,
-      },
     },
     modelBreakdown,
   };
@@ -993,7 +1171,6 @@ export async function buildTelemetryPayloadInternal(
 
 /**
  * 带并发请求合并（In-Flight Deduplication）的遥测载荷构建入口。
- * 当相同会话、刷新模式与时间范围的请求正在处理中时，直接复用同一个 Promise。
  *
  * @param {string} requestedConvId
  * @param {boolean} [forceQuotaRefresh=false]

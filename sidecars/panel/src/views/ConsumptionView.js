@@ -1,9 +1,9 @@
 /**
  * @fileoverview View 2: ConsumptionView (全景消耗统计视图).
  * 采用 5 段式分析布局展示指定时间窗口内的全量 Token 与费用消耗：
- * 1. 用量概览：支持预设时间段与自定义区间筛选，通过 3+2 组合矩阵展示总 Token/调用次数、
- *    USD/CNY 预估费用、缓存命中率与命中量、输入/输出细分占比，以及底部 4 段比例条 (`FourSegmentBar`)。
- * 2. 历史趋势：基于 `TrendAreaChart` 渲染纯 SVG 三次贝塞尔平滑曲线面积图、峰值气泡与首/中/末三时间锚点。
+ * 1. 用量概览：支持预设时间段与自定义区间筛选，通过 3+3 组合矩阵展示总 Token/调用次数、
+ *    USD/CNY 预估费用、缓存命中率与命中量、新输入/缓存读取（含节省费用）/输出细分占比，以及底部 4 段比例条 (`FourSegmentBar`)。
+ * 2. 历史趋势：基于 `TrendAreaChart` 渲染纯 SVG 三次贝塞尔平滑曲线面积图、峰值气泡、对齐多刻度时间轴与悬停详情浮层。
  * 3. 热门模型：按 Token 总量降序展示各模型的消耗占比徽章、4 段构成条及输入/缓存/输出/思考/调用明细。
  * 4. 数据来源：按调用来源聚合展示 Token 构成、占比与费用明细。
  * 5. 按月细分：12 个月垂直 4 段堆叠柱状图，直观对比全年各月费用、Token 总量与缓存/思考结构。
@@ -48,27 +48,45 @@ export const ConsumptionView = defineComponent({
   name: 'ConsumptionView',
   setup({ onCleanup }) {
     // --- 时间筛选栏：快速时间段分段控制器与自定义起止时间选择条 ---
+    let draftStartMs = telemetryStore.getState().customStartMs;
+    let draftEndMs = telemetryStore.getState().customEndMs;
+    let hasUncommittedCustomDraft = false;
+
     const timeFilterSwitch = SegmentedControl({
       ariaLabel: '消耗统计时间范围',
       modelValue: telemetryStore.getState().selectedTimeRange,
       options: TIME_RANGE_OPTIONS,
       onUpdateModelValue: (nextRange) => {
+        if (nextRange === 'custom') {
+          const st = telemetryStore.getState();
+          draftStartMs = st.customStartMs;
+          draftEndMs = st.customEndMs;
+          hasUncommittedCustomDraft = false;
+          startPicker.setValue(draftStartMs);
+          endPicker.setValue(draftEndMs);
+        } else {
+          hasUncommittedCustomDraft = false;
+        }
         telemetryStore.setState({ selectedTimeRange: nextRange });
         fetchTelemetry({ force: false });
       },
     });
 
     const startPicker = CustomDateTimePicker({
-      modelValue: telemetryStore.getState().customStartMs,
+      modelValue: draftStartMs,
       onUpdateModelValue: (ms) => {
-        telemetryStore.setState({ customStartMs: ms });
+        draftStartMs = ms;
+        hasUncommittedCustomDraft = true;
+        startPicker.setValue(ms);
       },
     });
 
     const endPicker = CustomDateTimePicker({
-      modelValue: telemetryStore.getState().customEndMs,
+      modelValue: draftEndMs,
       onUpdateModelValue: (ms) => {
-        telemetryStore.setState({ customEndMs: ms });
+        draftEndMs = ms;
+        hasUncommittedCustomDraft = true;
+        endPicker.setValue(ms);
       },
     });
 
@@ -79,20 +97,20 @@ export const ConsumptionView = defineComponent({
         className: 'btn-primary',
         style: 'height: 26px; padding: 0 10px;',
         onClick: () => {
-          const st = telemetryStore.getState();
-          const sMs = Number(st.customStartMs || 0);
-          const eMs = Number(st.customEndMs || 0);
-          if (sMs > 0 && eMs > 0 && sMs > eMs) {
-            startPicker.setValue(eMs);
-            endPicker.setValue(sMs);
-            telemetryStore.setState({
-              selectedTimeRange: 'custom',
-              customStartMs: eMs,
-              customEndMs: sMs,
-            });
-          } else {
-            telemetryStore.setState({ selectedTimeRange: 'custom' });
-          }
+          const sMs = Number(draftStartMs || 0);
+          const eMs = Number(draftEndMs || 0);
+          const minMs = sMs > 0 && eMs > 0 ? Math.min(sMs, eMs) : sMs;
+          const maxMs = sMs > 0 && eMs > 0 ? Math.max(sMs, eMs) : eMs;
+          draftStartMs = minMs;
+          draftEndMs = maxMs;
+          hasUncommittedCustomDraft = false;
+          startPicker.setValue(minMs);
+          endPicker.setValue(maxMs);
+          telemetryStore.setState({
+            selectedTimeRange: 'custom',
+            customStartMs: minMs,
+            customEndMs: maxMs,
+          });
           fetchTelemetry({ force: true });
         },
       },
@@ -114,7 +132,7 @@ export const ConsumptionView = defineComponent({
       ]
     );
 
-    // --- Section 1: 用量概览矩阵 (上层 3 列核心总量 + 下层 2 列输入/输出拆分 + 底部 4 段比例条) ---
+    // --- Section 1: 用量概览矩阵 (上层 3 列核心总量 + 下层 3 列新输入/缓存读取/输出拆分 + 底部 4 段比例条) ---
     const dateSpanBadge = h('span', { className: 'cons-badge text-mono', text: '-- ~ --' });
     const heroTotalTokens = h('strong', { className: 'cons-hero-num text-mono', text: '0' });
     const heroTotalCalls = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '0 次' });
@@ -126,7 +144,11 @@ export const ConsumptionView = defineComponent({
 
     const inputSharePct = h('span', { className: 'text-mono', style: 'color: var(--ctx-input); font-weight: 600; font-size: 11.5px;', text: '0%' });
     const inputMainTokens = h('strong', { className: 'cons-mid-num text-mono', text: '0' });
-    const inputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '新输入 0 · 缓存 0' });
+    const inputSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '未命中缓存输入' });
+
+    const cacheSharePct = h('span', { className: 'text-mono', style: 'color: var(--ctx-cached); font-weight: 600; font-size: 11.5px;', text: '0%' });
+    const cacheMainTokens = h('strong', { className: 'cons-mid-num text-mono', text: '0' });
+    const cacheSubText = h('span', { className: 'text-muted text-mono', style: 'font-size: 11px;', text: '节省 $0.00' });
 
     const outputSharePct = h('span', { className: 'text-mono', style: 'color: var(--ctx-output); font-weight: 600; font-size: 11.5px;', text: '0%' });
     const outputMainTokens = h('strong', { className: 'cons-mid-num text-mono', text: '0' });
@@ -161,27 +183,38 @@ export const ConsumptionView = defineComponent({
             h('div', { className: 'cons-baseline' }, [cacheHitPctEl, cacheTokensEl]),
           ]),
         ]),
-        h('div', { className: 'cons-split-2 cons-matrix-bottom' }, [
+        h('div', { className: 'cons-split-3 cons-matrix-bottom' }, [
           h('div', { className: 'cons-col' }, [
-            h('div', { className: 'panel-header' }, [
-              h('span', { className: 'legend-left' }, [
+            h('div', { className: 'cons-sub-head' }, [
+              h('span', { className: 'legend-left cons-sub-label' }, [
                 h('span', { className: 'dot-swatch seg-input' }),
-                h('span', { style: 'color: var(--text-primary); font-weight: 600; font-size: 11.5px;', text: '输入用量' }),
-                inputMainTokens,
+                h('span', { text: '新输入' }),
               ]),
               inputSharePct,
             ]),
+            inputMainTokens,
             inputSubText,
           ]),
           h('div', { className: 'cons-col is-bordered-col' }, [
-            h('div', { className: 'panel-header' }, [
-              h('span', { className: 'legend-left' }, [
+            h('div', { className: 'cons-sub-head' }, [
+              h('span', { className: 'legend-left cons-sub-label' }, [
+                h('span', { className: 'dot-swatch seg-cached' }),
+                h('span', { text: '缓存读取' }),
+              ]),
+              cacheSharePct,
+            ]),
+            cacheMainTokens,
+            cacheSubText,
+          ]),
+          h('div', { className: 'cons-col is-bordered-col' }, [
+            h('div', { className: 'cons-sub-head' }, [
+              h('span', { className: 'legend-left cons-sub-label' }, [
                 h('span', { className: 'dot-swatch seg-output' }),
-                h('span', { style: 'color: var(--text-primary); font-weight: 600; font-size: 11.5px;', text: '输出用量' }),
-                outputMainTokens,
+                h('span', { text: '输出用量' }),
               ]),
               outputSharePct,
             ]),
+            outputMainTokens,
             outputSubText,
           ]),
         ]),
@@ -416,8 +449,12 @@ export const ConsumptionView = defineComponent({
       if (!slice) return;
       timeFilterSwitch.setValue(slice.range);
       patchAttr(customRangeBar, 'hidden', slice.range !== 'custom');
-      startPicker.setValue(slice.customStartMs);
-      endPicker.setValue(slice.customEndMs);
+      if (!hasUncommittedCustomDraft) {
+        draftStartMs = slice.customStartMs;
+        draftEndMs = slice.customEndMs;
+        startPicker.setValue(draftStartMs);
+        endPicker.setValue(draftEndMs);
+      }
 
       const cons = slice.consumption || {};
       const preset =
@@ -436,6 +473,7 @@ export const ConsumptionView = defineComponent({
       const responseTokens = Number(acct.responseTokens || 0);
       const thinkingTokens = Number(acct.thinkingTokens || 0);
       const costUsd = Number(acct.costUsd || 0);
+      const savedCostUsd = Number(acct.savedCostUsd || 0);
 
       patchText(heroTotalTokens, formatTokensPrecise(totalTokens));
       patchText(heroTotalCalls, `${acct.calls || 0} 次`);
@@ -445,13 +483,37 @@ export const ConsumptionView = defineComponent({
       patchText(cacheHitPctEl, `${Number(acct.cacheHitPct ?? 0).toFixed(1)}%`);
       patchText(cacheTokensEl, `命中 ${formatTokensPrecise(cacheTokens)}`);
 
-      const inPct = totalTokens > 0 ? +((inputTokens / totalTokens) * 100).toFixed(1) : 0;
-      const outPct = totalTokens > 0 ? +((outputTokens / totalTokens) * 100).toFixed(1) : 0;
+      let inPct = 0;
+      let cachePct = 0;
+      let outPct = 0;
+      if (totalTokens > 0) {
+        const rawTenths = [
+          (inputTokens / totalTokens) * 1000,
+          (cacheTokens / totalTokens) * 1000,
+          (outputTokens / totalTokens) * 1000,
+        ];
+        const floored = rawTenths.map((v) => Math.max(0, Math.floor(v)));
+        const rem = Math.max(0, 1000 - (floored[0] + floored[1] + floored[2]));
+        const order = [0, 1, 2].sort(
+          (a, b) => rawTenths[b] - floored[b] - (rawTenths[a] - floored[a])
+        );
+        for (let k = 0; k < rem && k < 3; k++) {
+          floored[order[k]] += 1;
+        }
+        inPct = +(floored[0] / 10).toFixed(1);
+        cachePct = +(floored[1] / 10).toFixed(1);
+        outPct = +(floored[2] / 10).toFixed(1);
+      }
+
       patchText(inputSharePct, `${inPct}%`);
       patchText(inputMainTokens, formatTokensPrecise(inputTokens));
+      patchText(inputSubText, '未命中缓存输入');
+
+      patchText(cacheSharePct, `${cachePct}%`);
+      patchText(cacheMainTokens, formatTokensPrecise(cacheTokens));
       patchText(
-        inputSubText,
-        `新输入 ${formatTokensPrecise(inputTokens)} · 缓存 ${formatTokensPrecise(cacheTokens)}`
+        cacheSubText,
+        `节省 ${formatUsd(savedCostUsd, { precise: savedCostUsd > 0 && savedCostUsd < 0.01 })}`
       );
 
       patchText(outputSharePct, `${outPct}%`);
@@ -480,7 +542,8 @@ export const ConsumptionView = defineComponent({
       );
       trendChart.update(trendSeries);
 
-      // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账）
+      // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账，遵循模型名称显示格式设置）
+      const showUpstream = Boolean(slice.showUpstreamModel);
       const models = (slice.modelBreakdown || [])
         .slice()
         .sort((a, b) => (b.totalTokens || 0) - (a.totalTokens || 0));
@@ -489,9 +552,17 @@ export const ConsumptionView = defineComponent({
       patchKeyedList(modelsListEl, models, {
         keyFn: (m) => m.label || m.shortName,
         sigFn: (m) =>
-          `${m.label}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.calls}:${modelsTotalTok}`,
+          `${showUpstream}:${m.label}:${m.upstreamName || ''}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.calls}:${modelsTotalTok}`,
         createRow: createBreakdownItemRow,
-        updateRow: (refs, m) => updateBreakdownItemRow(refs, m, modelsTotalTok, true),
+        updateRow: (refs, m) =>
+          updateBreakdownItemRow(
+            refs,
+            showUpstream
+              ? { ...m, label: m.upstreamName || m.label || m.shortName }
+              : m,
+            modelsTotalTok,
+            true
+          ),
       });
 
       // 4. 同步数据来源列表
@@ -529,8 +600,14 @@ export const ConsumptionView = defineComponent({
           patchText(col.tokText, '');
         } else {
           const cVal = Number(m.costUsd || 0);
-          patchText(col.costText, m.unpricedCalls > 0 ? formatUsd(cVal, { unpricedCalls: m.unpricedCalls })
-            : cVal >= 10 ? `$${Math.round(cVal)}` : `$${cVal.toFixed(2)}`);
+          patchText(
+            col.costText,
+            m.unpricedCalls > 0
+              ? formatUsd(cVal, { unpricedCalls: m.unpricedCalls, compactPending: true })
+              : cVal >= 10
+                ? `$${Math.round(cVal)}`
+                : `$${cVal.toFixed(2)}`
+          );
           patchText(col.tokText, formatTokensPrecise(mTot));
 
           const totalHeightPct = Math.max(8, Math.min(100, (mTot / maxMonthTokens) * 100));
@@ -558,6 +635,7 @@ export const ConsumptionView = defineComponent({
         customEndMs: st.customEndMs,
         consumption: st.telemetry?.consumption,
         modelBreakdown: st.telemetry?.modelBreakdown,
+        showUpstreamModel: Boolean(st.telemetry?.settings?.showUpstreamModel),
       }),
       (slice) => {
         latestSlice = slice;

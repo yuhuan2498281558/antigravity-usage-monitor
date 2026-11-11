@@ -4,12 +4,19 @@
  */
 
 import { defineComponent } from '../../core/component.js';
-import { h, patchAttr, patchClasses, patchKeyedList, patchText } from '../../core/domPatch.js';
+import {
+  h,
+  isEventInside,
+  patchAttr,
+  patchClasses,
+  patchKeyedList,
+  patchText,
+} from '../../core/domPatch.js';
 import { createSvgIcon, patchSvgIcon } from '../../icons/SvgIcon.js';
 
 export const CustomSelect = defineComponent({
   name: 'CustomSelect',
-  setup({ getProps, emit, onCleanup }) {
+  setup({ getProps, setProps, emit, onCleanup }) {
     let isOpen = false;
     let focusedIndex = -1;
 
@@ -67,6 +74,7 @@ export const CustomSelect = defineComponent({
       const prevVal = getProps().modelValue;
       toggleOpen(false);
       if (option.value !== prevVal) {
+        setProps({ modelValue: option.value });
         emit('update:modelValue', option.value);
       }
     }
@@ -82,6 +90,7 @@ export const CustomSelect = defineComponent({
         } else {
           focusedIndex = (focusedIndex + 1) % opts.length;
           renderMenuOptions();
+          menuEl.children[focusedIndex]?.scrollIntoView?.({ block: 'nearest' });
         }
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
@@ -90,6 +99,7 @@ export const CustomSelect = defineComponent({
         } else {
           focusedIndex = (focusedIndex - 1 + opts.length) % opts.length;
           renderMenuOptions();
+          menuEl.children[focusedIndex]?.scrollIntoView?.({ block: 'nearest' });
         }
       } else if (e.key === 'Enter' && isOpen) {
         e.preventDefault();
@@ -150,17 +160,17 @@ export const CustomSelect = defineComponent({
       if (icon) {
         patchSvgIcon(leadIcon, icon);
       }
-      const selectedOpt =
-        options.find((o) => o.value === modelValue) ||
-        (!modelValue ? options[0] : undefined);
-      patchText(triggerLabel, selectedOpt ? selectedOpt.label : placeholder);
+      const matchedOpt = options.find((o) => o.value === modelValue);
+      const selectedOpt = matchedOpt || (!modelValue ? options[0] : undefined);
+      const fallbackText = modelValue ? `${placeholder} (${String(modelValue).slice(0, 8)})` : placeholder;
+      patchText(triggerLabel, selectedOpt ? selectedOpt.label : fallbackText);
       if (isOpen) {
         renderMenuOptions();
       }
     }
 
     const handleDocClick = (e) => {
-      if (isOpen && !rootEl.contains(e.target)) {
+      if (isOpen && !isEventInside(e, rootEl)) {
         toggleOpen(false);
       }
     };
@@ -176,14 +186,8 @@ export const CustomSelect = defineComponent({
       el: rootEl,
       refs: { triggerBtn, triggerLabel, menuEl },
       onPropsChange: syncTriggerAndMenu,
-      getValue: () => getProps().modelValue,
       methods: {
-        open: () => toggleOpen(true),
         close: () => toggleOpen(false),
-        selectByValue: (val) => {
-          const found = (getProps().options || []).find((o) => o.value === val);
-          if (found) chooseOption(found);
-        },
       },
     };
   },

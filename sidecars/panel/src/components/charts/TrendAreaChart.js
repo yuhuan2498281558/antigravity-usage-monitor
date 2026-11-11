@@ -10,17 +10,22 @@ import { h, patchAttr, patchClasses, patchStyleVar, patchText } from '../../core
 import { formatTokensPrecise, formatUsd } from '../../core/formatters.js';
 import { SVG_NS } from '../../icons/SvgIcon.js';
 
+let chartUidCounter = 0;
+
+function safeSlotTokens(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 /**
  * 将二维采样点序列转换为水平张力平滑的三次贝塞尔曲线 SVG 路径 (`M ... C ...`)。
  * 控制点沿 X 轴取相邻点间距的 `0.42` 张力系数，Y 轴与各自端点齐平，
  * 保证曲线在极值点处平缓过渡且不会产生上下过冲 (Overshoot)。
  *
- * @param {Array<{ x: number, y: number }>} points SVG 坐标系下的采样点数组
+ * @param {Array<{ x: number, y: number }>} points SVG 坐标系下的采样点数组（长度 >= 2）
  * @returns {string} SVG `<path>` 的 `d` 属性字符串
  */
 function buildSmoothSplinePath(points) {
-  if (!points.length) return '';
-  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
   let d = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
   for (let i = 0; i < points.length - 1; i++) {
     const p0 = points[i];
@@ -77,10 +82,11 @@ export function createTrendAreaChart() {
   svg.setAttribute('class', 'trend-svg');
   svg.setAttribute('aria-hidden', 'true');
 
-  // 垂直线性渐变
+  // 垂直线性渐变（每实例独立 ID，避免多图表挂载时 SVG url(#...) 冲突）
+  const gradId = `trend-area-grad-${++chartUidCounter}`;
   const defs = document.createElementNS(SVG_NS, 'defs');
   const grad = document.createElementNS(SVG_NS, 'linearGradient');
-  grad.setAttribute('id', 'trend-area-grad');
+  grad.setAttribute('id', gradId);
   grad.setAttribute('x1', '0');
   grad.setAttribute('y1', '0');
   grad.setAttribute('x2', '0');
@@ -119,7 +125,7 @@ export function createTrendAreaChart() {
   svg.appendChild(vGridGroup);
 
   const areaPath = document.createElementNS(SVG_NS, 'path');
-  areaPath.setAttribute('fill', 'url(#trend-area-grad)');
+  areaPath.setAttribute('fill', `url(#${gradId})`);
   svg.appendChild(areaPath);
 
   const linePath = document.createElementNS(SVG_NS, 'path');
@@ -202,18 +208,20 @@ export function createTrendAreaChart() {
     patchAttr(tooltipEl, 'hidden', false);
 
     patchText(tipTimeEl, slot.fullLabel || slot.label || '--');
-    patchText(tipCallsEl, `${Number(slot.calls || 0)} 次`);
-    patchText(tipTokensEl, `${formatTokensPrecise(Number(slot.tokens || 0))} tok`);
+    patchText(tipCallsEl, `${Math.max(0, Math.floor(Number(slot.calls) || 0))} 次`);
+    const slotTok = safeSlotTokens(slot.tokens);
+    patchText(tipTokensEl, `${formatTokensPrecise(slotTok)} tok`);
+    const slotCost = Number.isFinite(Number(slot.costUsd)) ? Math.max(0, Number(slot.costUsd)) : 0;
     patchText(
       tipCostEl,
-      formatUsd(Number(slot.costUsd || 0), {
+      formatUsd(slotCost, {
         unpricedCalls: slot.unpricedCalls,
-        precise: Number(slot.costUsd || 0) > 0 && Number(slot.costUsd || 0) < 0.1,
+        precise: slotCost > 0 && slotCost < 0.1,
       })
     );
 
     const hasSubBreakdown =
-      Number(slot.tokens || 0) > 0 &&
+      slotTok > 0 &&
       (slot.inputTokens !== undefined ||
         slot.cacheReadTokens !== undefined ||
         slot.outputTokens !== undefined);
@@ -221,7 +229,7 @@ export function createTrendAreaChart() {
     if (hasSubBreakdown) {
       patchText(
         tipSubEl,
-        `入 ${formatTokensPrecise(slot.inputTokens || 0)} · 缓 ${formatTokensPrecise(slot.cacheReadTokens || 0)} · 出 ${formatTokensPrecise(slot.outputTokens || 0)}`
+        `入 ${formatTokensPrecise(safeSlotTokens(slot.inputTokens))} · 缓 ${formatTokensPrecise(safeSlotTokens(slot.cacheReadTokens))} · 出 ${formatTokensPrecise(safeSlotTokens(slot.outputTokens))}`
       );
     }
 
@@ -268,7 +276,7 @@ export function createTrendAreaChart() {
    */
   function update(series = []) {
     const slots =
-      Array.isArray(series) && series.length >= 2
+      Array.isArray(series) && series.length >= 1
         ? series
         : [
             { label: '00:00', fullLabel: '00:00 - 01:00', tokens: 0, calls: 0, costUsd: 0 },
@@ -281,7 +289,7 @@ export function createTrendAreaChart() {
     let maxTokens = 0;
     let peakIdx = 0;
     for (let i = 0; i < slots.length; i++) {
-      const t = Number(slots[i].tokens || 0);
+      const t = safeSlotTokens(slots[i]?.tokens);
       if (t >= maxTokens) {
         maxTokens = t;
         peakIdx = i;
@@ -289,22 +297,32 @@ export function createTrendAreaChart() {
     }
 
     const denom = Math.max(1, maxTokens);
+    const isSingle = slots.length === 1;
     const pts = slots.map((s, idx) => {
-      const x = LEFT_X + (idx / Math.max(1, slots.length - 1)) * SPAN_X;
-      const ratio = maxTokens > 0 ? Number(s.tokens || 0) / denom : 0;
+      const tok = safeSlotTokens(s?.tokens);
+      const x = isSingle ? (LEFT_X + RIGHT_X) / 2 : LEFT_X + (idx / Math.max(1, slots.length - 1)) * SPAN_X;
+      const ratio = maxTokens > 0 ? tok / denom : 0;
       const y = BOTTOM_Y - ratio * SPAN_Y;
-      return { x, y, tokens: Number(s.tokens || 0) };
+      return { x, y, tokens: tok };
     });
     currentPts = pts;
 
     const sig = slots
-      .map((s) => `${s.label}:${s.fullLabel || ''}:${s.tokens}:${s.costUsd}:${s.calls}`)
+      .map((s) => `${s?.label || ''}:${s?.fullLabel || ''}:${safeSlotTokens(s?.tokens)}:${Number(s?.costUsd || 0)}:${Number(s?.calls || 0)}`)
       .join('|');
 
     if (sig !== lastRenderSig) {
       lastRenderSig = sig;
-      const lineD = buildSmoothSplinePath(pts);
-      const areaD = `${lineD} L ${pts[pts.length - 1].x.toFixed(1)} ${BOTTOM_Y} L ${pts[0].x.toFixed(1)} ${BOTTOM_Y} Z`;
+      let lineD;
+      let areaD;
+      if (isSingle) {
+        const yStr = pts[0].y.toFixed(1);
+        lineD = `M ${LEFT_X.toFixed(1)} ${yStr} L ${RIGHT_X.toFixed(1)} ${yStr}`;
+        areaD = `${lineD} L ${RIGHT_X.toFixed(1)} ${BOTTOM_Y} L ${LEFT_X.toFixed(1)} ${BOTTOM_Y} Z`;
+      } else {
+        lineD = buildSmoothSplinePath(pts);
+        areaD = `${lineD} L ${pts[pts.length - 1].x.toFixed(1)} ${BOTTOM_Y} L ${pts[0].x.toFixed(1)} ${BOTTOM_Y} Z`;
+      }
       patchAttr(linePath, 'd', lineD);
       patchAttr(areaPath, 'd', areaD);
 
@@ -329,8 +347,8 @@ export function createTrendAreaChart() {
           vGridGroup.appendChild(vLine);
         }
 
-        const isFirst = i === 0;
-        const isLast = i === tickIndices.length - 1;
+        const isFirst = !isSingle && i === 0;
+        const isLast = !isSingle && i === tickIndices.length - 1;
         const pct = (pt.x / VIEW_W) * 100;
         const tickEl = h('span', {
           className: `trend-x-tick text-mono${isFirst ? ' is-start' : isLast ? ' is-end' : ''}`,
@@ -371,7 +389,9 @@ export function createTrendAreaChart() {
     const pctLeft = Math.max(12, Math.min(88, (peakPt.x / VIEW_W) * 100));
     patchStyleVar(peakPill, '--peak-x', `${pctLeft.toFixed(1)}%`);
 
-    if (hoveredIdx >= 0 && hoveredIdx < slots.length) {
+    if (hoveredIdx >= slots.length) {
+      clearHover();
+    } else if (hoveredIdx >= 0) {
       showHoverAtIndex(hoveredIdx);
     }
   }

@@ -349,7 +349,7 @@ export const StepsDetailView = defineComponent({
           patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' tok/s'));
           patchText(refs.speedSub, `有效 ${sampleSummary(m.speedSummary)}`);
           patchText(refs.tdTokens, formatTokens(m.totalTokens || 0));
-          patchText(refs.tdCost, formatUsd(m.costUsd, { estimated: m.isEstimatedPrice, unpricedCalls: m.unpricedCalls }));
+          patchText(refs.tdCost, formatUsd(m.costUsd, { unpricedCalls: m.unpricedCalls }));
         },
       });
 
@@ -367,7 +367,6 @@ export const StepsDetailView = defineComponent({
         recentSteps: st.telemetry?.activeConversation?.recentSteps,
         sessionModelBreakdown: st.telemetry?.activeConversation?.modelBreakdown,
         modelBreakdown: st.telemetry?.modelBreakdown,
-        rangeLabel: st.telemetry?.consumption?.selectedRange?.label || '全部时间',
         showUpstreamModel: Boolean(st.telemetry?.settings?.showUpstreamModel),
       }),
       (slice) => {

@@ -1,13 +1,6 @@
 .data/
 node_modules/
-test/
-**/test/
-*.test.*
-*-harness.*
+plan/
 *.log
 .DS_Store
 Thumbs.db
-
-# Keep regression tests in source control.
-!sidecars/panel/test/
-!sidecars/panel/test/**

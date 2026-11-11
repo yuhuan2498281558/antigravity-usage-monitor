@@ -37,15 +37,15 @@ export function formatDateSpanBadge(startMs, endMs) {
   return `${s.getMonth() + 1}月${s.getDate()}日 ~ ${e.getMonth() + 1}月${e.getDate()}日`;
 }
 
-export function formatUsd(amount, { precise = false, estimated = false, unpricedCalls = 0 } = {}) {
+export function formatUsd(amount, { precise = false, unpricedCalls = 0, compactPending = false } = {}) {
   if (amount == null || !Number.isFinite(Number(amount))) return '待定';
   const val = Number(amount || 0);
-  const prefix = estimated ? '≈$' : '$';
-  const suffix = unpricedCalls > 0 ? ' + 待定' : '';
+  const suffix = unpricedCalls > 0 ? (compactPending ? '+' : ' + 待定') : '';
   if (precise) {
-    return (val >= 1 ? `${prefix}${val.toFixed(2)}` : `${prefix}${val.toFixed(3)}`) + suffix;
+    if (val > 0 && val < 0.001) return `<$0.001${suffix}`;
+    return (val >= 1 ? `$${val.toFixed(2)}` : `$${val.toFixed(3)}`) + suffix;
   }
-  return `${prefix}${val.toFixed(2)}${suffix}`;
+  return `$${val.toFixed(2)}${suffix}`;
 }
 
 export function speedReasonText(reason) {
@@ -53,6 +53,7 @@ export function speedReasonText(reason) {
     incomplete_or_invalid_timing: '生成未完成',
     invalid_output_tokens: '无有效输出',
     inconsistent_timing: '耗时数据异常',
+    short_timing: '耗时过短 (<0.5s)',
     legacy_cache: '旧版缓存记录',
   })[reason] || '';
 }
@@ -66,9 +67,10 @@ export function sampleSummary(summary) {
 export function formatCountdown(isoTime, nowMs = Date.now()) {
   if (!isoTime) return '未知重置时间';
   const targetMs = Date.parse(isoTime);
-  if (!targetMs || Number.isNaN(targetMs)) return '未知重置时间';
+  if (!Number.isFinite(targetMs) || targetMs <= 0) return '未知重置时间';
   const diffMs = targetMs - nowMs;
   if (diffMs <= 0) return '即将重置';
+  if (diffMs < 60_000) return '<1分钟后重置';
 
   const totalMinutes = Math.floor(diffMs / 60000);
   const days = Math.floor(totalMinutes / (60 * 24));

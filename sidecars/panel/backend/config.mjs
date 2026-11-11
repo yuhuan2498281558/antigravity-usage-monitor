@@ -3,12 +3,12 @@
  *
  * 负责统一管理：
  * 1. 插件根目录 (`PLUGIN_ROOT`)、面板目录 (`HERE`) 与持久化数据目录 (`DATA_DIR`) 的路径解析；
- * 2. Language Server RPC 连接参数 (`LS_ADDR` / `CSRF_TOKEN`) 与 GitHub 云端价格表地址；
+ * 2. Language Server RPC 连接参数 (`LS_ADDR` / `LS_BASE_URL` / `CSRF_TOKEN`) 与 GitHub 云端价格表地址；
  * 3. 安全的 JSON 读写封装 (`loadJson` / `saveJson`) 与用户设置合并 (`loadSettings`)；
  * 4. 跨子系统共享的内存态缓存容器（采用对象属性就地更新设计，兼容 ES Module 与 VM 沙箱）。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,9 +46,12 @@ export const DEEP_STATS_CACHE_CANDIDATES = [
 ];
 
 /**
- * Antigravity 本地 Language Server Connect RPC 端点与鉴权 Token。
+ * Antigravity 本地 Language Server Connect RPC 端点与鉴权 Token（自动剥离重复协议前缀与尾部斜杠）。
  */
-export const LS_ADDR = process.env.ANTIGRAVITY_LS_ADDRESS;
+const rawLsAddr = String(process.env.ANTIGRAVITY_LS_ADDRESS || '').trim();
+const LS_PROTOCOL = /^https:\/\//i.test(rawLsAddr) ? 'https' : 'http';
+export const LS_ADDR = rawLsAddr.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+export const LS_BASE_URL = LS_ADDR ? `${LS_PROTOCOL}://${LS_ADDR}` : '';
 export const CSRF_TOKEN = process.env.ANTIGRAVITY_CSRF_TOKEN;
 
 /**
@@ -69,19 +72,67 @@ export const CLOUD_SYNC_TTL_MS = 6 * 3600 * 1000;
 export const CLOUD_SYNC_RETRY_COOLDOWN_MS = 5 * 60 * 1000;
 
 /**
+ * 顶栏右侧精简胶囊三槽位允许配置的指标枚举与默认顺序。
+ */
+export const TOPBAR_SLOT_KEYS = Object.freeze([
+  'context',
+  'tps',
+  'ttft',
+  'cost',
+  'quota_auto',
+  'gemini_5h',
+  'gemini_weekly',
+  'claude_5h',
+  'claude_weekly',
+  'none',
+]);
+
+export const DEFAULT_TOPBAR_SLOTS = Object.freeze(['context', 'tps', 'quota_auto']);
+
+/**
+ * 归一化顶栏三槽位配置数组，兜底非法枚举值并保证至少保留一个可见槽位。
+ *
+ * @param {unknown} raw
+ * @returns {[string, string, string]}
+ */
+export function normalizeTopbarCapsuleSlots(raw) {
+  const arr = Array.isArray(raw) ? raw : [];
+  const slots = [0, 1, 2].map((idx) => {
+    const val = String(arr[idx] ?? '').trim();
+    return TOPBAR_SLOT_KEYS.includes(val) ? val : DEFAULT_TOPBAR_SLOTS[idx];
+  });
+  if (slots.every((s) => s === 'none')) {
+    slots[0] = 'context';
+  }
+  return /** @type {[string, string, string]} */ (slots);
+}
+
+/**
  * 用户可配置项的默认值。
  */
-export const DEFAULT_SETTINGS = {
-  contextWindowLimit: 256000,   // 默认 256k 自动压缩上下文预算基准
-  weeklyTokenBudget: 150000000, // 自定义每周 Token 预算默认值 (150M)
-  weeklyCostBudget: 100,        // 自定义每周美元费用预算默认值 ($100)
+const DEFAULT_SETTINGS = {
+  weeklyTokenBudget: 150000000, // 自定义每周 Token 预算默认值 (150M，保留底层兼容)
+  weeklyCostBudget: 100,        // 自定义每周美元费用预算默认值 ($100，保留底层兼容)
   weeklyLimitMode: 'official',  // 'official' | 'custom_tokens' | 'custom_cost'
-  showUpstreamModel: false,     // 步骤明细表是否显示上游真实 responseModel 名称
+  showUpstreamModel: false,     // 是否显示上游真实 responseModel 名称
   autoUpdatePlugin: false,      // 发现新版本且本地工作区干净时是否在后台自动更新插件
+  enableWindowOverlay: true,    // 是否启用双栖模式（自动通过 CDP 在主窗口顶栏挂载胶囊与悬浮面板）
+  showTopbarMultiSession: true, // 是否在顶栏左侧显示实时运行会话入口
+  topbarCapsuleSlots: [...DEFAULT_TOPBAR_SLOTS], // 顶栏右侧胶囊三槽位指标与顺序
 };
 
 /** 历史轨迹缓存 Schema 版本号，升级时触发旧缓存字段迁移校验。 */
 export const CACHE_SCHEMA_VERSION = 'v10-model-identity';
+
+/**
+ * 判断输入值是否为非数组普通对象（Plain Object）。
+ *
+ * @param {unknown} v
+ * @returns {boolean}
+ */
+export function isPlainObject(v) {
+  return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+}
 
 /**
  * 安全读取并解析本地 JSON 文件；文件不存在或解析失败时返回 `fallback`。
@@ -119,7 +170,18 @@ export function saveJson(filePath, data) {
   }
 }
 
-const VALID_WEEKLY_MODES = new Set(['official', 'tokens', 'cost']);
+/**
+ * 归一化每周额度统计模式枚举（兼容历史简写 `'tokens'` / `'cost'` 与标准枚举 `'custom_tokens'` / `'custom_cost'`）。
+ *
+ * @param {unknown} mode
+ * @returns {'official'|'custom_tokens'|'custom_cost'}
+ */
+export function normalizeWeeklyLimitMode(mode) {
+  const m = String(mode || '').trim().toLowerCase();
+  if (m === 'custom_tokens' || m === 'tokens') return 'custom_tokens';
+  if (m === 'custom_cost' || m === 'cost') return 'custom_cost';
+  return 'official';
+}
 
 function sanitizeSettingNumber(val, fallback) {
   const num = Number(val);
@@ -127,33 +189,29 @@ function sanitizeSettingNumber(val, fallback) {
 }
 
 /**
- * 读取用户设置并与默认设置合并，同时剔除已废弃的历史字段 `speedMode` 并兜底非法数值。
+ * 读取用户设置并与默认设置合并，同时剔除已废弃的历史字段并兜底非法数值。
  *
  * @returns {typeof DEFAULT_SETTINGS}
  */
 export function loadSettings() {
   const raw = loadJson(SETTINGS_FILE, {});
-  const { speedMode: _legacySpeedMode, ...settings } =
-    raw && typeof raw === 'object' ? raw : {};
-  const merged = { ...DEFAULT_SETTINGS, ...settings };
-  const mode = String(merged.weeklyLimitMode || '').trim();
+  const safeRaw = isPlainObject(raw) ? raw : {};
+  const merged = { ...DEFAULT_SETTINGS, ...safeRaw };
   return {
-    ...merged,
-    contextWindowLimit: sanitizeSettingNumber(
-      merged.contextWindowLimit,
-      DEFAULT_SETTINGS.contextWindowLimit
-    ),
     weeklyTokenBudget: sanitizeSettingNumber(
-      merged.weeklyTokenBudget,
+      safeRaw.weeklyTokenBudget ?? safeRaw.weeklyTokenLimit ?? merged.weeklyTokenBudget,
       DEFAULT_SETTINGS.weeklyTokenBudget
     ),
     weeklyCostBudget: sanitizeSettingNumber(
       merged.weeklyCostBudget,
       DEFAULT_SETTINGS.weeklyCostBudget
     ),
-    weeklyLimitMode: VALID_WEEKLY_MODES.has(mode) ? mode : DEFAULT_SETTINGS.weeklyLimitMode,
+    weeklyLimitMode: normalizeWeeklyLimitMode(merged.weeklyLimitMode),
     showUpstreamModel: merged.showUpstreamModel === true,
     autoUpdatePlugin: merged.autoUpdatePlugin === true,
+    enableWindowOverlay: merged.enableWindowOverlay !== false,
+    showTopbarMultiSession: merged.showTopbarMultiSession !== false,
+    topbarCapsuleSlots: normalizeTopbarCapsuleSlots(safeRaw.topbarCapsuleSlots),
   };
 }
 
@@ -167,20 +225,70 @@ export function roundMetric(value) {
   return Number.isFinite(value) ? +value.toFixed(1) : null;
 }
 
+/**
+ * 计算前端产物与后端源码文件的最大修改时间戳，用于插件热更新后触发客户端重载。
+ *
+ * @returns {string}
+ */
+export function computeRuntimeCodeVersion() {
+  let maxMtime = 0;
+  const candidates = [
+    join(HERE, 'app.js'),
+    join(HERE, 'styles.css'),
+    join(HERE, 'main.mjs'),
+    join(HERE, 'speed-metrics.mjs'),
+  ];
+  const backendDir = join(HERE, 'backend');
+  try {
+    if (existsSync(backendDir)) {
+      for (const name of readdirSync(backendDir)) {
+        if (name.endsWith('.mjs') || name.endsWith('.js')) {
+          candidates.push(join(backendDir, name));
+        }
+      }
+    }
+  } catch {
+    // 忽略目录列举异常
+  }
+  for (const file of candidates) {
+    try {
+      if (existsSync(file)) {
+        const mtime = Math.floor(statSync(file).mtimeMs || 0);
+        if (mtime > maxMtime) maxMtime = mtime;
+      }
+    } catch {
+      // 忽略单文件 stat 异常
+    }
+  }
+  return String(maxMtime || Date.now());
+}
+
 // ---------------------------------------------------------------------------
-// 跨模块共享运行时状态容器（启动时自动完成历史轨迹缓存迁移）
+// 跨模块共享运行时状态容器（启动时自动完成历史轨迹缓存迁移与损坏结构防御）
 // ---------------------------------------------------------------------------
 
 const loadedTrajectoryCache = loadJson(CACHE_FILE, {});
-let initialCacheMigrated = false;
+let initialCacheMigrated =
+  loadedTrajectoryCache !== null &&
+  loadedTrajectoryCache !== undefined &&
+  !isPlainObject(loadedTrajectoryCache);
 
-/**
- * 内存中的会话轨迹步骤缓存：`cascadeId -> { signature, accountName, title, lastModifiedMs, diskMtimeMs, wasRunning, steps }`
- */
-export const trajectoryCache = Object.fromEntries(
-  Object.entries(loadedTrajectoryCache).map(([id, entry]) => {
-    const rawSteps = Array.isArray(entry?.steps) ? entry.steps : [];
-    const normalizedSteps = rawSteps.map((s) => {
+const safeCacheEntries = [];
+if (isPlainObject(loadedTrajectoryCache)) {
+  for (const [id, entry] of Object.entries(loadedTrajectoryCache)) {
+    if (!id || !isPlainObject(entry)) {
+      initialCacheMigrated = true;
+      continue;
+    }
+    const rawSteps = Array.isArray(entry.steps) ? entry.steps : [];
+    if (!Array.isArray(entry.steps)) {
+      initialCacheMigrated = true;
+    }
+    const objectSteps = rawSteps.filter((s) => isPlainObject(s));
+    if (objectSteps.length !== rawSteps.length) {
+      initialCacheMigrated = true;
+    }
+    const normalizedSteps = objectSteps.map((s) => {
       const norm = normalizeCachedStep(s);
       if (norm !== s) initialCacheMigrated = true;
       return norm;
@@ -192,15 +300,20 @@ export const trajectoryCache = Object.fromEntries(
         break;
       }
     }
-    return [
+    safeCacheEntries.push([
       id,
       {
         ...entry,
         steps: finalSteps,
       },
-    ];
-  })
-);
+    ]);
+  }
+}
+
+/**
+ * 内存中的会话轨迹步骤缓存：`cascadeId -> { signature, accountName, title, lastModifiedMs, diskMtimeMs, wasRunning, steps }`
+ */
+export const trajectoryCache = Object.fromEntries(safeCacheEntries);
 
 /**
  * 缓存状态与外部深层统计缓存 Memo。
@@ -217,9 +330,10 @@ export const externalDeepStatsMemo = {
 /** 并发请求去重表（防止同一参数并发重复拉取）。 */
 export const inFlightRequests = new Map();
 
-/** 官方配额摘要 10 秒短期缓存。 */
+/** 官方配额摘要 10 秒短期缓存与失败退避冷却记录。 */
 export const quotaSummaryCache = {
   ts: 0,
+  lastAttemptTs: 0,
   accountName: '',
   data: null,
   error: null,
@@ -245,6 +359,7 @@ export const cloudSyncState = {
 /** 插件自更新执行状态。 */
 export const pluginUpdateState = {
   isUpdating: false,
+  inFlightIsAuto: false,
   lastAutoAttemptVersion: '',
   lastResult: null,
   lastError: null,

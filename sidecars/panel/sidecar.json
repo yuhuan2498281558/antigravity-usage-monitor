@@ -3,7 +3,7 @@
   "args": ["main.mjs"],
   "restart_policy": "always",
   "display_name": "用量监控",
-  "description": "实时查看生成速度、首字延迟、上下文占用、可用额度及历史消耗。",
+  "description": "实时查看生成速度、首字延迟、上下文占用、可用额度及历史用量。",
   "has_web_ui": true,
   "ui_config": {
     "display_name": "用量监控",

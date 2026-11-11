@@ -1,11 +1,12 @@
 /**
- * @fileoverview 内置模型价格与占位符字典、Schema 安全清洗及三级目录合并（内置 + 本地 + 云端）。
+ * @fileoverview 模型价格与占位符目录加载、Schema 安全清洗及本地/云端目录合并。
  *
  * 价格口径与安全原则：
  * - 所有单价单位均为 USD / 1M Tokens（`input`: 未命中缓存输入, `cache`: 缓存读取, `output`: 输出与思考）；
  * - 价格仅用于本地 API 等效成本折算，不代表订阅配额的扣减比例；
+ * - 离线基准统一从随包发布的 `pricing-catalog.json` 读取，避免在 JS 源码中重复维护双份硬编码字典；
  * - 未收录或身份未知的模型严格保持未定价状态（`null`），绝不借用其他模型价格，也绝不允许 `null`/`0` 伪价格混入；
- * - 版本号与更新包 URL 均经过严格格式与可信 GitHub 域名白名单校验。
+ * - 版本号（遵循 SemVer 2.0）与更新包 URL 均经过严格格式与可信 GitHub 域名白名单校验。
  */
 
 import { existsSync } from 'node:fs';
@@ -25,193 +26,22 @@ import {
 } from './config.mjs';
 
 /**
- * 代码内置兜底模型价格字典（当本地与云端目录均不可用时的离线基准）。
- */
-export const BUILTIN_MODEL_PRICING = {
-  // Gemini 4 (Carbon & Argon) & 3.x & 2.5 官方目录价格 (USD / 1M tokens)
-  'gemini-4-carbon-high': { input: 2.00, cache: 0.10, output: 10.0, short: 'carbon-4-high', family: 'Gemini' },
-  'gemini-4-carbon-medium': { input: 2.00, cache: 0.10, output: 10.0, short: 'carbon-4', family: 'Gemini' },
-  'gemini-4-carbon-low': { input: 2.00, cache: 0.10, output: 10.0, short: 'carbon-4-low', family: 'Gemini' },
-  'gemini-4-carbon': { input: 2.00, cache: 0.10, output: 10.0, short: 'carbon-4', family: 'Gemini' },
-  'gemini-4-argon-high': { input: 2.00, cache: 0.10, output: 10.0, short: 'argon-4-high', family: 'Gemini' },
-  'gemini-4-argon-medium': { input: 2.00, cache: 0.10, output: 10.0, short: 'argon-4', family: 'Gemini' },
-  'gemini-4-argon-low': { input: 2.00, cache: 0.10, output: 10.0, short: 'argon-4-low', family: 'Gemini' },
-  'gemini-4-argon': { input: 2.00, cache: 0.10, output: 10.0, short: 'argon-4', family: 'Gemini' },
-  'gemini-3.8-flash-high': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.8-high', family: 'Gemini' },
-  'gemini-3.8-flash-medium': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.8', family: 'Gemini' },
-  'gemini-3.8-flash-low': { input: 0.30, cache: 0.03, output: 2.50, short: 'flash-3.8-low', family: 'Gemini' },
-  'gemini-3.8-flash-tiered': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.8', family: 'Gemini' },
-  'gemini-3.8-flash': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.8', family: 'Gemini' },
-  'gemini-3.7-flash-high': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.7-high', family: 'Gemini' },
-  'gemini-3.7-flash-medium': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.7', family: 'Gemini' },
-  'gemini-3.7-flash-low': { input: 0.30, cache: 0.03, output: 2.50, short: 'flash-3.7-low', family: 'Gemini' },
-  'gemini-3.7-flash-tiered': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.7', family: 'Gemini' },
-  'gemini-3.7-flash': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.7', family: 'Gemini' },
-  'gemini-3.6-flash-high': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.6-high', family: 'Gemini' },
-  'gemini-3.6-flash-medium': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.6', family: 'Gemini' },
-  'gemini-3.6-flash-low': { input: 0.30, cache: 0.03, output: 2.50, short: 'flash-3.6-low', family: 'Gemini' },
-  'gemini-3.6-flash': { input: 0.75, cache: 0.075, output: 3.75, short: 'flash-3.6', family: 'Gemini' },
-  'gemini-3.5-flash-high': { input: 1.50, cache: 0.15, output: 9.00, short: 'flash-3.5-high', family: 'Gemini' },
-  'gemini-3.5-flash-medium': { input: 1.50, cache: 0.15, output: 9.00, short: 'flash-3.5', family: 'Gemini' },
-  'gemini-3.5-flash-low': { input: 1.50, cache: 0.15, output: 9.00, short: 'flash-3.5-low', family: 'Gemini' },
-  'gemini-3.5-flash-extra-low': { input: 0.30, cache: 0.03, output: 2.50, short: 'flash-3.5-xlow', family: 'Gemini' },
-  'gemini-3.5-flash': { input: 1.50, cache: 0.15, output: 9.00, short: 'flash-3.5', family: 'Gemini' },
-  'gemini-3.5-flash-lite': { input: 0.30, cache: 0.03, output: 2.50, short: 'flash-3.5-lite', family: 'Gemini' },
-  'gemini-3.1-pro-high': { input: 2.00, cache: 0.20, output: 12.0, short: 'pro-3.1-high', family: 'Gemini' },
-  'gemini-3.1-pro-low': { input: 2.00, cache: 0.20, output: 12.0, short: 'pro-3.1-low', family: 'Gemini' },
-  'gemini-3.1-pro-low-thinking': { input: 2.00, cache: 0.20, output: 12.0, short: 'pro-3.1-low', family: 'Gemini' },
-  'gemini-3.1-pro-preview': { input: 2.00, cache: 0.20, output: 12.0, short: 'pro-3.1', family: 'Gemini' },
-  'gemini-3.1-pro-preview-customtools': { input: 2.00, cache: 0.20, output: 12.0, short: 'pro-3.1', family: 'Gemini' },
-  'gemini-3.1-pro': { input: 2.00, cache: 0.20, output: 12.0, short: 'pro-3.1', family: 'Gemini' },
-  'gemini-3.1-flash-lite-preview': { input: 0.25, cache: 0.025, output: 1.50, short: 'flash-3.1-lite', family: 'Gemini' },
-  'gemini-3.1-flash-lite': { input: 0.25, cache: 0.025, output: 1.50, short: 'flash-3.1-lite', family: 'Gemini' },
-  'gemini-for-google-3.1-flash': { input: 0.50, cache: 0.05, output: 3.00, short: 'flash-3.1', family: 'Gemini' },
-  'gemini-3.1-flash-image': { input: 0.50, cache: 0.05, output: 3.00, short: 'flash-3.1-img', family: 'Gemini' },
-  'gemini-3-flash-preview': { input: 0.50, cache: 0.05, output: 3.00, short: 'flash-3', family: 'Gemini' },
-  'gemini-3-flash': { input: 0.50, cache: 0.05, output: 3.00, short: 'flash-3', family: 'Gemini' },
-  'gemini-3-pro-image': { input: 2.00, cache: 0.20, output: 12.0, short: 'pro-3-img', family: 'Gemini' },
-  'gemini-2.5-pro': { input: 1.25, cache: 0.125, output: 10.0, short: 'pro-2.5', family: 'Gemini' },
-  'gemini-2.5-flash': { input: 0.30, cache: 0.03, output: 2.50, short: 'flash-2.5', family: 'Gemini' },
-  'gemini-2.5-flash-lite': { input: 0.10, cache: 0.01, output: 0.40, short: 'flash-2.5-lite', family: 'Gemini' },
-
-  // Claude 4.5 / 4.6 / 4.7 / 4.8 / 5.x 官方目录价格
-  'claude-fable-5-2-max': { input: 8.00, cache: 0.20, output: 40.0, short: 'fable-5.2-max', family: 'Claude' },
-  'claude-fable-5-2-high': { input: 8.00, cache: 0.20, output: 40.0, short: 'fable-5.2-high', family: 'Claude' },
-  'claude-fable-5-2-medium': { input: 8.00, cache: 0.20, output: 40.0, short: 'fable-5.2', family: 'Claude' },
-  'claude-fable-5-2-low': { input: 8.00, cache: 0.20, output: 40.0, short: 'fable-5.2-low', family: 'Claude' },
-  'claude-fable-5-2': { input: 8.00, cache: 0.20, output: 40.0, short: 'fable-5.2', family: 'Claude' },
-  'claude-fable-5-1': { input: 10.0, cache: 0.25, output: 50.0, short: 'fable-5.1', family: 'Claude' },
-  'claude-fable-5': { input: 10.0, cache: 1.00, output: 50.0, short: 'fable-5', family: 'Claude' },
-  'claude-opus-5-5-max': { input: 4.00, cache: 0.20, output: 20.0, short: 'opus-5.5-max', family: 'Claude' },
-  'claude-opus-5-5-high': { input: 4.00, cache: 0.20, output: 20.0, short: 'opus-5.5-high', family: 'Claude' },
-  'claude-opus-5-5-medium': { input: 4.00, cache: 0.20, output: 20.0, short: 'opus-5.5', family: 'Claude' },
-  'claude-opus-5-5-low': { input: 4.00, cache: 0.20, output: 20.0, short: 'opus-5.5-low', family: 'Claude' },
-  'claude-opus-5-5': { input: 4.00, cache: 0.20, output: 20.0, short: 'opus-5.5', family: 'Claude' },
-  'claude-opus-5': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus-5', family: 'Claude' },
-  'claude-opus-4-8': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus-4.8', family: 'Claude' },
-  'claude-opus-4-7': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus-4.7', family: 'Claude' },
-  'claude-opus-4-6-thinking': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus', family: 'Claude' },
-  'claude-opus-4-6': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus-4.6', family: 'Claude' },
-  'claude-opus-4-5-thinking': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus-4.5', family: 'Claude' },
-  'claude-opus-4-5': { input: 5.00, cache: 0.50, output: 25.0, short: 'opus-4.5', family: 'Claude' },
-  'claude-sonnet-5-5-max': { input: 2.00, cache: 0.10, output: 10.0, short: 'sonnet-5.5-max', family: 'Claude' },
-  'claude-sonnet-5-5-high': { input: 2.00, cache: 0.10, output: 10.0, short: 'sonnet-5.5-high', family: 'Claude' },
-  'claude-sonnet-5-5-medium': { input: 2.00, cache: 0.10, output: 10.0, short: 'sonnet-5.5', family: 'Claude' },
-  'claude-sonnet-5-5-low': { input: 2.00, cache: 0.10, output: 10.0, short: 'sonnet-5.5-low', family: 'Claude' },
-  'claude-sonnet-5-5': { input: 2.00, cache: 0.10, output: 10.0, short: 'sonnet-5.5', family: 'Claude' },
-  'claude-sonnet-5': { input: 2.00, cache: 0.20, output: 10.0, short: 'sonnet-5', family: 'Claude' },
-  'claude-sonnet-4-6': { input: 3.00, cache: 0.30, output: 15.0, short: 'sonnet', family: 'Claude' },
-  'claude-sonnet-4-5-thinking': { input: 3.00, cache: 0.30, output: 15.0, short: 'sonnet-4.5', family: 'Claude' },
-  'claude-sonnet-4-5': { input: 3.00, cache: 0.30, output: 15.0, short: 'sonnet-4.5', family: 'Claude' },
-  'claude-haiku-5-5': { input: 0.10, cache: 0.01, output: 0.50, short: 'haiku-5.5', family: 'Claude' },
-  'claude-haiku-4-5': { input: 1.00, cache: 0.10, output: 5.00, short: 'haiku-4.5', family: 'Claude' },
-
-  // OpenAI / GPT 官方目录价格
-  'gpt-6-astra': { input: 10.0, cache: 1.00, output: 50.0, short: 'gpt-6-astra', family: 'GPT' },
-  'gpt-6.1-sol': { input: 2.00, cache: 0.10, output: 10.0, short: 'gpt-6.1-sol', family: 'GPT' },
-  'gpt-6.1-terra': { input: 1.00, cache: 0.05, output: 5.00, short: 'gpt-6.1-terra', family: 'GPT' },
-  'gpt-6-sol': { input: 2.00, cache: 0.20, output: 10.0, short: 'gpt-6-sol', family: 'GPT' },
-  'gpt-6-luna': { input: 0.10, cache: 0.01, output: 0.50, short: 'gpt-6-luna', family: 'GPT' },
-  'gpt-5.6': { input: 4.00, cache: 0.40, output: 20.0, short: 'gpt-5.6', family: 'GPT' },
-  'gpt-5.6-sol': { input: 4.00, cache: 0.40, output: 20.0, short: 'gpt-5.6-sol', family: 'GPT' },
-  'gpt-5.6-terra': { input: 2.00, cache: 0.20, output: 12.0, short: 'gpt-5.6-terra', family: 'GPT' },
-  'gpt-5.6-luna': { input: 0.20, cache: 0.02, output: 1.20, short: 'gpt-5.6-luna', family: 'GPT' },
-  'gpt-5.5': { input: 5.00, cache: 0.50, output: 30.0, short: 'gpt-5.5', family: 'GPT' },
-  'gpt-5.4': { input: 2.50, cache: 0.25, output: 15.0, short: 'gpt-5.4', family: 'GPT' },
-  'gpt-5.4-mini': { input: 0.75, cache: 0.075, output: 4.50, short: 'gpt-5.4-mini', family: 'GPT' },
-  'gpt-5.4-nano': { input: 0.20, cache: 0.02, output: 1.25, short: 'gpt-5.4-nano', family: 'GPT' },
-  'gpt-5.3-codex': { input: 1.75, cache: 0.175, output: 14.0, short: 'gpt-5.3-codex', family: 'GPT' },
-  'gpt-5.2': { input: 1.75, cache: 0.175, output: 14.0, short: 'gpt-5.2', family: 'GPT' },
-  'gpt-5.1': { input: 1.25, cache: 0.125, output: 10.0, short: 'gpt-5.1', family: 'GPT' },
-  'gpt-5': { input: 1.25, cache: 0.125, output: 10.0, short: 'gpt-5', family: 'GPT' },
-  'gpt-5-mini': { input: 0.25, cache: 0.025, output: 2.00, short: 'gpt-5-mini', family: 'GPT' },
-  'gpt-5-nano': { input: 0.05, cache: 0.005, output: 0.40, short: 'gpt-5-nano', family: 'GPT' },
-  'gpt-4.1': { input: 2.00, cache: 0.50, output: 8.00, short: 'gpt-4.1', family: 'GPT' },
-  'gpt-4.1-mini': { input: 0.40, cache: 0.10, output: 1.60, short: 'gpt-4.1-mini', family: 'GPT' },
-  'gpt-4o': { input: 2.50, cache: 1.25, output: 10.0, short: 'gpt-4o', family: 'GPT' },
-  'gpt-4o-mini': { input: 0.15, cache: 0.075, output: 0.60, short: 'gpt-4o-mini', family: 'GPT' },
-  'o4-mini': { input: 1.10, cache: 0.275, output: 4.40, short: 'o4-mini', family: 'GPT' },
-  'o3': { input: 2.00, cache: 0.50, output: 8.00, short: 'o3', family: 'GPT' },
-  'o3-mini': { input: 1.10, cache: 0.55, output: 4.40, short: 'o3-mini', family: 'GPT' },
-  'gpt-oss-120b-medium': { input: 0.80, cache: 0.10, output: 2.40, short: 'gpt-oss', family: 'GPT' },
-};
-
-/**
- * 代码内置兜底枚举占位符映射表（`MODEL_PLACEHOLDER_Mxxx` -> `modelId` & `label`）。
- */
-export const BUILTIN_PLACEHOLDER_MAP = {
-  // Gemini 4 Argon
-  MODEL_PLACEHOLDER_M417: { modelId: 'gemini-4-argon-high', label: 'Gemini 4 Argon (High)' },
-  MODEL_PLACEHOLDER_M418: { modelId: 'gemini-4-argon-medium', label: 'Gemini 4 Argon (Medium)' },
-  MODEL_PLACEHOLDER_M419: { modelId: 'gemini-4-argon-low', label: 'Gemini 4 Argon (Low)' },
-  // Gemini 3.8 Flash
-  MODEL_PLACEHOLDER_M318: { modelId: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High)' },
-  MODEL_PLACEHOLDER_M319: { modelId: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash (Medium)' },
-  MODEL_PLACEHOLDER_M320: { modelId: 'gemini-3.8-flash-low', label: 'Gemini 3.8 Flash (Low)' },
-  MODEL_PLACEHOLDER_M322: { modelId: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (Tiered)' },
-  // Gemini 3.7 Flash
-  MODEL_PLACEHOLDER_M298: { modelId: 'gemini-3.7-flash-high', label: 'Gemini 3.7 Flash (High)' },
-  MODEL_PLACEHOLDER_M299: { modelId: 'gemini-3.7-flash-medium', label: 'Gemini 3.7 Flash (Medium)' },
-  MODEL_PLACEHOLDER_M300: { modelId: 'gemini-3.7-flash-low', label: 'Gemini 3.7 Flash (Low)' },
-  MODEL_PLACEHOLDER_M301: { modelId: 'gemini-3.7-flash-tiered', label: 'Gemini 3.7 Flash (Tiered)' },
-  // Gemini 3.6 Flash
-  MODEL_PLACEHOLDER_M71: { modelId: 'gemini-3.6-flash-high', label: 'Gemini 3.6 Flash (High)' },
-  MODEL_PLACEHOLDER_M72: { modelId: 'gemini-3.6-flash-medium', label: 'Gemini 3.6 Flash (Medium)' },
-  MODEL_PLACEHOLDER_M73: { modelId: 'gemini-3.6-flash-low', label: 'Gemini 3.6 Flash (Low)' },
-  MODEL_PLACEHOLDER_M196: { modelId: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash' },
-  // Gemini 3.5 Flash & Lite
-  MODEL_PLACEHOLDER_M149: { modelId: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (High)' },
-  MODEL_PLACEHOLDER_M20: { modelId: 'gemini-3.5-flash-low', label: 'Gemini 3.5 Flash' },
-  MODEL_PLACEHOLDER_M187: { modelId: 'gemini-3.5-flash-extra-low', label: 'Gemini 3.5 Flash (Extra Low)' },
-  MODEL_PLACEHOLDER_M198: { modelId: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash Lite' },
-  // Gemini 3.1 & 3.0
-  MODEL_PLACEHOLDER_M37: { modelId: 'gemini-3.1-pro-high', label: 'Gemini 3.1 Pro (High)' },
-  MODEL_PLACEHOLDER_M36: { modelId: 'gemini-3.1-pro-low', label: 'Gemini 3.1 Pro (Low)' },
-  MODEL_PLACEHOLDER_M50: { modelId: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash Lite' },
-  MODEL_PLACEHOLDER_M59: { modelId: 'gemini-for-google-3.1-flash', label: 'Gemini for Google 3.1 Flash' },
-  MODEL_PLACEHOLDER_M21: { modelId: 'gemini-3.1-flash-image', label: 'Gemini 3.1 Flash Image' },
-  MODEL_PLACEHOLDER_M18: { modelId: 'gemini-3-flash', label: 'Gemini 3 Flash' },
-  MODEL_PLACEHOLDER_M9: { modelId: 'gemini-3-pro-image', label: 'Gemini 3 Pro Image' },
-  // Gemini 2.5
-  MODEL_GOOGLE_GEMINI_2_5_PRO: { modelId: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-  MODEL_GOOGLE_GEMINI_2_5_FLASH: { modelId: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
-  MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING: { modelId: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Thinking)' },
-  MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE: { modelId: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite' },
-  // Claude 5.5 / 4.8 / 4.6 / 4.5
-  MODEL_PLACEHOLDER_M406: { modelId: 'claude-opus-5-5-max', label: 'Claude Opus 5.5 (Max)' },
-  MODEL_PLACEHOLDER_M402: { modelId: 'claude-opus-5-5-high', label: 'Claude Opus 5.5 (High)' },
-  MODEL_PLACEHOLDER_M401: { modelId: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5 (Medium)' },
-  MODEL_PLACEHOLDER_M400: { modelId: 'claude-opus-5-5-low', label: 'Claude Opus 5.5 (Low)' },
-  MODEL_PLACEHOLDER_M368: { modelId: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
-  MODEL_PLACEHOLDER_M407: { modelId: 'claude-sonnet-5-5-max', label: 'Claude Sonnet 5.5 (Max)' },
-  MODEL_PLACEHOLDER_M405: { modelId: 'claude-sonnet-5-5-high', label: 'Claude Sonnet 5.5 (High)' },
-  MODEL_PLACEHOLDER_M404: { modelId: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5 (Medium)' },
-  MODEL_PLACEHOLDER_M403: { modelId: 'claude-sonnet-5-5-low', label: 'Claude Sonnet 5.5 (Low)' },
-  MODEL_PLACEHOLDER_M254: { modelId: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
-  MODEL_PLACEHOLDER_M26: { modelId: 'claude-opus-4-6-thinking', label: 'Claude Opus 4.6 (Thinking)' },
-  MODEL_PLACEHOLDER_M35: { modelId: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (Thinking)' },
-  MODEL_PLACEHOLDER_M12: { modelId: 'claude-opus-4-5-thinking', label: 'Claude Opus 4.5 (Thinking)' },
-  MODEL_PLACEHOLDER_M11: { modelId: 'claude-opus-4-5', label: 'Claude Opus 4.5' },
-  MODEL_CLAUDE_4_5_SONNET_THINKING: { modelId: 'claude-sonnet-4-5-thinking', label: 'Claude Sonnet 4.5 (Thinking)' },
-  MODEL_CLAUDE_4_5_SONNET: { modelId: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
-  // OpenAI
-  MODEL_OPENAI_GPT_OSS_120B_MEDIUM: { modelId: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)' },
-};
-
-/**
  * 当前生效的模型价格表与占位符映射表（通过就地更新属性保持跨模块引用一致）。
  */
-export const MODEL_PRICING = { ...BUILTIN_MODEL_PRICING };
-export const PLACEHOLDER_MAP = { ...BUILTIN_PLACEHOLDER_MAP };
+export const MODEL_PRICING = {};
+export const PLACEHOLDER_MAP = {};
 
 /**
- * 校验字符串是否为合法的 `X.Y.Z` 语义化版本号格式。
+ * 校验字符串是否为合法的 SemVer 2.0 语义化版本号格式（支持 `-prerelease` 与 `+build` 元数据）。
  *
  * @param {*} v
  * @returns {boolean}
  */
 export function isValidSemver(v) {
-  return typeof v === 'string' && /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(v.trim());
+  return (
+    typeof v === 'string' &&
+    /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(v.trim())
+  );
 }
 
 const OFFICIAL_REPO_PATH_PREFIX = '/yuhuan2498281558/antigravity-usage-monitor';
@@ -223,7 +53,7 @@ const OFFICIAL_REPO_PATH_PREFIX = '/yuhuan2498281558/antigravity-usage-monitor';
  * @param {string} fallbackUrl
  * @returns {string}
  */
-export function sanitizeTrustedGithubUrl(rawUrl, fallbackUrl) {
+function sanitizeTrustedGithubUrl(rawUrl, fallbackUrl) {
   if (typeof rawUrl !== 'string' || !rawUrl.trim()) return fallbackUrl;
   try {
     const parsed = new URL(rawUrl.trim());
@@ -247,7 +77,7 @@ export function sanitizeTrustedGithubUrl(rawUrl, fallbackUrl) {
 }
 
 /**
- * 比较两个语义化版本号（如 `'1.5.0'` vs `'1.4.0'`，支持 `-beta.1` 预发布后缀比较）。
+ * 按 SemVer 2.0 规范（§10 忽略 `+build` 元数据，§11.4 按 ASCII 码序与纯数字段逐级比较预发布标签）比较两个版本号。
  *
  * @param {string} a
  * @param {string} b
@@ -256,7 +86,10 @@ export function sanitizeTrustedGithubUrl(rawUrl, fallbackUrl) {
 export function compareSemver(a, b) {
   if (!isValidSemver(a) || !isValidSemver(b)) return 0;
   const parse = (v) => {
-    const cleaned = String(v || '').trim().replace(/^v/i, '');
+    const cleaned = String(v || '')
+      .trim()
+      .replace(/^v/i, '')
+      .replace(/\+.*$/, '');
     const dashIdx = cleaned.indexOf('-');
     const coreStr = dashIdx >= 0 ? cleaned.slice(0, dashIdx) : cleaned;
     const preStr = dashIdx >= 0 ? cleaned.slice(dashIdx + 1) : '';
@@ -278,7 +111,30 @@ export function compareSemver(a, b) {
   if (!pa.pre && !pb.pre) return 0;
   if (!pa.pre && pb.pre) return 1;
   if (pa.pre && !pb.pre) return -1;
-  return pa.pre.localeCompare(pb.pre, undefined, { numeric: true });
+
+  const idsA = pa.pre.split('.');
+  const idsB = pb.pre.split('.');
+  const minLen = Math.min(idsA.length, idsB.length);
+  for (let i = 0; i < minLen; i++) {
+    const idA = idsA[i];
+    const idB = idsB[i];
+    if (idA === idB) continue;
+    const numA = /^\d+$/.test(idA);
+    const numB = /^\d+$/.test(idB);
+    if (numA && numB) {
+      const bigA = BigInt(idA);
+      const bigB = BigInt(idB);
+      if (bigA !== bigB) return bigA > bigB ? 1 : -1;
+      continue;
+    }
+    // SemVer 2.0 §11.4.1：纯数字标识符的优先级始终低于含字母标识符
+    if (numA && !numB) return -1;
+    if (!numA && numB) return 1;
+    // SemVer 2.0 §11.4.2：含字母标识符按 ASCII 字节序比较
+    return idA < idB ? -1 : 1;
+  }
+  if (idsA.length === idsB.length) return 0;
+  return idsA.length > idsB.length ? 1 : -1;
 }
 
 /**
@@ -289,7 +145,17 @@ export function compareSemver(a, b) {
 export function readInstalledPluginVersion() {
   const manifest = loadJson(PLUGIN_MANIFEST_FILE, null);
   const ver = typeof manifest?.version === 'string' ? manifest.version.trim() : '';
-  return isValidSemver(ver) ? ver.replace(/^v/i, '') : '1.4.2';
+  return isValidSemver(ver) ? ver.replace(/^v/i, '') : '1.4.3';
+}
+
+function normalizeModelFamily(rawFamily) {
+  const f = String(rawFamily || '').trim();
+  const lower = f.toLowerCase();
+  if (lower === 'gemini' || lower === 'google') return 'Gemini';
+  if (lower === 'claude' || lower === 'anthropic') return 'Claude';
+  if (lower === 'gpt' || lower === 'openai') return 'GPT';
+  if (lower === 'other') return 'Other';
+  return f;
 }
 
 /**
@@ -347,7 +213,7 @@ export function sanitizeCatalogPayload(raw) {
         cache: v.cache,
         output: v.output,
         short: String(v.short).trim(),
-        family: String(v.family).trim(),
+        family: normalizeModelFamily(v.family),
       };
       validPricingCount++;
     }
@@ -376,6 +242,10 @@ export function sanitizeCatalogPayload(raw) {
     return null;
   }
 
+  const explicitReleaseUrl = sanitizeTrustedGithubUrl(raw.releaseUrl, '');
+  const explicitDownloadUrl = sanitizeTrustedGithubUrl(raw.downloadUrl, '');
+  const explicitArchiveUrl = sanitizeTrustedGithubUrl(raw.archiveFallbackUrl, '');
+
   return {
     schemaVersion: Number(raw.schemaVersion || 1),
     catalogVersion:
@@ -385,12 +255,12 @@ export function sanitizeCatalogPayload(raw) {
     updatedAt:
       typeof raw.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt.trim() : null,
     latestPluginVersion,
-    releaseUrl: sanitizeTrustedGithubUrl(raw.releaseUrl, DEFAULT_RELEASE_URL),
-    downloadUrl: sanitizeTrustedGithubUrl(raw.downloadUrl, DEFAULT_DOWNLOAD_URL),
-    archiveFallbackUrl: sanitizeTrustedGithubUrl(
-      raw.archiveFallbackUrl,
-      DEFAULT_ARCHIVE_FALLBACK_URL
-    ),
+    releaseUrl: explicitReleaseUrl || DEFAULT_RELEASE_URL,
+    downloadUrl: explicitDownloadUrl || DEFAULT_DOWNLOAD_URL,
+    archiveFallbackUrl: explicitArchiveUrl || DEFAULT_ARCHIVE_FALLBACK_URL,
+    hasReleaseUrl: Boolean(explicitReleaseUrl),
+    hasDownloadUrl: Boolean(explicitDownloadUrl),
+    hasArchiveFallbackUrl: Boolean(explicitArchiveUrl),
     fetchedAtMs: Number(raw.fetchedAtMs || 0),
     sourceUrl: typeof raw.sourceUrl === 'string' ? raw.sourceUrl : '',
     pricing,
@@ -399,7 +269,7 @@ export function sanitizeCatalogPayload(raw) {
 }
 
 /**
- * 按「内置保底 -> 本地目录 -> 云端缓存（按 `updatedAt` 新旧自动裁决优先级）」三级合并重建内存价格表。
+ * 按「随包本地目录 -> 云端缓存（按 `updatedAt` 新旧自动裁决优先级）」合并重建内存价格表。
  */
 export function rebuildActiveCatalog() {
   const localRaw = loadJson(LOCAL_CATALOG_FILE, null);
@@ -423,8 +293,8 @@ export function rebuildActiveCatalog() {
     layers.push({ kind: 'local', cat: localCat });
   }
 
-  const nextPricing = { ...BUILTIN_MODEL_PRICING };
-  const nextPlaceholders = { ...BUILTIN_PLACEHOLDER_MAP };
+  const nextPricing = {};
+  const nextPlaceholders = {};
   let activeSource = 'builtin';
   let catalogVersion = 'builtin';
   let updatedAt = null;
@@ -437,7 +307,9 @@ export function rebuildActiveCatalog() {
   for (const { kind, cat } of layers) {
     Object.assign(nextPricing, cat.pricing);
     Object.assign(nextPlaceholders, cat.placeholders);
-    activeSource = kind;
+    if (kind === 'remote' || cat.catalogVersion || cat.updatedAt) {
+      activeSource = kind;
+    }
     if (cat.catalogVersion) catalogVersion = cat.catalogVersion;
     if (cat.updatedAt) updatedAt = cat.updatedAt;
     if (cat.latestPluginVersion) {
@@ -447,9 +319,9 @@ export function rebuildActiveCatalog() {
           ? cat.latestPluginVersion
           : installedVersion;
     }
-    if (cat.releaseUrl) releaseUrl = cat.releaseUrl;
-    if (cat.downloadUrl) downloadUrl = cat.downloadUrl;
-    if (cat.archiveFallbackUrl) archiveFallbackUrl = cat.archiveFallbackUrl;
+    if (cat.hasReleaseUrl) releaseUrl = cat.releaseUrl;
+    if (cat.hasDownloadUrl) downloadUrl = cat.downloadUrl;
+    if (cat.hasArchiveFallbackUrl) archiveFallbackUrl = cat.archiveFallbackUrl;
   }
 
   for (const k of Object.keys(MODEL_PRICING)) delete MODEL_PRICING[k];
