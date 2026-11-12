@@ -1,11 +1,9 @@
 # Antigravity Usage & Speed Monitor
 
-**Real-time monitoring for Google Antigravity IDE.**  
-Track token generation speed (TPS), TTFT, context window usage, model quotas, subagent activity, and historical token consumption — all in one interface.
+English | [简体中文](README.zh-CN.md)
 
-Google Antigravity 实时监控插件，集成生成速度、首字延迟、上下文分析、模型额度、子代理追踪和历史 Token 用量统计（支持 Windows / macOS / Linux）。
-
-[English](#features) | [简体中文](#中文介绍) | [安装指南](#安装)
+**Real-time dual-mount monitor for Google Antigravity IDE.**  
+Track token generation speed (TPS), time-to-first-token (TTFT), context window usage, official model quotas, subagent activity, and historical token consumption — across Windows, macOS, and Linux.
 
 ![Antigravity Usage Monitor Preview](assets/preview.png)
 
@@ -14,11 +12,11 @@ Google Antigravity 实时监控插件，集成生成速度、首字延迟、上�
 ## Features
 
 - **Real-time Speed Monitoring** — Track live TPS, TTFT, session average generation speed, and estimated step/session API cost.
-- **Context Window Analysis** — Break down active context usage across 10 sources: assistant replies, tool results, user messages, subagent notifications, compaction summaries, system prompts, system tools, MCP tools, Skills, and user rules.
+- **10-Channel Context Window Analysis** — Visualize active context usage across assistant replies, tool results, user messages, subagent notifications, compaction summaries, system prompts, system tools, MCP tools, Skills, and user rules.
 - **Model Quota Tracking** — Monitor 5-hour and weekly official quotas across `Gemini`, `Gemini 4 Argon`, `Gemini 4 Carbon`, and `Claude & GPT` pools with live reset countdowns.
 - **Subagent Analytics** — Inspect main-agent and subagent calls, context windows, and compaction steps independently or in aggregate.
 - **Token Usage Statistics** — Explore historical consumption, cache hit efficiency & savings, interactive trend charts, and model rankings.
-- **Dual-Panel Interface** — Mount the compact live capsule & floating monitor in the top bar alongside the right-hand side-panel dashboard without modifying `app.asar`.
+- **Dual-Mount Interface** — Run the compact top-bar floating capsule alongside the right-hand side-panel dashboard without modifying `app.asar`.
 - **Built-in Cloud Sync & Updates** — Dynamically sync model pricing catalogs and manage 3-tier update modes (`manual` / `auto` / `off`).
 
 ### Token Usage Analytics
@@ -35,46 +33,42 @@ Google Antigravity 实时监控插件，集成生成速度、首字延迟、上�
 
 ---
 
-## 中文介绍
+## Panel Overview
 
-Antigravity Usage & Speed Monitor 是一款适用于 Google Antigravity IDE 的双栖实时用量监控插件。支持主窗口顶部悬浮胶囊与右侧辅助栏同时使用，提供实时生成速度、上下文窗口拆解、主代理与子代理统计、官方模型额度余量、历史 Token 用量与等效费用折算。
+The dashboard is organized into four tabs, with a top header to switch conversations, filter by **All / Main Agent / Subagent**, or manually refresh quotas:
 
-## 功能概览
+- **Live Overview**
+  - **Core Metrics**: Output speed (TPS), TTFT, average generation speed, latest step cost, and cumulative session cost (viewable per main agent, per subagent, or combined).
+  - **Context Window**: Switchable per agent, decomposed into 10 sources dynamically ordered by token footprint: assistant replies, tool results, user messages, subagent notifications, compaction summaries, system prompts, system tools, MCP tools, Skills, and user rules.
+  - **Quota Pools**: Displays 5-hour and weekly limits with reset countdowns for `Gemini`, `Gemini 4 Argon`, `Gemini 4 Carbon` (dedicated pools on Pro accounts), and `Claude & GPT`, plus live multi-session execution cards.
+- **Usage Analytics**
+  - Filter by Today, 1d, 7d, 14d, 30d, All, or custom date-time ranges.
+  - Summarizes total tokens, API-equivalent cost, and cache hit rate, breaking down uncached input, cache reads (including estimated USD saved), and output + thinking usage.
+  - Includes an interactive usage trend chart, model rankings, client source distribution, and monthly breakdown bars.
+- **Call Details**
+  - **By Step**: Lists every step in the selected conversation with its model, TPS, TTFT, context/output tokens, cache hit rate, and step cost.
+  - **By Model**: Aggregates call counts, mean speed, total tokens, and cost per model within the current session and selected agent scope.
+- **Preferences**
+  - **Mount Mode**: Dual-mount (Top Bar + Sidebar) or Sidebar only.
+  - **Top-Bar Customization**: Independently toggle the live running-sessions indicator, and customize the content and left-to-right order of the three metric slots in the capsule.
+  - **Model Name Format**: Compact short alias (e.g. `argon-4-high`) or raw upstream model ID (e.g. `gemini-3.8-flash-n`).
+  - **Version Updates & Pricing Sync**: Dynamically sync [`pricing-catalog.json`](pricing-catalog.json) from GitHub, with three update modes: *Notify only, manual update* (default), *Auto update*, and *Off*.
 
-面板分为四个标签页，顶部可切换要查看的会话、按全部/主代理/子代理筛选或手动刷新配额：
+## Model Identification & Cost Accounting
 
-- **实时监控**
-  - 核心指标：输出速度、首字延迟、平均速度、本次费用与会话累计费用（支持主代理与子代理独立或汇总查看）。
-  - 上下文窗口：支持按代理独立切换查看当前上下文窗口，并拆分为模型回复、工具结果、用户消息、子代理通知、压缩摘要、系统提示词、系统工具、MCP 工具、Skill 与用户规则十类来源（按占用量从大到小动态排列）。
-  - 额度概览：同步展示 `Gemini`、`Gemini 4 Argon`、`Gemini 4 Carbon`（Pro 账号独立池）与 `Claude & GPT` 模型池的 5 小时限额、每周限额及重置倒计时。
-- **用量统计**
-  - 支持按今天、1天、7天、14天、30天、全部或自定义时间段过滤。
-  - 汇总所选时段的总 Token、折算费用与缓存命中率，并分列展示新输入、缓存读取（含缓存节省金额）与输出用量。
-  - 包含用量趋势曲线、模型排行、客户端来源以及月度统计柱状图。
-- **调用明细**
-  - 按步查看：列出当前会话全部步骤的模型、输出速度、首字延迟、上下文/输出 Token、缓存命中率与单步费用。
-  - 按模型汇总：按当前所选会话（及所选主/子代理范围）统计各模型的调用次数、均速、总 Token 与费用。
-- **偏好设置**
-  - 选择面板挂载方式：双栖挂载（顶部栏 + 侧边栏）或仅侧边栏。
-  - 顶部栏定制：独立开关实时运行会话入口，并自由定义右侧三个指标槽位的显示内容与排列顺序。
-  - 选择模型名称格式：精简代号或原始模型 ID。
-  - 版本更新与价格表同步：支持从云端 [`pricing-catalog.json`](pricing-catalog.json) 动态同步最新模型价格表，并提供「仅提示新版本，手动更新」（默认）、「自动更新」与「关闭更新」三档更新方式。
+Model identity is resolved directly from each step's raw usage or matching generator metadata. Automatic context compaction may use a separate model; explicitly recorded models are never overwritten. When a compaction step lacks an explicit model, it is inferred from known steps in the same conversation — preferring preceding, then following provider-compatible steps before relaxing provider constraints. Inferred models are used for display and cost estimation rather than claiming server-confirmed compaction identity; when no evidence is available, the step is marked as unknown compaction.
 
-## 模型识别与费用口径
+When a model or its pricing cannot be confirmed, single-step cost is shown as pending while tokens are still counted; aggregate totals sum all steps with confirmed rates. Catalogued models are calculated using public API per-million-token rates for local cost reference only — this does not represent subscription quota deduction ratios.
 
-模型优先取自当前步骤的原始用量或对应生成记录。自动压缩可能使用独立模型；明确记录的模型不会被覆盖。压缩步骤缺少模型时，会从同一会话中有明确模型的步骤推断：优先查找此前、其次此后的提供方兼容步骤，找不到时再放宽提供方限制。推断结果用于模型展示和费用估算，并不代表服务端已确认压缩模型；没有可用记录时显示“模型未知·压缩”。
+On upgrade, historical cached entries are re-verified against raw trajectory records. Ambiguous default Argon labels from legacy caches remain unresolved if raw records are temporarily unavailable, while preserving token counts and valid timings. Compaction steps display full-request TPS in step tables but are excluded from session speed and TTFT averages.
 
-模型或价格未能确认时，单步费用显示“待定”，Token 仍计入统计；汇总费用累加所有已确认单价的步骤。模型明确且价格表已收录的步骤继续按本地 API 单价折算；这不代表订阅额度的美元换算关系。
+## Installation
 
-升级时会重新读取旧缓存的原始记录。旧版默认填入的 Argon 标签无法与真实 Argon 区分；原始记录暂时无法读取时，该标签会暂记为未知，Token 和已有有效计时保留。压缩步骤可显示完整请求 TPS，但不进入会话均速。
+Keep the plugin folder named `usage-monitor`. No `npm install` is required.
 
-## 安装
+### Option 1: Clone via Git
 
-插件目录名需保持为 `usage-monitor`，无需运行 `npm install`。
-
-### 方式一：通过 Git 克隆
-
-**Windows**
+**Windows (PowerShell)**
 ```powershell
 git clone https://github.com/yuhuan-dev/antigravity-usage-monitor.git "$env:USERPROFILE\.gemini\config\plugins\usage-monitor"
 ```
@@ -84,16 +78,16 @@ git clone https://github.com/yuhuan-dev/antigravity-usage-monitor.git "$env:USER
 git clone https://github.com/yuhuan-dev/antigravity-usage-monitor.git ~/.gemini/config/plugins/usage-monitor
 ```
 
-也可以直接在 Antigravity 对话框中让 AI 执行安装：
+Or ask Antigravity directly in chat:
 ```text
-把 https://github.com/yuhuan-dev/antigravity-usage-monitor 克隆到 ~/.gemini/config/plugins/usage-monitor 并启用插件
+Clone https://github.com/yuhuan-dev/antigravity-usage-monitor to ~/.gemini/config/plugins/usage-monitor and enable the plugin
 ```
 
-### 方式二：下载压缩包解压
+### Option 2: Download & Extract ZIP
 
-下载 [usage-monitor.zip](https://github.com/yuhuan-dev/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip)，解压到 `~/.gemini/config/plugins/` 目录下。
+Download [`usage-monitor.zip`](https://github.com/yuhuan-dev/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip) and extract it into `~/.gemini/config/plugins/`.
 
-Windows PowerShell 命令：
+**Windows PowerShell:**
 ```powershell
 $pluginsDir = "$env:USERPROFILE\.gemini\config\plugins"
 New-Item -ItemType Directory -Path $pluginsDir -Force | Out-Null
@@ -101,19 +95,19 @@ Invoke-WebRequest -Uri "https://github.com/yuhuan-dev/antigravity-usage-monitor/
 Expand-Archive -Path "$env:TEMP\usage-monitor.zip" -DestinationPath $pluginsDir -Force
 ```
 
-## 启用与打开面板
+## Enabling & Opening the Panel
 
-1. 打开左侧边栏的 **Customizations**，进入 **Installed** 标签页，找到 `usage-monitor` 并开启。
-2. **顶部栏胶囊悬浮面板（默认双栖开启）**：开启插件后，后台 Sidecar 会自动在主对话窗口右上角顶部栏挂载实时状态与指标胶囊（悬停查看速览，左键展开完整四标签面板，右键强制刷新），全程不修改宿主 `app.asar`。如需关闭顶部栏胶囊，可在 **偏好设置 -> 面板挂载方式** 中切换为「仅侧边栏」。
-3. **右侧辅助栏面板**：点击对话窗口右上角 `⋮` -> **Extensions** -> **用量监控**，在右侧辅助栏展开面板；或在对话中输入「打开用量监控面板」通过快捷入口唤起。
+1. Open **Customizations** in the left sidebar, switch to the **Installed** tab, locate `usage-monitor`, and toggle it on.
+2. **Top-Bar Floating Capsule (enabled by default)**: Once enabled, the background sidecar mounts a live status & metric capsule in the top-right bar of the main chat window (hover for quick overview, left-click to expand the full 4-tab panel, right-click to force refresh) without modifying `app.asar`. To disable the top-bar capsule, switch **Mount Mode** to *Sidebar only* in Preferences.
+3. **Right-Hand Sidebar Panel**: Click `⋮` in the top-right corner of the chat pane -> **Extensions** -> **Usage & Speed Monitor** (or **用量监控**) to dock the panel in the auxiliary sidebar.
 
-## 更新
+## Updating
 
-插件内置了云端版本检测与一键更新支持：
-- 当检测到新版本时，顶部栏胶囊旁与面板顶部会显示柔和的新版本提示徽章，点击即可自动拉取更新并重启面板；也可在 **偏好设置 -> 版本更新** 中切换更新方式（仅提示新版本手动更新 / 自动更新 / 关闭更新）或手动同步价格表。
+The plugin includes built-in cloud version checks and one-click self-updating:
+- When a new release is available, a subtle update badge appears next to the top-bar capsule and inside the panel header — click it to pull the update and reload automatically, or manage update behavior and pricing catalog sync in **Preferences -> Version Updates**.
 
-如需通过命令行手动更新：
-- 通过 Git 安装时，拉取最新代码后在 **Customizations -> Installed** 中重新开关一次插件即可：
+To update manually from the command line:
+- **Git installations** — pull the latest fast-forward commits and toggle the plugin off/on in **Customizations -> Installed**:
 
 ```powershell
 # Windows PowerShell
@@ -125,17 +119,17 @@ git -C "$env:USERPROFILE\.gemini\config\plugins\usage-monitor" pull --ff-only
 git -C ~/.gemini/config/plugins/usage-monitor pull --ff-only
 ```
 
-通过压缩包安装时，下载新版 `usage-monitor.zip` 覆盖解压到原目录后重新开关插件即可。在 Antigravity 宿主内运行时，本地缓存与设置存放在 `~/.gemini/antigravity/sidecar_data/usage-monitor/`（独立启动且未传入 `ANTIGRAVITY_EXECUTABLE_DATA_DIR` 时回退至 `sidecars/panel/.data/`），更新插件不会清除历史数据。
+- **ZIP installations** — download the new `usage-monitor.zip`, extract over the existing folder, and toggle the plugin off/on. Local caches and user settings are stored separately in `~/.gemini/antigravity/sidecar_data/usage-monitor/` (or `sidecars/panel/.data/` when run standalone), so updating never erases historical usage data.
 
-## 本地构建
+## Local Development
 
-如果修改了 `sidecars/panel/src/` 下的前端源码，可在 `sidecars/panel` 目录下运行以下命令重新生成 `app.js` 与 `styles.css`：
+After editing frontend source files under `sidecars/panel/src/`, rebuild `app.js` and `styles.css` from `sidecars/panel`:
 
 ```bash
 npm run build
 ```
 
-运行模型识别、缓存迁移与计时回归测试（无需额外安装依赖）：
+Run the model identity, cache migration, quota pool, and timing regression test suite (zero external dependencies required):
 
 ```bash
 npm test
