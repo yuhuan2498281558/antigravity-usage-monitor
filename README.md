@@ -1,8 +1,43 @@
 # Antigravity Usage & Speed Monitor
 
-Antigravity 双栖监控插件（支持主窗口顶栏胶囊悬浮面板与右侧辅助栏共存），用于查看当前会话的生成速度、上下文占用、官方配额余量以及本地历史 Token 消耗。
+**Real-time monitoring for Google Antigravity IDE.**  
+Track token generation speed (TPS), TTFT, context window usage, model quotas, subagent activity, and historical token consumption — all in one interface.
 
-下载最新版本：[Releases](https://github.com/yuhuan2498281558/antigravity-usage-monitor/releases) · [usage-monitor.zip](https://github.com/yuhuan2498281558/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip)
+Google Antigravity 实时监控插件，集成生成速度、首字延迟、上下文分析、模型额度、子代理追踪和历史 Token 用量统计（支持 Windows / macOS / Linux）。
+
+[English](#features) | [简体中文](#中文介绍) | [安装指南](#安装)
+
+![Antigravity Usage Monitor Preview](assets/preview.png)
+
+**[Download Latest Release](https://github.com/yuhuan-dev/antigravity-usage-monitor/releases/latest)** · **[Download ZIP (`usage-monitor.zip`)](https://github.com/yuhuan-dev/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip)**
+
+## Features
+
+- **Real-time Speed Monitoring** — Track live TPS, TTFT, session average generation speed, and estimated step/session API cost.
+- **Context Window Analysis** — Break down active context usage across 10 sources: assistant replies, tool results, user messages, subagent notifications, compaction summaries, system prompts, system tools, MCP tools, Skills, and user rules.
+- **Model Quota Tracking** — Monitor 5-hour and weekly official quotas across `Gemini`, `Gemini 4 Argon`, `Gemini 4 Carbon`, and `Claude & GPT` pools with live reset countdowns.
+- **Subagent Analytics** — Inspect main-agent and subagent calls, context windows, and compaction steps independently or in aggregate.
+- **Token Usage Statistics** — Explore historical consumption, cache hit efficiency & savings, interactive trend charts, and model rankings.
+- **Dual-Panel Interface** — Mount the compact live capsule & floating monitor in the top bar alongside the right-hand side-panel dashboard without modifying `app.asar`.
+- **Built-in Cloud Sync & Updates** — Dynamically sync model pricing catalogs and manage 3-tier update modes (`manual` / `auto` / `off`).
+
+### Token Usage Analytics
+
+![Token Analytics](assets/analytics.png)
+
+### Context Window & Quota Monitoring
+
+![Context Window Analysis](assets/context.png)
+
+### Subagent & Step-by-Step Call Details
+
+![Subagent and Step Analytics](assets/subagents.png)
+
+---
+
+## 中文介绍
+
+Antigravity Usage & Speed Monitor 是一款适用于 Google Antigravity IDE 的双栖实时用量监控插件。支持主窗口顶部悬浮胶囊与右侧辅助栏同时使用，提供实时生成速度、上下文窗口拆解、主代理与子代理统计、官方模型额度余量、历史 Token 用量与等效费用折算。
 
 ## 功能概览
 
@@ -41,28 +76,28 @@ Antigravity 双栖监控插件（支持主窗口顶栏胶囊悬浮面板与右�
 
 **Windows**
 ```powershell
-git clone https://github.com/yuhuan2498281558/antigravity-usage-monitor.git "$env:USERPROFILE\.gemini\config\plugins\usage-monitor"
+git clone https://github.com/yuhuan-dev/antigravity-usage-monitor.git "$env:USERPROFILE\.gemini\config\plugins\usage-monitor"
 ```
 
 **macOS / Linux**
 ```bash
-git clone https://github.com/yuhuan2498281558/antigravity-usage-monitor.git ~/.gemini/config/plugins/usage-monitor
+git clone https://github.com/yuhuan-dev/antigravity-usage-monitor.git ~/.gemini/config/plugins/usage-monitor
 ```
 
 也可以直接在 Antigravity 对话框中让 AI 执行安装：
 ```text
-把 https://github.com/yuhuan2498281558/antigravity-usage-monitor 克隆到 ~/.gemini/config/plugins/usage-monitor 并启用插件
+把 https://github.com/yuhuan-dev/antigravity-usage-monitor 克隆到 ~/.gemini/config/plugins/usage-monitor 并启用插件
 ```
 
 ### 方式二：下载压缩包解压
 
-下载 [usage-monitor.zip](https://github.com/yuhuan2498281558/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip)，解压到 `~/.gemini/config/plugins/` 目录下。
+下载 [usage-monitor.zip](https://github.com/yuhuan-dev/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip)，解压到 `~/.gemini/config/plugins/` 目录下。
 
 Windows PowerShell 命令：
 ```powershell
 $pluginsDir = "$env:USERPROFILE\.gemini\config\plugins"
 New-Item -ItemType Directory -Path $pluginsDir -Force | Out-Null
-Invoke-WebRequest -Uri "https://github.com/yuhuan2498281558/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip" -OutFile "$env:TEMP\usage-monitor.zip"
+Invoke-WebRequest -Uri "https://github.com/yuhuan-dev/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip" -OutFile "$env:TEMP\usage-monitor.zip"
 Expand-Archive -Path "$env:TEMP\usage-monitor.zip" -DestinationPath $pluginsDir -Force
 ```
 
