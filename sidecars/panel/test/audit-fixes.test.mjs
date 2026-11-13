@@ -70,7 +70,7 @@ test('BUG-01 & INCON-01: Google-proxied Claude/GPT/o-series never misclassify as
   const m20 = h.resolveModelInfo('MODEL_PLACEHOLDER_M20', new Map(), 'API_PROVIDER_GOOGLE_GEMINI');
   assert.equal(m20.modelId, 'gemini-3.5-flash');
 
-  // Gemini Hydrogen (3.8 Flash pricing) & Helix (3.5 Flash Lite pricing), shared Gemini pool
+  // Gemini Hydrogen ($1.50/$0.15/$7.50 unified pricing) & Helix (3.5 Flash Lite pricing), shared Gemini pool
   const dynHydrogenMap = new Map([
     ['MODEL_PLACEHOLDER_M480', { modelId: '', label: 'Gemini 4 Hydrogen (High)' }],
     ['MODEL_PLACEHOLDER_M481', { modelId: '', label: 'Gemini 4 Hydrogen (Low)' }],
@@ -81,18 +81,19 @@ test('BUG-01 & INCON-01: Google-proxied Claude/GPT/o-series never misclassify as
   assert.equal(hydroHigh.shortName, 'hydrogen-4-high');
   assert.deepEqual(
     { i: hydroHigh.pricing?.input, c: hydroHigh.pricing?.cache, o: hydroHigh.pricing?.output },
-    { i: 0.75, c: 0.075, o: 3.75 }
+    { i: 1.5, c: 0.15, o: 7.5 }
   );
   const hydroLow = h.resolveModelInfo('MODEL_PLACEHOLDER_M481', dynHydrogenMap);
   assert.equal(hydroLow.shortName, 'hydrogen-4-low');
   assert.deepEqual(
     { i: hydroLow.pricing?.input, c: hydroLow.pricing?.cache, o: hydroLow.pricing?.output },
-    { i: 0.3, c: 0.03, o: 2.5 }
+    { i: 1.5, c: 0.15, o: 7.5 }
   );
   const hydroCodename = h.resolveModelInfo('gemini-hydrogen');
   assert.equal(hydroCodename.family, 'Gemini');
   assert.equal(hydroCodename.label, 'Gemini Hydrogen');
-  assert.equal(hydroCodename.pricing?.input, 0.75);
+  assert.equal(hydroCodename.pricing?.input, 1.5);
+  assert.equal(hydroCodename.pricing?.output, 7.5);
 
   const helixInfo = h.resolveModelInfo('MODEL_PLACEHOLDER_M482', dynHydrogenMap);
   assert.equal(helixInfo.family, 'Gemini');

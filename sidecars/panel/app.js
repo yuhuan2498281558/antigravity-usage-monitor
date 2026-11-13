@@ -632,6 +632,105 @@ function formatElapsedSec(seconds) {
   return `${h}h ${remM}m`;
 }
 
+/**
+ * 归一化 Orchestrator 系列 ID 显示格式枚举（`'compact'` 精简代号 vs `'full'` 原始完整 ID，默认 `'compact'`）。
+ *
+ * @param {unknown} mode
+ * @returns {'compact'|'full'}
+ */
+function normalizeOrchestratorIdDisplayMode(mode) {
+  return String(mode ?? '').trim().toLowerCase() === 'full' ? 'full' : 'compact';
+}
+
+/**
+ * 统一解析步骤、会话摘要或模型汇总行面向用户的模型显示文本与悬停提示。
+ *
+ * 规则：
+ * - Orchestrator 系列（`Orchestrator (Carbon)`、`Orchestrator (Argon)`、`gemini-flash-worker-agy` / `M669`）
+ *   独立遵循 `orchestratorIdMode`（`'compact'` 显示 `orchestrator-carbon` / `orchestrator-argon` / `worker-agy-hydrogen`；
+ *   `'full'` 显示带括号标注的完整上游 ID），不受普通模型“精简代号 / 原始模型 ID”切换影响；
+ * - 其余普通模型继续按 `showUpstreamModel` 与视图选项切换。
+ *
+ * @param {object|null|undefined} target
+ * @param {{ showUpstreamModel?: boolean, orchestratorIdMode?: string }|boolean} [settings]
+ * @param {{ preferLabelInShort?: boolean, fallback?: string }} [options]
+ * @returns {{ text: string, title: string, isOrchestratorSeries: boolean }}
+ */
+function resolveModelDisplayInfo(target, settings = {}, options = {}) {
+  const showUpstream =
+    typeof settings === 'boolean' ? settings : Boolean(settings?.showUpstreamModel);
+  const orchestratorMode = normalizeOrchestratorIdDisplayMode(
+    typeof settings === 'object' && settings ? settings.orchestratorIdMode : 'compact'
+  );
+  const preferLabelInShort = Boolean(options?.preferLabelInShort);
+  const fallback = options?.fallback ?? '模型未知';
+
+  if (!target || typeof target !== 'object') {
+    return { text: fallback, title: fallback, isOrchestratorSeries: false };
+  }
+
+  const shortText = String(
+    target.activeModelShort ?? target.modelShort ?? target.shortName ?? ''
+  ).trim();
+  const labelText = String(
+    target.activeModelLabel ?? target.modelLabel ?? target.label ?? ''
+  ).trim();
+  const upstreamText = String(
+    target.activeModelUpstream ?? target.modelUpstream ?? target.upstreamName ?? ''
+  ).trim();
+  const responseText = String(target.responseModel ?? '').trim();
+  const modelKeyText = String(target.modelKey ?? '').trim();
+
+  const isCompaction =
+    Boolean(target.isCompactionStep) ||
+    /·压缩\s*$/.test(shortText) ||
+    /·压缩\s*$/.test(upstreamText) ||
+    /·压缩\s*$/.test(labelText);
+
+  const combined = `${modelKeyText} ${shortText} ${labelText} ${upstreamText} ${responseText}`;
+  const isOrchWorker =
+    /\bMODEL_PLACEHOLDER_M669\b|\b[a-z0-9.-]*worker-agy\b|\bworker-agy-hydrogen\b|\bOrchestrator\s+Worker\b/i.test(
+      combined
+    );
+  const isOrchSeries =
+    isOrchWorker ||
+    /\bgemini-pro-orchestrator(?:-argon)?\b|\borchestrator-(?:carbon|argon)\b|\borch-(?:carbon|argon)(?:·压缩)?(?=\s|$)|Orchestrator\s*\((?:Carbon|Argon)\)|\bMODEL_PLACEHOLDER_M(?:667|681)\b/i.test(
+      combined
+    );
+
+  if (isOrchSeries) {
+    let compactId = 'orchestrator-carbon';
+    let fullId = 'gemini-pro-orchestrator (carbon-4)';
+    if (isOrchWorker) {
+      compactId = 'worker-agy-hydrogen';
+      fullId = 'gemini-flash-worker-agy (hydrogen-4)';
+    } else if (/\bargon\b|\bMODEL_PLACEHOLDER_M681\b|\borch-argon\b/i.test(combined)) {
+      compactId = 'orchestrator-argon';
+      fullId = 'gemini-pro-orchestrator-argon (argon-4)';
+    }
+    const suffix = isCompaction ? '·压缩' : '';
+    const text = `${orchestratorMode === 'full' ? fullId : compactId}${suffix}`;
+    const multiUpstream =
+      Array.isArray(target.upstreamModels) && target.upstreamModels.length > 1
+        ? target.upstreamModels.join(' / ')
+        : '';
+    const title = multiUpstream || `${fullId}${suffix}`;
+    return { text, title, isOrchestratorSeries: true };
+  }
+
+  const standardText =
+    (showUpstream
+      ? upstreamText || responseText || shortText || labelText
+      : preferLabelInShort
+        ? labelText || shortText
+        : shortText || labelText) || fallback;
+  const standardTitle =
+    showUpstream && Array.isArray(target.upstreamModels) && target.upstreamModels.length > 1
+      ? target.upstreamModels.join(' / ')
+      : standardText;
+  return { text: standardText, title: standardTitle, isOrchestratorSeries: false };
+}
+
 // --- src/core/httpClient.js ---
 /**
  * @fileoverview Async HTTP client with AbortController cancellation for stale
@@ -951,14 +1050,29 @@ function normalizeClientUpdateMode(mode, legacyAutoUpdate) {
   return 'manual';
 }
 
+function normalizeClientOrchestratorIdMode(mode) {
+  return String(mode ?? '').trim().toLowerCase() === 'full' ? 'full' : 'compact';
+}
+
 function isEquivalentTelemetry(prev, next) {
   if (!prev || !next) return false;
   if (prev === next) return true;
 
-  // 1. 比对系统设置项（模型显示策略、周预算模式与额度、插件更新策略、双栖与顶栏槽位配置）
+  // 1. 比对系统设置项（模型显示策略、Orchestrator ID 显示风格、周预算模式与额度、插件更新策略、双栖与顶栏槽位配置）
   const pAct = prev.activeConversation;
   const nAct = next.activeConversation;
   if (prev.settings?.showUpstreamModel !== next.settings?.showUpstreamModel) return false;
+  const prevOrchIdMode =
+    String(prev.settings?.orchestratorIdMode ?? 'compact').trim().toLowerCase() === 'full'
+      ? 'full'
+      : 'compact';
+  const nextOrchIdMode =
+    String(next.settings?.orchestratorIdMode ?? 'compact').trim().toLowerCase() === 'full'
+      ? 'full'
+      : 'compact';
+  if (prevOrchIdMode !== nextOrchIdMode) {
+    return false;
+  }
   if (prev.settings?.weeklyLimitMode !== next.settings?.weeklyLimitMode) return false;
   if (prev.settings?.weeklyTokenBudget !== next.settings?.weeklyTokenBudget) return false;
   if (prev.settings?.weeklyCostBudget !== next.settings?.weeklyCostBudget) return false;
@@ -1469,6 +1583,9 @@ async function saveSettingsPatch(patch) {
     const mode = safePatch.weeklyLimitMode;
     safePatch.weeklyLimitMode =
       mode === 'custom_tokens' || mode === 'custom_cost' ? mode : 'official';
+  }
+  if (Object.prototype.hasOwnProperty.call(safePatch, 'orchestratorIdMode')) {
+    safePatch.orchestratorIdMode = normalizeClientOrchestratorIdMode(safePatch.orchestratorIdMode);
   }
   if (Object.prototype.hasOwnProperty.call(safePatch, 'showTopbarMultiSession')) {
     safePatch.showTopbarMultiSession = Boolean(safePatch.showTopbarMultiSession);
@@ -4244,12 +4361,10 @@ const LiveOverviewView = defineComponent({
         ensureLiveTicker();
       }
 
-      // 1. 更新 4 格实时测速矩阵（展示当前会话全局汇总指标，遵循模型名称格式设置）
-      const showUpstream = Boolean(data.settings?.showUpstreamModel);
-      const activeModelDisplay =
-        (showUpstream
-          ? active.activeModelUpstream || active.activeModelShort
-          : active.activeModelShort) || '模型未知';
+      // 1. 更新 4 格实时测速矩阵（展示当前会话全局汇总指标，遵循模型名称格式与 Orchestrator ID 格式设置）
+      const activeModelDisplay = resolveModelDisplayInfo(active, data.settings, {
+        fallback: '模型未知',
+      }).text;
       patchClasses(pulseDot, { 'is-pulsing': Boolean(active.isRunning) });
       patchText(tpsVal, formatMetric(active.latestTokPerSec, ' tok/s'));
       const reason = speedReasonText(active.latestSpeedReason);
@@ -4298,9 +4413,9 @@ const LiveOverviewView = defineComponent({
 
         const allAgentPills = agents.map((ag) => {
           const agPct = ag.context?.usedPct ?? 0;
-          const agModelDisplay =
-            (showUpstream ? ag.activeModelUpstream || ag.activeModelShort : ag.activeModelShort) ||
-            '模型未知';
+          const agModelDisplay = resolveModelDisplayInfo(ag, data.settings, {
+            fallback: '模型未知',
+          }).text;
           return {
             key: ag.agentId,
             label: `${ag.badgeText || ag.shortLabel} ${agPct}%`,
@@ -4922,7 +5037,9 @@ const ConsumptionView = defineComponent({
      * 增量更新热门模型或数据来源单行的指标文本与 4 段比例条宽度。
      */
     function updateBreakdownItemRow(refs, item, grandTotalTokens, showTokensInHeader = true) {
-      patchText(refs.nameEl, item.label || item.name || item.shortName || '—');
+      const displayLabel = item.label || item.name || item.shortName || '—';
+      patchText(refs.nameEl, displayLabel);
+      patchAttr(refs.nameEl, 'title', item.title || displayLabel);
       const total = Number(item.totalTokens || 0);
       const share = grandTotalTokens > 0 ? +((total / grandTotalTokens) * 100).toFixed(1) : 0;
       patchText(refs.pctBadge, `${share.toFixed(1)}%`);
@@ -5053,8 +5170,11 @@ const ConsumptionView = defineComponent({
       );
       trendChart.update(trendSeries);
 
-      // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账，遵循模型名称显示格式设置）
-      const showUpstream = Boolean(slice.showUpstreamModel);
+      // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账，遵循模型名称与 Orchestrator ID 格式设置）
+      const displaySettings = {
+        showUpstreamModel: Boolean(slice.showUpstreamModel),
+        orchestratorIdMode: slice.orchestratorIdMode,
+      };
       const models = (slice.modelBreakdown || [])
         .slice()
         .sort((a, b) => (b.totalTokens || 0) - (a.totalTokens || 0));
@@ -5062,18 +5182,20 @@ const ConsumptionView = defineComponent({
 
       patchKeyedList(modelsListEl, models, {
         keyFn: (m) => m.label || m.shortName,
-        sigFn: (m) =>
-          `${showUpstream}:${m.label}:${m.upstreamName || ''}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.calls}:${modelsTotalTok}`,
+        sigFn: (m) => {
+          const disp = resolveModelDisplayInfo(m, displaySettings, { preferLabelInShort: true });
+          return `${disp.text}:${disp.title}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.calls}:${modelsTotalTok}`;
+        },
         createRow: createBreakdownItemRow,
-        updateRow: (refs, m) =>
-          updateBreakdownItemRow(
+        updateRow: (refs, m) => {
+          const disp = resolveModelDisplayInfo(m, displaySettings, { preferLabelInShort: true });
+          return updateBreakdownItemRow(
             refs,
-            showUpstream
-              ? { ...m, label: m.upstreamName || m.label || m.shortName }
-              : m,
+            { ...m, label: disp.text, title: disp.title },
             modelsTotalTok,
             true
-          ),
+          );
+        },
       });
 
       // 4. 同步数据来源列表
@@ -5143,6 +5265,9 @@ const ConsumptionView = defineComponent({
         consumption: st.telemetry?.consumption,
         modelBreakdown: st.telemetry?.modelBreakdown,
         showUpstreamModel: Boolean(st.telemetry?.settings?.showUpstreamModel),
+        orchestratorIdMode: normalizeOrchestratorIdDisplayMode(
+          st.telemetry?.settings?.orchestratorIdMode
+        ),
       }),
       (slice) => {
         latestSlice = slice;
@@ -5364,7 +5489,10 @@ const StepsDetailView = defineComponent({
         (Array.isArray(scopedConv?.modelBreakdown) && scopedConv.modelBreakdown.length > 0
           ? scopedConv.modelBreakdown
           : slice.sessionModelBreakdown || slice.modelBreakdown) || [];
-      const showUpstream = Boolean(slice.showUpstreamModel);
+      const displaySettings = {
+        showUpstreamModel: Boolean(slice.showUpstreamModel),
+        orchestratorIdMode: slice.orchestratorIdMode,
+      };
       const modelsTabBadge = hasSubagents
         ? effectiveScope === 'all'
           ? '本会话汇总'
@@ -5381,8 +5509,10 @@ const StepsDetailView = defineComponent({
       // 1. 单步测速表增量对账：以 `<agentCascadeId>-<stepIndex>` 为稳定行键，仅在签名变化时刷新单元格
       patchKeyedList(stepsTbody, steps, {
         keyFn: (st) => `${st.agentCascadeId || slice.cascadeId || 'conv'}-${st.stepIndex}`,
-        sigFn: (st) =>
-          `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${showUpstream ? st.modelUpstream || st.responseModel || st.modelShort : st.modelShort}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}`,
+        sigFn: (st) => {
+          const disp = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
+          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}`;
+        },
         createRow: () => {
           const agentBadgeEl = h('span', {
             className: 'agent-badge is-clickable',
@@ -5449,12 +5579,9 @@ const StepsDetailView = defineComponent({
             };
           }
           patchText(refs.stepNumText, `#${Number(st.stepIndex)}`);
-          const modelText =
-            (showUpstream ? st.modelUpstream || st.responseModel : st.modelShort) ||
-            st.modelShort ||
-            '—';
-          patchText(refs.tdModel, modelText);
-          patchAttr(refs.tdModel, 'title', modelText);
+          const modelDisplay = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
+          patchText(refs.tdModel, modelDisplay.text);
+          patchAttr(refs.tdModel, 'title', modelDisplay.title);
 
           patchText(refs.speedMain, formatMetric(st.tokPerSec, ' tok/s'));
           const reason = speedReasonText(st.selectedSpeedReason);
@@ -5477,8 +5604,10 @@ const StepsDetailView = defineComponent({
       // 2. 按模型汇总表增量对账：以模型标识为稳定行键，展示调用次数、加权均速、有效样本比与总费用
       patchKeyedList(modelsTbody, models, {
         keyFn: (m) => m.label || m.shortName,
-        sigFn: (m) =>
-          `${showUpstream ? m.upstreamName || m.shortName : m.shortName}:${m.calls}:${m.avgTokPerSec}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.speedSummary?.sampleCount}`,
+        sigFn: (m) => {
+          const disp = resolveModelDisplayInfo(m, displaySettings, { fallback: '—' });
+          return `${disp.text}:${disp.title}:${m.calls}:${m.avgTokPerSec}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.speedSummary?.sampleCount}`;
+        },
         createRow: () => {
           const tdName = h('td', {
             style: 'font-weight: 600; max-width: 165px; overflow: hidden; text-overflow: ellipsis;',
@@ -5496,15 +5625,9 @@ const StepsDetailView = defineComponent({
           };
         },
         updateRow: (refs, m) => {
-          const nameText = showUpstream
-            ? m.upstreamName || m.shortName || m.label
-            : m.shortName || m.label;
-          patchText(refs.tdName, nameText);
-          const fullUpstreamTitle =
-            showUpstream && Array.isArray(m.upstreamModels) && m.upstreamModels.length > 1
-              ? m.upstreamModels.join(' / ')
-              : nameText;
-          patchAttr(refs.tdName, 'title', fullUpstreamTitle);
+          const modelDisplay = resolveModelDisplayInfo(m, displaySettings, { fallback: '—' });
+          patchText(refs.tdName, modelDisplay.text);
+          patchAttr(refs.tdName, 'title', modelDisplay.title);
           patchText(refs.tdCalls, String(Number(m.calls || 0)));
           patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' tok/s'));
           patchText(refs.speedSub, `有效 ${sampleSummary(m.speedSummary)}`);
@@ -5528,6 +5651,9 @@ const StepsDetailView = defineComponent({
         sessionModelBreakdown: st.telemetry?.activeConversation?.modelBreakdown,
         modelBreakdown: st.telemetry?.modelBreakdown,
         showUpstreamModel: Boolean(st.telemetry?.settings?.showUpstreamModel),
+        orchestratorIdMode: normalizeOrchestratorIdDisplayMode(
+          st.telemetry?.settings?.orchestratorIdMode
+        ),
       }),
       (slice) => {
         latestSlice = slice;
@@ -5589,7 +5715,7 @@ const StepsDetailView = defineComponent({
 /**
  * @fileoverview View 4: SettingsView (系统设置视图).
  * 采用定制的 `CustomSelect` 与 `SegmentedControl` 替代所有原生表单控件，分为三个单层细线设置面板：
- * 1. 常规设置：配置面板挂载方式（双栖挂载 / 仅右侧辅助栏）与模型名称格式（精简代号 / 原始模型 ID）；
+ * 1. 常规设置：配置面板挂载方式（双栖挂载 / 仅右侧辅助栏）、模型名称格式（精简代号 / 原始模型 ID）与 Orchestrator 系列 ID 格式；
  * 2. 顶部栏定制：控制左侧「实时运行会话」入口开关，以及自由定义右侧精简胶囊三个数值槽位的显示内容与左右顺序；
  * 3. 版本更新：配置插件自动更新策略、手动同步云端模型价格表，以及检查并执行 Git/ZIP 双模式插件升级。
  */
@@ -5599,6 +5725,12 @@ const StepsDetailView = defineComponent({
 const STEP_MODEL_DISPLAY_OPTIONS = [
   { value: 'short', label: '精简代号 (如 argon-4-high)' },
   { value: 'upstream', label: '原始模型 ID (如 gemini-3.8-flash-n)' },
+];
+
+/** Orchestrator 系列模型 ID 显示方式可选项（独立于普通模型名称格式） */
+const ORCHESTRATOR_ID_DISPLAY_OPTIONS = [
+  { value: 'compact', label: '精简代号 (如 orchestrator-argon)' },
+  { value: 'full', label: '原始完整 ID (如 gemini-pro-orchestrator)' },
 ];
 
 /** 面板挂载模式可选项（顶部栏 + 侧边栏 vs 仅侧边栏） */
@@ -5653,6 +5785,7 @@ const SettingsView = defineComponent({
   name: 'SettingsView',
   setup({ onCleanup }) {
     let draftShowUpstreamModel = false;
+    let draftOrchestratorIdMode = 'compact';
     let draftPluginUpdateMode = 'manual';
     let draftEnableWindowOverlay = true;
     let draftShowTopbarMulti = true;
@@ -5757,6 +5890,29 @@ const SettingsView = defineComponent({
       },
     });
 
+    const orchestratorIdSelect = CustomSelect({
+      modelValue: 'compact',
+      icon: 'layers',
+      options: ORCHESTRATOR_ID_DISPLAY_OPTIONS,
+      onUpdateModelValue: async (val) => {
+        const nextMode = normalizeClientOrchestratorIdMode(val);
+        draftOrchestratorIdMode = nextMode;
+        orchestratorIdSelect.setValue(nextMode);
+        showSaveFeedback('保存中…');
+        try {
+          await saveSettingsPatch({
+            orchestratorIdMode: nextMode,
+          });
+          showSaveFeedback('已保存');
+        } catch {
+          if (latestSettings) {
+            renderSettings(latestSettings);
+          }
+          showSaveFeedback('保存失败');
+        }
+      },
+    });
+
     const generalPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
@@ -5772,6 +5928,10 @@ const SettingsView = defineComponent({
       h('div', { className: 'form-row' }, [
         h('span', { className: 'form-label', text: '模型名称格式' }),
         stepModelSelect.el,
+      ]),
+      h('div', { className: 'form-row' }, [
+        h('span', { className: 'form-label', text: 'Orchestrator 系列 ID' }),
+        orchestratorIdSelect.el,
       ]),
     ]);
 
@@ -6104,6 +6264,7 @@ const SettingsView = defineComponent({
     function renderSettings(settings) {
       if (!settings) return;
       draftShowUpstreamModel = Boolean(settings.showUpstreamModel);
+      draftOrchestratorIdMode = normalizeClientOrchestratorIdMode(settings.orchestratorIdMode);
       draftPluginUpdateMode = normalizeClientUpdateMode(
         settings.pluginUpdateMode,
         settings.autoUpdatePlugin
@@ -6114,6 +6275,7 @@ const SettingsView = defineComponent({
 
       windowMountSelect.setValue(draftEnableWindowOverlay ? 'dual' : 'sidebar');
       stepModelSelect.setValue(draftShowUpstreamModel ? 'upstream' : 'short');
+      orchestratorIdSelect.setValue(draftOrchestratorIdMode);
       autoUpdateSelect.setValue(draftPluginUpdateMode);
       syncTopbarControls();
       viewScrollbar.refresh();
@@ -6195,6 +6357,7 @@ const SettingsView = defineComponent({
       unsubView();
       windowMountSelect.destroy();
       stepModelSelect.destroy();
+      orchestratorIdSelect.destroy();
       multiSessionToggle.destroy();
       for (const sel of slotSelects) {
         sel.destroy();
@@ -6208,6 +6371,7 @@ const SettingsView = defineComponent({
       refs: {
         windowMountSelect,
         stepModelSelect,
+        orchestratorIdSelect,
         multiSessionToggle,
         slotSelects,
         resetTopbarBtn,
@@ -8291,11 +8455,9 @@ function mountWindowOverlay() {
     }
 
     // --- 同步悬停三卡片全景概览（与 LiveOverviewView 保持完全一致的数据口径与视觉呈现） ---
-    const showUpstream = Boolean(telemetry.settings?.showUpstreamModel);
-    const activeModelDisplay =
-      (showUpstream
-        ? overviewActive.activeModelUpstream || overviewActive.activeModelShort
-        : overviewActive.activeModelShort) || '模型未知';
+    const activeModelDisplay = resolveModelDisplayInfo(overviewActive, telemetry.settings, {
+      fallback: '模型未知',
+    }).text;
 
     patchClasses(hoverPulseDot, { 'is-pulsing': Boolean(overviewActive.isRunning || isRunning) });
     patchText(hoverTpsVal, formatMetric(overviewActive.latestTokPerSec, ' tok/s'));

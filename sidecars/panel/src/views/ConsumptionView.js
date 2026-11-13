@@ -23,6 +23,8 @@ import {
   formatDateSpanBadge,
   formatTokensPrecise,
   formatUsd,
+  normalizeOrchestratorIdDisplayMode,
+  resolveModelDisplayInfo,
 } from '../core/formatters.js';
 import { createSvgIcon } from '../icons/SvgIcon.js';
 import { fetchTelemetry, telemetryStore } from '../store/telemetryStore.js';
@@ -411,7 +413,9 @@ export const ConsumptionView = defineComponent({
      * 增量更新热门模型或数据来源单行的指标文本与 4 段比例条宽度。
      */
     function updateBreakdownItemRow(refs, item, grandTotalTokens, showTokensInHeader = true) {
-      patchText(refs.nameEl, item.label || item.name || item.shortName || '—');
+      const displayLabel = item.label || item.name || item.shortName || '—';
+      patchText(refs.nameEl, displayLabel);
+      patchAttr(refs.nameEl, 'title', item.title || displayLabel);
       const total = Number(item.totalTokens || 0);
       const share = grandTotalTokens > 0 ? +((total / grandTotalTokens) * 100).toFixed(1) : 0;
       patchText(refs.pctBadge, `${share.toFixed(1)}%`);
@@ -542,8 +546,11 @@ export const ConsumptionView = defineComponent({
       );
       trendChart.update(trendSeries);
 
-      // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账，遵循模型名称显示格式设置）
-      const showUpstream = Boolean(slice.showUpstreamModel);
+      // 3. 同步热门模型列表（按总 Token 数降序排列并执行键值增量对账，遵循模型名称与 Orchestrator ID 格式设置）
+      const displaySettings = {
+        showUpstreamModel: Boolean(slice.showUpstreamModel),
+        orchestratorIdMode: slice.orchestratorIdMode,
+      };
       const models = (slice.modelBreakdown || [])
         .slice()
         .sort((a, b) => (b.totalTokens || 0) - (a.totalTokens || 0));
@@ -551,18 +558,20 @@ export const ConsumptionView = defineComponent({
 
       patchKeyedList(modelsListEl, models, {
         keyFn: (m) => m.label || m.shortName,
-        sigFn: (m) =>
-          `${showUpstream}:${m.label}:${m.upstreamName || ''}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.calls}:${modelsTotalTok}`,
+        sigFn: (m) => {
+          const disp = resolveModelDisplayInfo(m, displaySettings, { preferLabelInShort: true });
+          return `${disp.text}:${disp.title}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.calls}:${modelsTotalTok}`;
+        },
         createRow: createBreakdownItemRow,
-        updateRow: (refs, m) =>
-          updateBreakdownItemRow(
+        updateRow: (refs, m) => {
+          const disp = resolveModelDisplayInfo(m, displaySettings, { preferLabelInShort: true });
+          return updateBreakdownItemRow(
             refs,
-            showUpstream
-              ? { ...m, label: m.upstreamName || m.label || m.shortName }
-              : m,
+            { ...m, label: disp.text, title: disp.title },
             modelsTotalTok,
             true
-          ),
+          );
+        },
       });
 
       // 4. 同步数据来源列表
@@ -632,6 +641,9 @@ export const ConsumptionView = defineComponent({
         consumption: st.telemetry?.consumption,
         modelBreakdown: st.telemetry?.modelBreakdown,
         showUpstreamModel: Boolean(st.telemetry?.settings?.showUpstreamModel),
+        orchestratorIdMode: normalizeOrchestratorIdDisplayMode(
+          st.telemetry?.settings?.orchestratorIdMode
+        ),
       }),
       (slice) => {
         latestSlice = slice;

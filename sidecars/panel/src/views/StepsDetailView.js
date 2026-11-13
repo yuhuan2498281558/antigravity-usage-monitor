@@ -18,6 +18,8 @@ import {
   formatMetric,
   formatTokens,
   formatUsd,
+  normalizeOrchestratorIdDisplayMode,
+  resolveModelDisplayInfo,
   sampleSummary,
   speedReasonText,
 } from '../core/formatters.js';
@@ -204,7 +206,10 @@ export const StepsDetailView = defineComponent({
         (Array.isArray(scopedConv?.modelBreakdown) && scopedConv.modelBreakdown.length > 0
           ? scopedConv.modelBreakdown
           : slice.sessionModelBreakdown || slice.modelBreakdown) || [];
-      const showUpstream = Boolean(slice.showUpstreamModel);
+      const displaySettings = {
+        showUpstreamModel: Boolean(slice.showUpstreamModel),
+        orchestratorIdMode: slice.orchestratorIdMode,
+      };
       const modelsTabBadge = hasSubagents
         ? effectiveScope === 'all'
           ? '本会话汇总'
@@ -221,8 +226,10 @@ export const StepsDetailView = defineComponent({
       // 1. 单步测速表增量对账：以 `<agentCascadeId>-<stepIndex>` 为稳定行键，仅在签名变化时刷新单元格
       patchKeyedList(stepsTbody, steps, {
         keyFn: (st) => `${st.agentCascadeId || slice.cascadeId || 'conv'}-${st.stepIndex}`,
-        sigFn: (st) =>
-          `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${showUpstream ? st.modelUpstream || st.responseModel || st.modelShort : st.modelShort}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}`,
+        sigFn: (st) => {
+          const disp = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
+          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}`;
+        },
         createRow: () => {
           const agentBadgeEl = h('span', {
             className: 'agent-badge is-clickable',
@@ -289,12 +296,9 @@ export const StepsDetailView = defineComponent({
             };
           }
           patchText(refs.stepNumText, `#${Number(st.stepIndex)}`);
-          const modelText =
-            (showUpstream ? st.modelUpstream || st.responseModel : st.modelShort) ||
-            st.modelShort ||
-            '—';
-          patchText(refs.tdModel, modelText);
-          patchAttr(refs.tdModel, 'title', modelText);
+          const modelDisplay = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
+          patchText(refs.tdModel, modelDisplay.text);
+          patchAttr(refs.tdModel, 'title', modelDisplay.title);
 
           patchText(refs.speedMain, formatMetric(st.tokPerSec, ' tok/s'));
           const reason = speedReasonText(st.selectedSpeedReason);
@@ -317,8 +321,10 @@ export const StepsDetailView = defineComponent({
       // 2. 按模型汇总表增量对账：以模型标识为稳定行键，展示调用次数、加权均速、有效样本比与总费用
       patchKeyedList(modelsTbody, models, {
         keyFn: (m) => m.label || m.shortName,
-        sigFn: (m) =>
-          `${showUpstream ? m.upstreamName || m.shortName : m.shortName}:${m.calls}:${m.avgTokPerSec}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.speedSummary?.sampleCount}`,
+        sigFn: (m) => {
+          const disp = resolveModelDisplayInfo(m, displaySettings, { fallback: '—' });
+          return `${disp.text}:${disp.title}:${m.calls}:${m.avgTokPerSec}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.speedSummary?.sampleCount}`;
+        },
         createRow: () => {
           const tdName = h('td', {
             style: 'font-weight: 600; max-width: 165px; overflow: hidden; text-overflow: ellipsis;',
@@ -336,15 +342,9 @@ export const StepsDetailView = defineComponent({
           };
         },
         updateRow: (refs, m) => {
-          const nameText = showUpstream
-            ? m.upstreamName || m.shortName || m.label
-            : m.shortName || m.label;
-          patchText(refs.tdName, nameText);
-          const fullUpstreamTitle =
-            showUpstream && Array.isArray(m.upstreamModels) && m.upstreamModels.length > 1
-              ? m.upstreamModels.join(' / ')
-              : nameText;
-          patchAttr(refs.tdName, 'title', fullUpstreamTitle);
+          const modelDisplay = resolveModelDisplayInfo(m, displaySettings, { fallback: '—' });
+          patchText(refs.tdName, modelDisplay.text);
+          patchAttr(refs.tdName, 'title', modelDisplay.title);
           patchText(refs.tdCalls, String(Number(m.calls || 0)));
           patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' tok/s'));
           patchText(refs.speedSub, `有效 ${sampleSummary(m.speedSummary)}`);
@@ -368,6 +368,9 @@ export const StepsDetailView = defineComponent({
         sessionModelBreakdown: st.telemetry?.activeConversation?.modelBreakdown,
         modelBreakdown: st.telemetry?.modelBreakdown,
         showUpstreamModel: Boolean(st.telemetry?.settings?.showUpstreamModel),
+        orchestratorIdMode: normalizeOrchestratorIdDisplayMode(
+          st.telemetry?.settings?.orchestratorIdMode
+        ),
       }),
       (slice) => {
         latestSlice = slice;

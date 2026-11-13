@@ -23,6 +23,7 @@ import {
   formatMetric,
   formatTokens,
   formatUsd,
+  resolveModelDisplayInfo,
   sampleSummary,
   speedReasonText,
 } from '../../core/formatters.js';
@@ -1990,11 +1991,9 @@ export function mountWindowOverlay() {
     }
 
     // --- 同步悬停三卡片全景概览（与 LiveOverviewView 保持完全一致的数据口径与视觉呈现） ---
-    const showUpstream = Boolean(telemetry.settings?.showUpstreamModel);
-    const activeModelDisplay =
-      (showUpstream
-        ? overviewActive.activeModelUpstream || overviewActive.activeModelShort
-        : overviewActive.activeModelShort) || '模型未知';
+    const activeModelDisplay = resolveModelDisplayInfo(overviewActive, telemetry.settings, {
+      fallback: '模型未知',
+    }).text;
 
     patchClasses(hoverPulseDot, { 'is-pulsing': Boolean(overviewActive.isRunning || isRunning) });
     patchText(hoverTpsVal, formatMetric(overviewActive.latestTokPerSec, ' tok/s'));

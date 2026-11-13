@@ -28,6 +28,7 @@ import { enumerateAndSyncConversations } from './local-scanner.mjs';
 import { callLsRpc, getOfficialQuotaSummary } from './ls-rpc.mjs';
 import {
   computeStepCost,
+  formatUpstreamModelId,
   isArgonModelIdentifier,
   isCarbonModelIdentifier,
   resolveModelInfo,
@@ -135,7 +136,10 @@ function enrichActiveConversationSteps(
     const rawUpstreamModel =
       resolvedResponseModel ||
       (mInfo.modelId && mInfo.modelId !== 'unknown' ? mInfo.modelId : mInfo.shortName);
-    const modelUpstream = st.isCompactionStep ? `${rawUpstreamModel}·压缩` : rawUpstreamModel;
+    const annotatedUpstreamModel = formatUpstreamModelId(rawUpstreamModel, mInfo);
+    const modelUpstream = st.isCompactionStep
+      ? `${annotatedUpstreamModel}·压缩`
+      : annotatedUpstreamModel;
 
     const {
       viewableDelaySec: _viewableDelaySec,
@@ -898,10 +902,11 @@ export async function buildTelemetryPayloadInternal(
           ? knownUpstreamByModelKey.get(bestMetricStep.modelKey) || ''
           : '');
       modelShort = mInfo.shortName || '';
-      modelUpstream =
+      const rawQuickUpstream =
         resolvedResp ||
         (mInfo.modelId && mInfo.modelId !== 'unknown' ? mInfo.modelId : mInfo.shortName) ||
         '';
+      modelUpstream = formatUpstreamModelId(rawQuickUpstream, mInfo);
       latestTokPerSec = roundMetric(speedMetric(bestMetricStep).value);
     }
 

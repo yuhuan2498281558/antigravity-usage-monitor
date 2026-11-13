@@ -13,7 +13,11 @@ import {
 } from '../speed-metrics.mjs';
 import { roundMetric, trajectoryCache } from './config.mjs';
 import { loadExternalDeepStatsCache } from './local-scanner.mjs';
-import { computeStepCost, resolveModelInfo } from './model-pricing.mjs';
+import {
+  computeStepCost,
+  formatUpstreamModelId,
+  resolveModelInfo,
+} from './model-pricing.mjs';
 
 function safeTok(val) {
   const n = Number(val);
@@ -260,7 +264,10 @@ function accumulateStepIntoModelMap(perModelStats, st, mInfo, stepCost) {
     perModelStats.set(modelGroupKey, {
       label: modelGroupKey,
       shortName: mInfo.shortName,
-      fallbackModelId: mInfo.modelId && mInfo.modelId !== 'unknown' ? mInfo.modelId : '',
+      fallbackModelId:
+        mInfo.modelId && mInfo.modelId !== 'unknown'
+          ? formatUpstreamModelId(mInfo.modelId, mInfo)
+          : '',
       upstreamModelCounts: new Map(),
       family: mInfo.family,
       calls: 0,
@@ -276,9 +283,10 @@ function accumulateStepIntoModelMap(perModelStats, st, mInfo, stepCost) {
   }
   const agg = perModelStats.get(modelGroupKey);
   if (st.responseModel) {
+    const formattedResp = formatUpstreamModelId(st.responseModel, mInfo);
     agg.upstreamModelCounts.set(
-      st.responseModel,
-      (agg.upstreamModelCounts.get(st.responseModel) || 0) + 1
+      formattedResp,
+      (agg.upstreamModelCounts.get(formattedResp) || 0) + 1
     );
   }
   accumulateSpeed(agg.speedAccumulator, st);

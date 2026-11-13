@@ -88,14 +88,29 @@ export function normalizeClientUpdateMode(mode, legacyAutoUpdate) {
   return 'manual';
 }
 
+export function normalizeClientOrchestratorIdMode(mode) {
+  return String(mode ?? '').trim().toLowerCase() === 'full' ? 'full' : 'compact';
+}
+
 function isEquivalentTelemetry(prev, next) {
   if (!prev || !next) return false;
   if (prev === next) return true;
 
-  // 1. 比对系统设置项（模型显示策略、周预算模式与额度、插件更新策略、双栖与顶栏槽位配置）
+  // 1. 比对系统设置项（模型显示策略、Orchestrator ID 显示风格、周预算模式与额度、插件更新策略、双栖与顶栏槽位配置）
   const pAct = prev.activeConversation;
   const nAct = next.activeConversation;
   if (prev.settings?.showUpstreamModel !== next.settings?.showUpstreamModel) return false;
+  const prevOrchIdMode =
+    String(prev.settings?.orchestratorIdMode ?? 'compact').trim().toLowerCase() === 'full'
+      ? 'full'
+      : 'compact';
+  const nextOrchIdMode =
+    String(next.settings?.orchestratorIdMode ?? 'compact').trim().toLowerCase() === 'full'
+      ? 'full'
+      : 'compact';
+  if (prevOrchIdMode !== nextOrchIdMode) {
+    return false;
+  }
   if (prev.settings?.weeklyLimitMode !== next.settings?.weeklyLimitMode) return false;
   if (prev.settings?.weeklyTokenBudget !== next.settings?.weeklyTokenBudget) return false;
   if (prev.settings?.weeklyCostBudget !== next.settings?.weeklyCostBudget) return false;
@@ -606,6 +621,9 @@ export async function saveSettingsPatch(patch) {
     const mode = safePatch.weeklyLimitMode;
     safePatch.weeklyLimitMode =
       mode === 'custom_tokens' || mode === 'custom_cost' ? mode : 'official';
+  }
+  if (Object.prototype.hasOwnProperty.call(safePatch, 'orchestratorIdMode')) {
+    safePatch.orchestratorIdMode = normalizeClientOrchestratorIdMode(safePatch.orchestratorIdMode);
   }
   if (Object.prototype.hasOwnProperty.call(safePatch, 'showTopbarMultiSession')) {
     safePatch.showTopbarMultiSession = Boolean(safePatch.showTopbarMultiSession);

@@ -95,6 +95,19 @@ export const DEFAULT_TOPBAR_SLOTS = Object.freeze(['context', 'tps', 'quota_auto
 
 export const PLUGIN_UPDATE_MODES = Object.freeze(['off', 'manual', 'auto']);
 
+export const ORCHESTRATOR_ID_MODES = Object.freeze(['compact', 'full']);
+
+/**
+ * 归一化 Orchestrator 系列模型 ID 显示风格（`'compact'` 精简代号 vs `'full'` 完整模型 ID，默认 `'compact'`）。
+ *
+ * @param {unknown} mode
+ * @returns {'compact'|'full'}
+ */
+export function normalizeOrchestratorIdMode(mode) {
+  const m = String(mode ?? '').trim().toLowerCase();
+  return m === 'full' ? 'full' : 'compact';
+}
+
 /**
  * 归一化插件更新策略枚举（兼容历史 `autoUpdatePlugin` 布尔开关，默认 `'manual'`）。
  *
@@ -135,6 +148,7 @@ const DEFAULT_SETTINGS = {
   weeklyCostBudget: 100,        // 自定义每周美元费用预算默认值 ($100，保留底层兼容)
   weeklyLimitMode: 'official',  // 'official' | 'custom_tokens' | 'custom_cost'
   showUpstreamModel: false,     // 是否显示上游真实 responseModel 名称
+  orchestratorIdMode: 'compact', // 'compact' | 'full'（Orchestrator 系列显示精简 ID 或完整 ID）
   pluginUpdateMode: 'manual',   // 'off' | 'manual' | 'auto'（默认仅提示新版本，手动更新）
   autoUpdatePlugin: false,      // 派生自 pluginUpdateMode === 'auto'，保留底层兼容
   enableWindowOverlay: true,    // 是否启用双栖模式（自动通过 CDP 在主窗口顶栏挂载胶囊与悬浮面板）
@@ -233,6 +247,7 @@ export function loadSettings() {
     ),
     weeklyLimitMode: normalizeWeeklyLimitMode(merged.weeklyLimitMode),
     showUpstreamModel: merged.showUpstreamModel === true,
+    orchestratorIdMode: normalizeOrchestratorIdMode(merged.orchestratorIdMode),
     pluginUpdateMode,
     autoUpdatePlugin: pluginUpdateMode === 'auto',
     enableWindowOverlay: merged.enableWindowOverlay !== false,
@@ -263,6 +278,7 @@ export function computeRuntimeCodeVersion() {
     join(HERE, 'styles.css'),
     join(HERE, 'main.mjs'),
     join(HERE, 'speed-metrics.mjs'),
+    LOCAL_CATALOG_FILE,
   ];
   const backendDir = join(HERE, 'backend');
   try {
