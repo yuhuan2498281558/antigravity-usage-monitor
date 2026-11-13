@@ -100,3 +100,102 @@ export function formatElapsedSec(seconds) {
   const remM = m % 60;
   return `${h}h ${remM}m`;
 }
+
+/**
+ * 归一化 Orchestrator 系列 ID 显示格式枚举（`'compact'` 精简代号 vs `'full'` 原始完整 ID，默认 `'compact'`）。
+ *
+ * @param {unknown} mode
+ * @returns {'compact'|'full'}
+ */
+export function normalizeOrchestratorIdDisplayMode(mode) {
+  return String(mode ?? '').trim().toLowerCase() === 'full' ? 'full' : 'compact';
+}
+
+/**
+ * 统一解析步骤、会话摘要或模型汇总行面向用户的模型显示文本与悬停提示。
+ *
+ * 规则：
+ * - Orchestrator 系列（`Orchestrator (Carbon)`、`Orchestrator (Argon)`、`gemini-flash-worker-agy` / `M669`）
+ *   独立遵循 `orchestratorIdMode`（`'compact'` 显示 `orchestrator-carbon` / `orchestrator-argon` / `worker-agy-hydrogen`；
+ *   `'full'` 显示带括号标注的完整上游 ID），不受普通模型“精简代号 / 原始模型 ID”切换影响；
+ * - 其余普通模型继续按 `showUpstreamModel` 与视图选项切换。
+ *
+ * @param {object|null|undefined} target
+ * @param {{ showUpstreamModel?: boolean, orchestratorIdMode?: string }|boolean} [settings]
+ * @param {{ preferLabelInShort?: boolean, fallback?: string }} [options]
+ * @returns {{ text: string, title: string, isOrchestratorSeries: boolean }}
+ */
+export function resolveModelDisplayInfo(target, settings = {}, options = {}) {
+  const showUpstream =
+    typeof settings === 'boolean' ? settings : Boolean(settings?.showUpstreamModel);
+  const orchestratorMode = normalizeOrchestratorIdDisplayMode(
+    typeof settings === 'object' && settings ? settings.orchestratorIdMode : 'compact'
+  );
+  const preferLabelInShort = Boolean(options?.preferLabelInShort);
+  const fallback = options?.fallback ?? '模型未知';
+
+  if (!target || typeof target !== 'object') {
+    return { text: fallback, title: fallback, isOrchestratorSeries: false };
+  }
+
+  const shortText = String(
+    target.activeModelShort ?? target.modelShort ?? target.shortName ?? ''
+  ).trim();
+  const labelText = String(
+    target.activeModelLabel ?? target.modelLabel ?? target.label ?? ''
+  ).trim();
+  const upstreamText = String(
+    target.activeModelUpstream ?? target.modelUpstream ?? target.upstreamName ?? ''
+  ).trim();
+  const responseText = String(target.responseModel ?? '').trim();
+  const modelKeyText = String(target.modelKey ?? '').trim();
+
+  const isCompaction =
+    Boolean(target.isCompactionStep) ||
+    /·压缩\s*$/.test(shortText) ||
+    /·压缩\s*$/.test(upstreamText) ||
+    /·压缩\s*$/.test(labelText);
+
+  const combined = `${modelKeyText} ${shortText} ${labelText} ${upstreamText} ${responseText}`;
+  const isOrchWorker =
+    /\bMODEL_PLACEHOLDER_M669\b|\b[a-z0-9.-]*worker-agy\b|\bworker-agy-hydrogen\b|\bOrchestrator\s+Worker\b/i.test(
+      combined
+    );
+  const isOrchSeries =
+    isOrchWorker ||
+    /\bgemini-pro-orchestrator(?:-argon)?\b|\borchestrator-(?:carbon|argon)\b|\borch-(?:carbon|argon)(?:·压缩)?(?=\s|$)|Orchestrator\s*\((?:Carbon|Argon)\)|\bMODEL_PLACEHOLDER_M(?:667|681)\b/i.test(
+      combined
+    );
+
+  if (isOrchSeries) {
+    let compactId = 'orchestrator-carbon';
+    let fullId = 'gemini-pro-orchestrator (carbon-4)';
+    if (isOrchWorker) {
+      compactId = 'worker-agy-hydrogen';
+      fullId = 'gemini-flash-worker-agy (hydrogen-4)';
+    } else if (/\bargon\b|\bMODEL_PLACEHOLDER_M681\b|\borch-argon\b/i.test(combined)) {
+      compactId = 'orchestrator-argon';
+      fullId = 'gemini-pro-orchestrator-argon (argon-4)';
+    }
+    const suffix = isCompaction ? '·压缩' : '';
+    const text = `${orchestratorMode === 'full' ? fullId : compactId}${suffix}`;
+    const multiUpstream =
+      Array.isArray(target.upstreamModels) && target.upstreamModels.length > 1
+        ? target.upstreamModels.join(' / ')
+        : '';
+    const title = multiUpstream || `${fullId}${suffix}`;
+    return { text, title, isOrchestratorSeries: true };
+  }
+
+  const standardText =
+    (showUpstream
+      ? upstreamText || responseText || shortText || labelText
+      : preferLabelInShort
+        ? labelText || shortText
+        : shortText || labelText) || fallback;
+  const standardTitle =
+    showUpstream && Array.isArray(target.upstreamModels) && target.upstreamModels.length > 1
+      ? target.upstreamModels.join(' / ')
+      : standardText;
+  return { text: standardText, title: standardTitle, isOrchestratorSeries: false };
+}

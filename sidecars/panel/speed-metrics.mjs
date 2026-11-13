@@ -573,10 +573,24 @@ export function extractContextBreakdown(chat) {
  */
 export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
   const genByStep = new Map();
+  const orchestratorExecModels = new Set();
+  const collectOrchestratorExecModel = (pc) => {
+    const execModel = pc?.planExecuteConfig?.executionModel;
+    if (
+      typeof execModel === 'string' &&
+      execModel.trim() &&
+      /orchestrator|MODEL_PLACEHOLDER_M(?:667|681)\b/i.test(
+        `${pc?.modelName || ''} ${pc?.planModel || ''}`
+      )
+    ) {
+      orchestratorExecModels.add(execModel.trim());
+    }
+  };
   let latestBreakdownChat = null;
   let latestBreakdownStepIdx = -1;
 
   for (const gm of generatorMetadata || []) {
+    collectOrchestratorExecModel(gm?.plannerConfig);
     if (!gm?.chatModel) {
       continue;
     }
@@ -605,6 +619,11 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     }
 
     const stepIndex = m.sourceTrajectoryStepInfo?.stepIndex ?? index;
+    if (Array.isArray(m.generatorMetadata)) {
+      for (const g of m.generatorMetadata) {
+        collectOrchestratorExecModel(g?.plannerConfig);
+      }
+    }
     const inlineChat = Array.isArray(m.generatorMetadata)
       ? m.generatorMetadata.find((g) => g?.chatModel)
       : null;
@@ -708,14 +727,27 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       m?.responseModel,
     ].find(isValidModelValue);
 
+    const resolvedModelKey = identity ? identity[1].trim() : 'unknown';
+    const rawDisplayName = chat?.modelDisplayName || '';
+    const isGenericWorkerDisplay =
+      !rawDisplayName ||
+      /\borchestrator\b/i.test(rawDisplayName) ||
+      /^gemini\s+(?:flash|pro)(?:\s+worker)?$/i.test(rawDisplayName.trim());
+    const resolvedDisplayName =
+      (orchestratorExecModels.has(resolvedModelKey) ||
+        /^gemini-flash-worker-agy$/i.test(rawResponseModel || '')) &&
+      isGenericWorkerDisplay
+        ? 'Orchestrator Worker (Hydrogen)'
+        : rawDisplayName;
+
     result.push({
       stepIndex,
       isCompactionStep,
-      modelKey: identity ? identity[1].trim() : 'unknown',
+      modelKey: resolvedModelKey,
       modelSource: identity?.[0] || 'unavailable',
       responseModel: rawResponseModel ? rawResponseModel.trim() : '',
       modelIdentityVersion: MODEL_IDENTITY_VERSION,
-      modelDisplayName: chat?.modelDisplayName || '',
+      modelDisplayName: resolvedDisplayName,
       apiProvider: u.apiProvider || chat?.usage?.apiProvider || '',
       createdAt: m.createdAt || null,
       createdAtMs: Math.floor(start),

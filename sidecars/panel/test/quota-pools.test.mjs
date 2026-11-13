@@ -395,3 +395,91 @@ test('switching accounts within 10s immediately invalidates quotaSummaryCache', 
   );
   assert.equal(second.quotas.pools[0].weeklyRemainingPct, 8.7);
 });
+
+test('Orchestrator quota pool binding follows active phase: Carbon/Argon while planning, Gemini when offloaded to Hydrogen', async () => {
+  const ORCH_CARBON = 'MODEL_PLACEHOLDER_M667';
+  const ORCH_ARGON = 'MODEL_PLACEHOLDER_M681';
+  const ORCH_EXEC_HYDROGEN = 'MODEL_PLACEHOLDER_M669';
+  const geminiReset = new Date(Date.now() + 24 * 3600_000).toISOString();
+  const argonReset = new Date(Date.now() + 48 * 3600_000).toISOString();
+  const carbonReset = new Date(Date.now() + 72 * 3600_000).toISOString();
+  const fiveHourReset = new Date(Date.now() + 2 * 3600_000).toISOString();
+
+  const h = backendHarness({
+    summaries: {
+      orchCarbonPlan: { stepCount: 1 },
+      orchArgonPlan: { stepCount: 1 },
+      orchHydrogenExec: { stepCount: 2 },
+    },
+    trajectories: {
+      orchCarbonPlan: { trajectory: { steps: [makeStep(1, ORCH_CARBON)] } },
+      orchArgonPlan: { trajectory: { steps: [makeStep(1, ORCH_ARGON)] } },
+      orchHydrogenExec: {
+        trajectory: { steps: [makeStep(1, ORCH_CARBON), makeStep(2, ORCH_EXEC_HYDROGEN)] },
+      },
+    },
+    userStatus: {
+      userTier: { id: 'g1-pro-tier', name: 'Google AI Pro' },
+      cascadeModelConfigData: {
+        clientModelConfigs: [
+          {
+            label: 'Orchestrator (Carbon)',
+            modelId: 'gemini-pro-orchestrator',
+            modelOrAlias: { model: ORCH_CARBON },
+            quotaInfo: { remainingFraction: 0.4, resetTime: carbonReset },
+          },
+          {
+            label: 'Orchestrator (Argon)',
+            modelId: 'gemini-pro-orchestrator-argon',
+            modelOrAlias: { model: ORCH_ARGON },
+            quotaInfo: { remainingFraction: 0.6, resetTime: argonReset },
+          },
+          {
+            label: 'Gemini 3.8 Flash (High)',
+            modelId: 'gemini-3.8-flash-high',
+            modelOrAlias: { model: FLASH },
+            quotaInfo: { remainingFraction: 0.9, resetTime: geminiReset },
+          },
+        ],
+      },
+    },
+    quotaSummary: {
+      groups: [
+        {
+          displayName: 'Gemini Models',
+          buckets: [
+            { bucketId: 'gemini-5h', window: '5h', remainingFraction: 0.95, resetTime: fiveHourReset },
+            { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.9, resetTime: geminiReset },
+          ],
+        },
+        {
+          displayName: 'Gemini 4 Argon',
+          buckets: [
+            { bucketId: 'argon-weekly', window: 'weekly', remainingFraction: 0.6, resetTime: argonReset },
+          ],
+        },
+        {
+          displayName: 'Gemini 4 Carbon',
+          buckets: [
+            { bucketId: 'carbon-weekly', window: 'weekly', remainingFraction: 0.4, resetTime: carbonReset },
+          ],
+        },
+      ],
+    },
+  });
+
+  const pCarbon = await h.buildTelemetryPayloadInternal('orchCarbonPlan');
+  assert.equal(pCarbon.quotas.activePool.family, 'Carbon');
+  assert.equal(pCarbon.quotas.weekly.poolFamily, 'Carbon');
+  assert.equal(pCarbon.quotas.weekly.remainingPct, 40);
+
+  const pArgon = await h.buildTelemetryPayloadInternal('orchArgonPlan');
+  assert.equal(pArgon.quotas.activePool.family, 'Argon');
+  assert.equal(pArgon.quotas.weekly.poolFamily, 'Argon');
+  assert.equal(pArgon.quotas.weekly.remainingPct, 60);
+
+  const pExec = await h.buildTelemetryPayloadInternal('orchHydrogenExec');
+  assert.equal(pExec.quotas.activePool.family, 'Gemini');
+  assert.equal(pExec.quotas.weekly.poolFamily, 'Gemini');
+  assert.equal(pExec.quotas.weekly.remainingPct, 90);
+});

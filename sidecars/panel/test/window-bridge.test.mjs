@@ -654,6 +654,7 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     weeklyTokenBudget: 150000000,
     weeklyCostBudget: 100,
     showUpstreamModel: false,
+    orchestratorIdMode: 'compact',
     autoUpdatePlugin: false,
     enableWindowOverlay: true,
     showTopbarMultiSession: true,
@@ -1023,14 +1024,15 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     const settingsSelects = settingsPane.querySelectorAll('.custom-select');
     assert.equal(
       settingsSelects.length,
-      6,
-      'SettingsView renders 6 CustomSelect controls (mount, modelFormat, 3 topbar slots, autoUpdate)'
+      7,
+      'SettingsView renders 7 CustomSelect controls (mount, modelFormat, orchestratorIdFormat, 3 topbar slots, autoUpdate)'
     );
     const mountSelectEl = settingsSelects[0];
     const modelFormatSelectEl = settingsSelects[1];
-    const slot0SelectEl = settingsSelects[2];
-    const slot1SelectEl = settingsSelects[3];
-    const slot2SelectEl = settingsSelects[4];
+    const orchestratorIdSelectEl = settingsSelects[2];
+    const slot0SelectEl = settingsSelects[3];
+    const slot1SelectEl = settingsSelects[4];
+    const slot2SelectEl = settingsSelects[5];
 
     // Toggle windowMountSelect: dual -> sidebar -> dual
     assert.ok(mountSelectEl.querySelector('.select-label').textContent.includes('顶部栏 + 侧边栏'));
@@ -1059,6 +1061,20 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(mockSettings.showUpstreamModel, false);
     assert.ok(modelFormatSelectEl.querySelector('.select-label').textContent.includes('精简代号'));
+
+    // Toggle orchestratorIdSelect: compact -> full -> compact
+    assert.ok(orchestratorIdSelectEl.querySelector('.select-label').textContent.includes('精简代号'));
+    orchestratorIdSelectEl.querySelector('.select-trigger').dispatchEvent({ type: 'click', stopPropagation() {} });
+    orchestratorIdSelectEl.querySelectorAll('.select-option')[1].dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(mockSettings.orchestratorIdMode, 'full');
+    assert.ok(orchestratorIdSelectEl.querySelector('.select-label').textContent.includes('原始完整 ID'));
+
+    orchestratorIdSelectEl.querySelector('.select-trigger').dispatchEvent({ type: 'click', stopPropagation() {} });
+    orchestratorIdSelectEl.querySelectorAll('.select-option')[0].dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(mockSettings.orchestratorIdMode, 'compact');
+    assert.ok(orchestratorIdSelectEl.querySelector('.select-label').textContent.includes('精简代号'));
 
     // Toggle topbar multi-session switch: show -> hide -> show
     const topbarSegBtns = settingsPane.querySelectorAll('.seg-btn');
@@ -1165,7 +1181,7 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     );
     assert.equal(headerUpdateBtn.hasAttribute('hidden'), false);
 
-    const updateModeSelectEl = settingsSelects[5];
+    const updateModeSelectEl = settingsSelects[6];
     assert.equal(updateModeSelectEl.querySelector('.select-label').textContent, '仅提示新版本，手动更新');
     updateModeSelectEl.querySelector('.select-trigger').dispatchEvent({ type: 'click', stopPropagation() {} });
     const updateOpts = updateModeSelectEl.querySelectorAll('.select-option');

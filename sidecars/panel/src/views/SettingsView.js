@@ -1,7 +1,7 @@
 /**
  * @fileoverview View 4: SettingsView (系统设置视图).
  * 采用定制的 `CustomSelect` 与 `SegmentedControl` 替代所有原生表单控件，分为三个单层细线设置面板：
- * 1. 常规设置：配置面板挂载方式（双栖挂载 / 仅右侧辅助栏）与模型名称格式（精简代号 / 原始模型 ID）；
+ * 1. 常规设置：配置面板挂载方式（双栖挂载 / 仅右侧辅助栏）、模型名称格式（精简代号 / 原始模型 ID）与 Orchestrator 系列 ID 格式；
  * 2. 顶部栏定制：控制左侧「实时运行会话」入口开关，以及自由定义右侧精简胶囊三个数值槽位的显示内容与左右顺序；
  * 3. 版本更新：配置插件自动更新策略、手动同步云端模型价格表，以及检查并执行 Git/ZIP 双模式插件升级。
  */
@@ -11,6 +11,7 @@ import { h, patchAttr, patchClasses, patchText } from '../core/domPatch.js';
 import { createSvgIcon } from '../icons/SvgIcon.js';
 import {
   DEFAULT_CLIENT_TOPBAR_SLOTS,
+  normalizeClientOrchestratorIdMode,
   normalizeClientTopbarSlots,
   normalizeClientUpdateMode,
   saveSettingsPatch,
@@ -27,6 +28,12 @@ import { SegmentedControl } from '../components/ui/SegmentedControl.js';
 const STEP_MODEL_DISPLAY_OPTIONS = [
   { value: 'short', label: '精简代号 (如 argon-4-high)' },
   { value: 'upstream', label: '原始模型 ID (如 gemini-3.8-flash-n)' },
+];
+
+/** Orchestrator 系列模型 ID 显示方式可选项（独立于普通模型名称格式） */
+const ORCHESTRATOR_ID_DISPLAY_OPTIONS = [
+  { value: 'compact', label: '精简代号 (如 orchestrator-argon)' },
+  { value: 'full', label: '原始完整 ID (如 gemini-pro-orchestrator)' },
 ];
 
 /** 面板挂载模式可选项（顶部栏 + 侧边栏 vs 仅侧边栏） */
@@ -81,6 +88,7 @@ export const SettingsView = defineComponent({
   name: 'SettingsView',
   setup({ onCleanup }) {
     let draftShowUpstreamModel = false;
+    let draftOrchestratorIdMode = 'compact';
     let draftPluginUpdateMode = 'manual';
     let draftEnableWindowOverlay = true;
     let draftShowTopbarMulti = true;
@@ -185,6 +193,29 @@ export const SettingsView = defineComponent({
       },
     });
 
+    const orchestratorIdSelect = CustomSelect({
+      modelValue: 'compact',
+      icon: 'layers',
+      options: ORCHESTRATOR_ID_DISPLAY_OPTIONS,
+      onUpdateModelValue: async (val) => {
+        const nextMode = normalizeClientOrchestratorIdMode(val);
+        draftOrchestratorIdMode = nextMode;
+        orchestratorIdSelect.setValue(nextMode);
+        showSaveFeedback('保存中…');
+        try {
+          await saveSettingsPatch({
+            orchestratorIdMode: nextMode,
+          });
+          showSaveFeedback('已保存');
+        } catch {
+          if (latestSettings) {
+            renderSettings(latestSettings);
+          }
+          showSaveFeedback('保存失败');
+        }
+      },
+    });
+
     const generalPanel = h('section', { className: 'panel' }, [
       h('div', { className: 'panel-header' }, [
         h('span', { className: 'panel-title' }, [
@@ -200,6 +231,10 @@ export const SettingsView = defineComponent({
       h('div', { className: 'form-row' }, [
         h('span', { className: 'form-label', text: '模型名称格式' }),
         stepModelSelect.el,
+      ]),
+      h('div', { className: 'form-row' }, [
+        h('span', { className: 'form-label', text: 'Orchestrator 系列 ID' }),
+        orchestratorIdSelect.el,
       ]),
     ]);
 
@@ -532,6 +567,7 @@ export const SettingsView = defineComponent({
     function renderSettings(settings) {
       if (!settings) return;
       draftShowUpstreamModel = Boolean(settings.showUpstreamModel);
+      draftOrchestratorIdMode = normalizeClientOrchestratorIdMode(settings.orchestratorIdMode);
       draftPluginUpdateMode = normalizeClientUpdateMode(
         settings.pluginUpdateMode,
         settings.autoUpdatePlugin
@@ -542,6 +578,7 @@ export const SettingsView = defineComponent({
 
       windowMountSelect.setValue(draftEnableWindowOverlay ? 'dual' : 'sidebar');
       stepModelSelect.setValue(draftShowUpstreamModel ? 'upstream' : 'short');
+      orchestratorIdSelect.setValue(draftOrchestratorIdMode);
       autoUpdateSelect.setValue(draftPluginUpdateMode);
       syncTopbarControls();
       viewScrollbar.refresh();
@@ -623,6 +660,7 @@ export const SettingsView = defineComponent({
       unsubView();
       windowMountSelect.destroy();
       stepModelSelect.destroy();
+      orchestratorIdSelect.destroy();
       multiSessionToggle.destroy();
       for (const sel of slotSelects) {
         sel.destroy();
@@ -636,6 +674,7 @@ export const SettingsView = defineComponent({
       refs: {
         windowMountSelect,
         stepModelSelect,
+        orchestratorIdSelect,
         multiSessionToggle,
         slotSelects,
         resetTopbarBtn,

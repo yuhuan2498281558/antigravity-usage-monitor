@@ -23,6 +23,7 @@ import {
   formatMetric,
   formatTokens,
   formatUsd,
+  resolveModelDisplayInfo,
   sampleSummary,
   speedReasonText,
 } from '../core/formatters.js';
@@ -860,12 +861,10 @@ export const LiveOverviewView = defineComponent({
         ensureLiveTicker();
       }
 
-      // 1. 更新 4 格实时测速矩阵（展示当前会话全局汇总指标，遵循模型名称格式设置）
-      const showUpstream = Boolean(data.settings?.showUpstreamModel);
-      const activeModelDisplay =
-        (showUpstream
-          ? active.activeModelUpstream || active.activeModelShort
-          : active.activeModelShort) || '模型未知';
+      // 1. 更新 4 格实时测速矩阵（展示当前会话全局汇总指标，遵循模型名称格式与 Orchestrator ID 格式设置）
+      const activeModelDisplay = resolveModelDisplayInfo(active, data.settings, {
+        fallback: '模型未知',
+      }).text;
       patchClasses(pulseDot, { 'is-pulsing': Boolean(active.isRunning) });
       patchText(tpsVal, formatMetric(active.latestTokPerSec, ' tok/s'));
       const reason = speedReasonText(active.latestSpeedReason);
@@ -914,9 +913,9 @@ export const LiveOverviewView = defineComponent({
 
         const allAgentPills = agents.map((ag) => {
           const agPct = ag.context?.usedPct ?? 0;
-          const agModelDisplay =
-            (showUpstream ? ag.activeModelUpstream || ag.activeModelShort : ag.activeModelShort) ||
-            '模型未知';
+          const agModelDisplay = resolveModelDisplayInfo(ag, data.settings, {
+            fallback: '模型未知',
+          }).text;
           return {
             key: ag.agentId,
             label: `${ag.badgeText || ag.shortLabel} ${agPct}%`,

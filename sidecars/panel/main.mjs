@@ -22,6 +22,7 @@ import {
   computeRuntimeCodeVersion,
   isPlainObject,
   loadSettings,
+  normalizeOrchestratorIdMode,
   normalizePluginUpdateMode,
   normalizeTopbarCapsuleSlots,
   normalizeWeeklyLimitMode,
@@ -212,6 +213,10 @@ function executeSettingsAction(data) {
       typeof payload.showUpstreamModel === 'boolean'
         ? payload.showUpstreamModel
         : Boolean(current.showUpstreamModel),
+    orchestratorIdMode:
+      payload.orchestratorIdMode !== undefined
+        ? normalizeOrchestratorIdMode(payload.orchestratorIdMode)
+        : normalizeOrchestratorIdMode(current.orchestratorIdMode),
     pluginUpdateMode: nextPluginUpdateMode,
     autoUpdatePlugin: nextPluginUpdateMode === 'auto',
     enableWindowOverlay:

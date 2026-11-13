@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { extractModelSteps, normalizeCachedStep, MODEL_IDENTITY_VERSION } from '../speed-metrics.mjs';
-import { formatUsd } from '../src/core/formatters.js';
+import { formatUsd, resolveModelDisplayInfo } from '../src/core/formatters.js';
 import { backendHarness } from './backend-harness.mjs';
 
 const FLASH = 'MODEL_PLACEHOLDER_M318', ARGON = 'MODEL_PLACEHOLDER_M418';
@@ -194,4 +194,291 @@ test('frontend considers a model-only correction a real telemetry update', () =>
   const a={activeConversation:{recentSteps:[{modelKey:'unknown',modelShort:'模型未知',costUsd:null}]}};
   const b=structuredClone(a); b.activeConversation.recentSteps[0].modelShort='new-model';
   assert.equal(ctx.compare(a,b),false); assert.equal(ctx.compare(a,structuredClone(a)),true);
+});
+
+const ORCH_CARBON = 'MODEL_PLACEHOLDER_M667';
+const ORCH_ARGON = 'MODEL_PLACEHOLDER_M681';
+const ORCH_EXEC_HYDROGEN = 'MODEL_PLACEHOLDER_M669';
+
+test('Orchestrator (Carbon) direct/planning and inferred compaction steps resolve to orch-carbon and annotate upstream ID', async () => {
+  const rows = [step(1, ORCH_CARBON), step(2, undefined, true), step(3, ORCH_CARBON)];
+  const raw = {
+    trajectory: {
+      steps: rows,
+      generatorMetadata: [
+        {
+          stepIndices: [1],
+          chatModel: {
+            model: ORCH_CARBON,
+            responseModel: 'gemini-pro-orchestrator',
+            modelDisplayName: 'Orchestrator (Carbon)',
+          },
+          plannerConfig: {
+            planModel: ORCH_CARBON,
+            modelName: 'gemini-pro-orchestrator',
+            planExecuteConfig: { executionModel: ORCH_EXEC_HYDROGEN },
+          },
+        },
+        {
+          stepIndices: [3],
+          chatModel: {
+            model: ORCH_CARBON,
+            responseModel: 'gemini-pro-orchestrator',
+            modelDisplayName: 'Orchestrator (Carbon)',
+          },
+        },
+      ],
+    },
+  };
+  const p = await payload(rows, { trajectories: { test: raw } });
+  const s1 = p.activeConversation.recentSteps.find((s) => s.stepIndex === 1);
+  const cp = p.activeConversation.recentSteps.find((s) => s.stepIndex === 2);
+
+  assert.equal(s1.modelShort, 'orch-carbon');
+  assert.equal(s1.modelUpstream, 'gemini-pro-orchestrator (carbon-4)');
+  assert.equal(s1.costUsd, 0.0129);
+  assert.equal(cp.modelKey, ORCH_CARBON);
+  assert.equal(cp.modelSource, 'inferred_compaction');
+  assert.equal(cp.modelShort, 'orch-carbon·压缩');
+  assert.equal(cp.modelUpstream, 'gemini-pro-orchestrator (carbon-4)·压缩');
+  assert.equal(p.activeConversation.activeModelShort, 'orch-carbon');
+  assert.equal(p.activeConversation.activeModelUpstream, 'gemini-pro-orchestrator (carbon-4)');
+  assert.equal(p.consumption.account.unpricedCalls, 0);
+  assert.equal(p.modelBreakdown.length, 1);
+  assert.equal(p.modelBreakdown[0].label, 'Orchestrator (Carbon)');
+  assert.equal(p.modelBreakdown[0].upstreamName, 'gemini-pro-orchestrator (carbon-4)');
+  assert.equal(p.modelBreakdown[0].calls, 3);
+});
+
+test('Orchestrator (Argon) resolves to orch-argon, annotates upstream ID, and is not misclassified as Carbon', async () => {
+  const h = backendHarness({
+    summaries: { test: { stepCount: 1 } },
+    trajectories: {
+      test: {
+        trajectory: {
+          steps: [step(1, ORCH_ARGON)],
+          generatorMetadata: [
+            {
+              stepIndices: [1],
+              chatModel: {
+                model: ORCH_ARGON,
+                responseModel: 'gemini-pro-orchestrator-argon',
+                modelDisplayName: 'Orchestrator (Argon)',
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+
+  const p = await h.buildTelemetryPayloadInternal('test');
+  const s1 = p.activeConversation.recentSteps[0];
+  assert.equal(s1.modelShort, 'orch-argon');
+  assert.equal(s1.modelUpstream, 'gemini-pro-orchestrator-argon (argon-4)');
+  assert.equal(s1.costUsd, 0.0129);
+  assert.equal(p.modelBreakdown[0].label, 'Orchestrator (Argon)');
+  assert.equal(p.modelBreakdown[0].upstreamName, 'gemini-pro-orchestrator-argon (argon-4)');
+  assert.equal(h.isArgonModelIdentifier(ORCH_ARGON, 'gemini-pro-orchestrator-argon', 'Orchestrator (Argon)'), true);
+  assert.equal(h.isCarbonModelIdentifier(ORCH_ARGON, 'gemini-pro-orchestrator-argon', 'Orchestrator (Argon)'), false);
+});
+
+test('real-world M669 worker steps (responseModel gemini-flash-worker-agy, displayName Gemini Flash) and uncatalogued executionModel resolve to Hydrogen', async () => {
+  const FUTURE_EXEC_PH = 'MODEL_PLACEHOLDER_M799';
+  const rows = [step(1, ORCH_CARBON), step(2, ORCH_EXEC_HYDROGEN), step(3, FUTURE_EXEC_PH)];
+  const raw = {
+    trajectory: {
+      steps: rows,
+      generatorMetadata: [
+        {
+          stepIndices: [1],
+          chatModel: {
+            model: ORCH_CARBON,
+            responseModel: 'gemini-pro-orchestrator',
+            modelDisplayName: 'Orchestrator (Carbon)',
+          },
+          plannerConfig: {
+            planModel: ORCH_CARBON,
+            modelName: 'gemini-pro-orchestrator',
+            planExecuteConfig: { executionModel: FUTURE_EXEC_PH },
+          },
+        },
+        {
+          stepIndices: [2],
+          chatModel: {
+            model: ORCH_EXEC_HYDROGEN,
+            responseModel: 'gemini-flash-worker-agy',
+            modelDisplayName: 'Gemini Flash',
+          },
+        },
+        {
+          stepIndices: [3],
+          chatModel: {
+            model: FUTURE_EXEC_PH,
+            responseModel: 'gemini-flash-worker-agy',
+            modelDisplayName: 'Gemini Flash',
+          },
+        },
+      ],
+    },
+  };
+
+  const p = await payload(rows, { trajectories: { test: raw } });
+  const s1 = p.activeConversation.recentSteps.find((s) => s.stepIndex === 1);
+  const s2 = p.activeConversation.recentSteps.find((s) => s.stepIndex === 2);
+  const s3 = p.activeConversation.recentSteps.find((s) => s.stepIndex === 3);
+
+  assert.equal(s1.modelShort, 'orch-carbon');
+  assert.equal(s1.modelUpstream, 'gemini-pro-orchestrator (carbon-4)');
+  assert.equal(s1.costUsd, 0.0129);
+
+  assert.equal(s2.modelShort, 'hydrogen-4');
+  assert.equal(s2.modelLabel, 'Orchestrator Worker (Hydrogen)');
+  assert.equal(s2.modelUpstream, 'gemini-flash-worker-agy (hydrogen-4)');
+  assert.equal(s2.costUsd, 0.0103);
+
+  assert.equal(s3.modelShort, 'hydrogen-4');
+  assert.equal(s3.modelLabel, 'Orchestrator Worker (Hydrogen)');
+  assert.equal(s3.modelUpstream, 'gemini-flash-worker-agy (hydrogen-4)');
+  assert.equal(s3.costUsd, 0.0103);
+
+  assert.equal(p.consumption.account.unpricedCalls, 0);
+  const orchRow = p.modelBreakdown.find((m) => m.label === 'Orchestrator (Carbon)');
+  const hydroRow = p.modelBreakdown.find((m) => m.label === 'Orchestrator Worker (Hydrogen)');
+  assert.ok(orchRow && hydroRow, 'modelBreakdown keeps orchestrator planning separate from Hydrogen worker');
+  assert.equal(p.modelBreakdown.some((m) => m.label === 'Gemini Flash'), false);
+  assert.equal(orchRow.calls, 1);
+  assert.equal(hydroRow.calls, 2);
+  assert.equal(hydroRow.upstreamName, 'gemini-flash-worker-agy (hydrogen-4)');
+
+  // Also verify already-cached M669 worker steps carrying vague "Gemini Flash" or transitional "Gemini 4 Hydrogen" resolve cleanly
+  const cachedStep = {
+    ...extractModelSteps([step(10, ORCH_EXEC_HYDROGEN)])[0],
+    responseModel: 'gemini-flash-worker-agy',
+    modelDisplayName: 'Gemini Flash',
+  };
+  const cachedTransitionalDirect = {
+    ...extractModelSteps([step(11, 'MODEL_PLACEHOLDER_M528')])[0],
+    modelDisplayName: 'Gemini 4 Hydrogen (XHigh)',
+  };
+  const hCached = backendHarness({
+    cache: { test: { signature: 'v13-clean:2:', steps: [cachedStep, cachedTransitionalDirect] } },
+    trajectories: { test: new Error('offline') },
+  });
+  const pCached = await hCached.buildTelemetryPayloadInternal('test');
+  assert.equal(pCached.activeConversation.activeModelShort, 'hydrogen-4-xhigh');
+  assert.equal(
+    pCached.modelBreakdown.find((m) => m.label === 'Orchestrator Worker (Hydrogen)')?.upstreamName,
+    'gemini-flash-worker-agy (hydrogen-4)'
+  );
+  assert.ok(
+    pCached.modelBreakdown.find((m) => m.label === 'Gemini 4 Hydrogen'),
+    'direct Gemini 4 Hydrogen remains in its own breakdown bucket separate from worker-agy'
+  );
+});
+
+test('new Carbon (M427/M437/M438) and Hydrogen XHigh/High/Medium/Low (M525-M528) placeholders resolve and group cleanly', () => {
+  const { resolveModelInfo, getBaseModelLabel } = backendHarness();
+
+  assert.equal(resolveModelInfo('MODEL_PLACEHOLDER_M427').shortName, 'carbon-4-high');
+  assert.equal(resolveModelInfo('MODEL_PLACEHOLDER_M437').shortName, 'carbon-4');
+  assert.equal(resolveModelInfo('MODEL_PLACEHOLDER_M438').shortName, 'carbon-4-low');
+
+  const xhigh = resolveModelInfo('MODEL_PLACEHOLDER_M528');
+  assert.equal(xhigh.shortName, 'hydrogen-4-xhigh');
+  assert.equal(xhigh.baseLabel, 'Gemini 4 Hydrogen');
+  assert.equal(xhigh.pricing.input, 1.5);
+  assert.equal(xhigh.pricing.cache, 0.15);
+  assert.equal(xhigh.pricing.output, 7.5);
+  assert.equal(resolveModelInfo('MODEL_PLACEHOLDER_M525').shortName, 'hydrogen-4-high');
+  assert.equal(resolveModelInfo('MODEL_PLACEHOLDER_M526').shortName, 'hydrogen-4');
+  assert.equal(resolveModelInfo('MODEL_PLACEHOLDER_M527').shortName, 'hydrogen-4-low');
+  assert.equal(resolveModelInfo('MODEL_PLACEHOLDER_M527').pricing.input, 1.5);
+  assert.equal(resolveModelInfo('MODEL_PLACEHOLDER_M527').pricing.output, 7.5);
+
+  assert.equal(getBaseModelLabel('Orchestrator (Carbon)'), 'Orchestrator (Carbon)');
+  assert.equal(getBaseModelLabel('Orchestrator (Argon)'), 'Orchestrator (Argon)');
+  assert.equal(getBaseModelLabel('Orchestrator Worker (Hydrogen)'), 'Orchestrator Worker (Hydrogen)');
+});
+
+test('orchestratorIdMode defaults to compact, persists via settings action, and controls Orchestrator series independently of showUpstreamModel', () => {
+  const h = backendHarness();
+  assert.equal(h.loadSettings().orchestratorIdMode, 'compact');
+
+  const resFull = h.executeSettingsAction({ orchestratorIdMode: 'full' });
+  assert.equal(resFull.ok, true);
+  assert.equal(resFull.updated.orchestratorIdMode, 'full');
+
+  const resInvalid = h.executeSettingsAction({ orchestratorIdMode: 'unexpected' });
+  assert.equal(resInvalid.updated.orchestratorIdMode, 'compact');
+
+  const orchCarbon = {
+    modelKey: ORCH_CARBON,
+    modelShort: 'orch-carbon',
+    modelLabel: 'Orchestrator (Carbon)',
+    modelUpstream: 'gemini-pro-orchestrator (carbon-4)',
+    responseModel: 'gemini-pro-orchestrator',
+  };
+  const orchArgon = {
+    modelKey: ORCH_ARGON,
+    modelShort: 'orch-argon',
+    modelLabel: 'Orchestrator (Argon)',
+    modelUpstream: 'gemini-pro-orchestrator-argon (argon-4)',
+    responseModel: 'gemini-pro-orchestrator-argon',
+  };
+  const orchWorkerCompaction = {
+    modelKey: ORCH_EXEC_HYDROGEN,
+    modelShort: 'hydrogen-4·压缩',
+    modelLabel: 'Orchestrator Worker (Hydrogen) [自动压缩]',
+    modelUpstream: 'gemini-flash-worker-agy (hydrogen-4)·压缩',
+    responseModel: 'gemini-flash-worker-agy',
+    isCompactionStep: true,
+  };
+  const directHydrogen = {
+    modelKey: 'MODEL_PLACEHOLDER_M528',
+    modelShort: 'hydrogen-4-xhigh',
+    modelLabel: 'Gemini 4 Hydrogen (XHigh)',
+    modelUpstream: 'gemini-4-hydrogen-xhigh',
+  };
+
+  for (const showUpstreamModel of [false, true]) {
+    assert.equal(
+      resolveModelDisplayInfo(orchCarbon, { showUpstreamModel, orchestratorIdMode: 'compact' }).text,
+      'orchestrator-carbon'
+    );
+    assert.equal(
+      resolveModelDisplayInfo(orchArgon, { showUpstreamModel, orchestratorIdMode: 'compact' }).text,
+      'orchestrator-argon'
+    );
+    assert.equal(
+      resolveModelDisplayInfo(orchWorkerCompaction, { showUpstreamModel, orchestratorIdMode: 'compact' }).text,
+      'worker-agy-hydrogen·压缩'
+    );
+    assert.equal(
+      resolveModelDisplayInfo(orchCarbon, { showUpstreamModel, orchestratorIdMode: 'full' }).text,
+      'gemini-pro-orchestrator (carbon-4)'
+    );
+    assert.equal(
+      resolveModelDisplayInfo(orchArgon, { showUpstreamModel, orchestratorIdMode: 'full' }).text,
+      'gemini-pro-orchestrator-argon (argon-4)'
+    );
+    assert.equal(
+      resolveModelDisplayInfo(orchWorkerCompaction, { showUpstreamModel, orchestratorIdMode: 'full' }).text,
+      'gemini-flash-worker-agy (hydrogen-4)·压缩'
+    );
+  }
+
+  // Non-Orchestrator direct Hydrogen still follows showUpstreamModel regardless of orchestratorIdMode
+  assert.equal(
+    resolveModelDisplayInfo(directHydrogen, { showUpstreamModel: false, orchestratorIdMode: 'compact' }).text,
+    'hydrogen-4-xhigh'
+  );
+  assert.equal(
+    resolveModelDisplayInfo(directHydrogen, { showUpstreamModel: true, orchestratorIdMode: 'compact' }).text,
+    'gemini-4-hydrogen-xhigh'
+  );
+  assert.equal(
+    resolveModelDisplayInfo(directHydrogen, { showUpstreamModel: false, orchestratorIdMode: 'full' }, { preferLabelInShort: true }).text,
+    'Gemini 4 Hydrogen (XHigh)'
+  );
 });
