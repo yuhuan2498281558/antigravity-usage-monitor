@@ -167,6 +167,31 @@ function enrichActiveConversationSteps(
     };
   });
 
+  // 关联每轮用户提问摘要与最新轮次标识，供步骤表极简导轨与气泡展示
+  let maxTurnIndex = 0;
+  const promptByTurn = new Map();
+  for (const st of enrichedActiveSteps) {
+    const tIdx = st.turnIndex;
+    if (!Number.isInteger(tIdx) || tIdx <= 0) continue;
+    if (tIdx > maxTurnIndex) maxTurnIndex = tIdx;
+    if (st.turnPrompt && (st.isTurnStart || !promptByTurn.has(tIdx))) {
+      promptByTurn.set(tIdx, st.turnPrompt);
+    }
+  }
+  for (const st of enrichedActiveSteps) {
+    const tIdx = st.turnIndex;
+    if (!Number.isInteger(tIdx) || tIdx <= 0) {
+      st.turnIndex = null;
+      st.isTurnStart = false;
+      st.isLatestTurn = false;
+      st.turnPrompt = '';
+      continue;
+    }
+    st.isTurnStart = Boolean(st.isTurnStart);
+    st.isLatestTurn = tIdx === maxTurnIndex;
+    st.turnPrompt = promptByTurn.get(tIdx) || '';
+  }
+
   const latestEnriched =
     enrichedActiveSteps.length > 0 ? enrichedActiveSteps[enrichedActiveSteps.length - 1] : null;
   const sessionAvgTokPerSec = roundMetric(sessionSpeed.avgTokPerSec);
@@ -543,6 +568,49 @@ export async function buildTelemetryPayloadInternal(
         (a.agentIndex || 0) - (b.agentIndex || 0) ||
         (a.stepIndex || 0) - (b.stepIndex || 0)
     );
+
+    // 在「全部汇总」视图下，将并行交错的子代理步骤按时间归入对应的主会话用户轮次，避免导轨被交错步骤切碎
+    const mainTurns = [];
+    let maxRootTurn = 0;
+    for (const mSt of enrichedActiveSteps) {
+      if (mSt.isTurnStart && Number.isInteger(mSt.turnIndex) && mSt.turnIndex > 0) {
+        mainTurns.push({
+          turnIndex: mSt.turnIndex,
+          startMs: mSt.createdAtMs || 0,
+          prompt: mSt.turnPrompt || '',
+        });
+        if (mSt.turnIndex > maxRootTurn) maxRootTurn = mSt.turnIndex;
+      }
+    }
+    if (mainTurns.length > 0) {
+      const seenRootStarts = new Set();
+      for (const st of allCombinedEnrichedSteps) {
+        let matched = null;
+        if (!st.isSubagent && Number.isInteger(st.turnIndex) && st.turnIndex > 0) {
+          matched = mainTurns.find((t) => t.turnIndex === st.turnIndex) || null;
+        } else {
+          const ts = st.createdAtMs || 0;
+          for (let k = mainTurns.length - 1; k >= 0; k--) {
+            if (ts >= mainTurns[k].startMs) {
+              matched = mainTurns[k];
+              break;
+            }
+          }
+          if (!matched) matched = mainTurns[0];
+        }
+        if (matched) {
+          st.rootTurnIndex = matched.turnIndex;
+          st.isRootLatestTurn = matched.turnIndex === maxRootTurn;
+          st.rootTurnPrompt = matched.prompt || '';
+          if (!seenRootStarts.has(matched.turnIndex)) {
+            seenRootStarts.add(matched.turnIndex);
+            st.isRootTurnStart = true;
+          } else {
+            st.isRootTurnStart = false;
+          }
+        }
+      }
+    }
     const combinedSpeed = summarizeSpeed(allCombinedRawSteps);
     const combinedTtft = summarizeTtft(allCombinedRawSteps);
     const combinedAvgTokPerSec = roundMetric(combinedSpeed.avgTokPerSec);

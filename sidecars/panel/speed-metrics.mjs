@@ -610,12 +610,85 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
 
   const result = [];
   let lastCompactionStepIdx = -1;
+  let turnCounter = 0;
+  let activeTurnIndex = null;
+  let pendingTurnPrompts = [];
+  let hasUnconsumedTurn = false;
+
+  const isUserTurnBoundary = (step) => {
+    if (!step || typeof step !== 'object') return false;
+    const t = String(step.type || '').trim().toUpperCase();
+    if (t === 'CORTEX_STEP_TYPE_USER_INPUT' || t === 'USER_INPUT') {
+      return true;
+    }
+    return Boolean(step.userInput && typeof step.userInput === 'object');
+  };
+
+  const extractUserTurnPrompt = (step) => {
+    const ui = step?.userInput;
+    let raw = '';
+    if (typeof ui?.userResponse === 'string' && ui.userResponse.trim()) {
+      raw = ui.userResponse;
+    } else if (Array.isArray(ui?.items)) {
+      raw = ui.items
+        .map((it) => (typeof it?.text === 'string' ? it.text : ''))
+        .filter(Boolean)
+        .join('\n');
+    } else if (typeof step?.content === 'string' && step.content.trim()) {
+      const mReq = step.content.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/i);
+      raw = mReq
+        ? mReq[1]
+        : step.content.replace(/<ADDITIONAL_METADATA>[\s\S]*$/i, '');
+    }
+    const cleaned = String(raw || '')
+      .split(/\r?\n/)
+      .map((l) => l.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .join('\n');
+    const mediaArr = Array.isArray(ui?.media)
+      ? ui.media
+      : Array.isArray(step?.media)
+        ? step.media
+        : [];
+    const hasMedia = mediaArr.length > 0;
+    if (!cleaned) {
+      return hasMedia ? '[图片/附件提问]' : '';
+    }
+    const withMedia = hasMedia ? `${cleaned} [附图]` : cleaned;
+    return withMedia.length > 180 ? `${withMedia.slice(0, 179)}…` : withMedia;
+  };
 
   rawSteps.forEach((s, index) => {
+    if (isUserTurnBoundary(s)) {
+      const promptText = extractUserTurnPrompt(s);
+      if (!hasUnconsumedTurn) {
+        hasUnconsumedTurn = true;
+        pendingTurnPrompts = promptText ? [promptText] : [];
+      } else if (
+        promptText &&
+        pendingTurnPrompts[pendingTurnPrompts.length - 1] !== promptText
+      ) {
+        pendingTurnPrompts.push(promptText);
+      }
+    }
+
     const m = s?.metadata;
     const u = m?.modelUsage || m?.retryInfos?.[0]?.usage;
     if (!u) {
       return;
+    }
+
+    let stepIsTurnStart = false;
+    let stepTurnPrompt = '';
+    if (hasUnconsumedTurn) {
+      turnCounter += 1;
+      activeTurnIndex = turnCounter;
+      stepIsTurnStart = true;
+      const joinedPrompt = pendingTurnPrompts.join('\n').trim();
+      stepTurnPrompt =
+        joinedPrompt.length > 180 ? `${joinedPrompt.slice(0, 179)}…` : joinedPrompt;
+      hasUnconsumedTurn = false;
+      pendingTurnPrompts = [];
     }
 
     const stepIndex = m.sourceTrajectoryStepInfo?.stepIndex ?? index;
@@ -778,6 +851,9 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       speedSampleEligible:
         totalTokPerSec !== null && !shortOutputSample && !isCompactionStep,
       speedReason,
+      turnIndex: activeTurnIndex,
+      isTurnStart: stepIsTurnStart,
+      ...(stepIsTurnStart && stepTurnPrompt ? { turnPrompt: stepTurnPrompt } : {}),
     });
   });
 

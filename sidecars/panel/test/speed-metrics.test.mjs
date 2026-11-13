@@ -281,3 +281,49 @@ test('extractLiveActivity covers thinking, partial streaming tool args, multi-to
   assert.equal(actTranscript2.stepProgress, '2/2');
   assert.equal(actTranscript2.detail, '列出插件项目全部源文件 (Get-ChildItem -Path "f:\\ppt")');
 });
+
+test('extractModelSteps tracks sequential user turns, marks only the first model step per turn, and merges consecutive prompts', () => {
+  const mkModelStep = (stepIndex) => ({
+    status: 'CORTEX_STEP_STATUS_DONE',
+    type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+    metadata: {
+      sourceTrajectoryStepInfo: { stepIndex },
+      createdAt: '2026-01-01T00:00:00Z',
+      finishedGeneratingAt: '2026-01-01T00:00:02Z',
+      modelUsage: { inputTokens: '100', cacheReadTokens: '200', outputTokens: '80' },
+    },
+    plannerResponse: { response: 'ok' },
+  });
+
+  const steps = extractModelSteps([
+    {
+      type: 'CORTEX_STEP_TYPE_USER_INPUT',
+      userInput: { userResponse: '第一轮提问' },
+    },
+    mkModelStep(1),
+    { type: 'CORTEX_STEP_TYPE_VIEW_FILE' },
+    mkModelStep(3),
+    {
+      type: 'CORTEX_STEP_TYPE_USER_INPUT',
+      userInput: { userResponse: '取消前一句' },
+    },
+    {
+      type: 'CORTEX_STEP_TYPE_USER_INPUT',
+      userInput: { userResponse: '第二轮补充提问', media: [{}] },
+    },
+    mkModelStep(7),
+  ]);
+
+  assert.equal(steps.length, 3);
+  assert.equal(steps[0].turnIndex, 1);
+  assert.equal(steps[0].isTurnStart, true);
+  assert.equal(steps[0].turnPrompt, '第一轮提问');
+
+  assert.equal(steps[1].turnIndex, 1);
+  assert.equal(steps[1].isTurnStart, false);
+  assert.equal(steps[1].turnPrompt, undefined);
+
+  assert.equal(steps[2].turnIndex, 2);
+  assert.equal(steps[2].isTurnStart, true);
+  assert.equal(steps[2].turnPrompt, '取消前一句\n第二轮补充提问 [附图]');
+});
