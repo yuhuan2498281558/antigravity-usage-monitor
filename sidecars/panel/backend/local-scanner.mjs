@@ -724,6 +724,9 @@ export async function enumerateAndSyncConversations({
     if (!Object.prototype.hasOwnProperty.call(lastCachedStep, 'contextBreakdown')) {
       return true;
     }
+    if (!Object.prototype.hasOwnProperty.call(lastCachedStep, 'turnIndex')) {
+      return true;
+    }
     if (steps.some((s) => !Object.prototype.hasOwnProperty.call(s, 'responseModel'))) {
       return true;
     }
@@ -893,7 +896,7 @@ export async function enumerateAndSyncConversations({
       `${CACHE_SCHEMA_VERSION}:`
     );
     if (!hasCurrentSchema) return true;
-    if (hasMissingStepFields(cached)) return true;
+    if (hasMissingStepFields(cached) && (conv.inSummaries || conv.cascadeId.toLowerCase() === reqLower)) return true;
     const missingSubagentRefs = !Array.isArray(cached.subagentRefs);
     if (!conv.inSummaries) {
       if (missingSubagentRefs && conv.cascadeId.toLowerCase() === reqLower) {

@@ -5355,10 +5355,10 @@ const StepsDetailView = defineComponent({
     // --- 子表 1：单步明细表（列定义：步序、模型、吞吐速度、首字延迟、上下文/输出、缓存命中率、单步费用） ---
     const stepsTbody = h('tbody');
     const stepsTablePane = h('div', { className: 'table-viewport' }, [
-      h('table', { className: 'data-table' }, [
+      h('table', { className: 'data-table steps-data-table' }, [
         h('thead', {}, [
           h('tr', {}, [
-            h('th', { text: '步序' }),
+            h('th', { className: 'step-col-head', text: '步序' }),
             h('th', { text: '模型' }),
             h('th', { text: '速度' }),
             h('th', { text: '首字' }),
@@ -5374,6 +5374,42 @@ const StepsDetailView = defineComponent({
       contentEl: stepsTablePane,
       className: 'table-scroll-host',
     });
+
+    const turnTipEl = h('div', {
+      className: 'turn-prompt-tip',
+      role: 'tooltip',
+      hidden: true,
+    });
+    const hideTurnTip = () => patchAttr(turnTipEl, 'hidden', true);
+
+    function showTurnTip(anchorCell, promptText) {
+      const text = String(promptText || '').trim();
+      if (!anchorCell || !text) {
+        hideTurnTip();
+        return;
+      }
+      patchText(turnTipEl, text);
+      patchAttr(turnTipEl, 'hidden', false);
+      if (
+        typeof panelEl.getBoundingClientRect === 'function' &&
+        typeof anchorCell.getBoundingClientRect === 'function'
+      ) {
+        const panelRect = panelEl.getBoundingClientRect();
+        const cellRect = anchorCell.getBoundingClientRect();
+        if (panelRect.width > 0 && panelRect.height > 0) {
+          const tipH = turnTipEl.offsetHeight || 36;
+          const placeAbove =
+            panelRect.bottom - cellRect.bottom < tipH + 10 &&
+            cellRect.top - panelRect.top > tipH + 6;
+          const topPx = placeAbove
+            ? Math.max(4, Math.round(cellRect.top - panelRect.top - tipH - 4))
+            : Math.round(cellRect.bottom - panelRect.top + 4);
+          const leftPx = Math.max(6, Math.round(cellRect.left - panelRect.left + 4));
+          turnTipEl.style.top = `${topPx}px`;
+          turnTipEl.style.left = `${leftPx}px`;
+        }
+      }
+    }
 
     // --- 子表 2：按模型汇总表（列定义：模型名称、调用次数、有效均速、总 Token、费用） ---
     const modelsTbody = h('tbody');
@@ -5401,7 +5437,7 @@ const StepsDetailView = defineComponent({
       'section',
       {
         className: 'panel',
-        style: 'flex: 1; min-height: 0; display: flex; flex-direction: column;',
+        style: 'flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative;',
       },
       [
         h('div', { className: 'panel-header steps-panel-header' }, [
@@ -5416,14 +5452,18 @@ const StepsDetailView = defineComponent({
         ]),
         stepsScroll.el,
         modelsScroll.el,
+        turnTipEl,
       ]
     );
+    stepsTablePane.addEventListener('scroll', hideTurnTip);
+    stepsTbody.addEventListener('mouseleave', hideTurnTip);
 
     const rootEl = h('div', { className: 'view-pane' }, [panelEl]);
 
     const unsubUi = uiStore.subscribe(
       (st) => st.stepsSubTab,
       (tab) => {
+        hideTurnTip();
         subTabSwitch.setValue(tab);
         patchAttr(stepsScroll.el, 'hidden', tab !== 'steps');
         patchAttr(modelsScroll.el, 'hidden', tab !== 'models');
@@ -5506,21 +5546,65 @@ const StepsDetailView = defineComponent({
         ],
       });
 
+      const useRootTurn = Boolean(hasSubagents && effectiveScope === 'all');
+      const getStepTurnIdx = (st) =>
+        useRootTurn ? (st?.rootTurnIndex ?? st?.turnIndex) : st?.turnIndex;
+      const getStepIsStart = (st) =>
+        Boolean(useRootTurn ? (st?.isRootTurnStart ?? st?.isTurnStart) : st?.isTurnStart);
+      const getStepIsLatest = (st) =>
+        Boolean(useRootTurn ? (st?.isRootLatestTurn ?? st?.isLatestTurn) : st?.isLatestTurn);
+      const getStepPrompt = (st) =>
+        (useRootTurn ? (st?.rootTurnPrompt ?? st?.turnPrompt) : st?.turnPrompt) || '';
+      const turnKeyOf = (st) => {
+        const tIdx = getStepTurnIdx(st);
+        if (!Number.isInteger(tIdx) || tIdx <= 0) return '';
+        return useRootTurn ? `root:${tIdx}` : `${st.agentId || 'main'}:${tIdx}`;
+      };
+      const decoratedSteps = steps.map((st, idx) => {
+        const tKey = turnKeyOf(st);
+        const hasUp = Boolean(tKey && idx > 0 && turnKeyOf(steps[idx - 1]) === tKey);
+        const hasDown = Boolean(
+          tKey && idx + 1 < steps.length && turnKeyOf(steps[idx + 1]) === tKey
+        );
+        return {
+          st,
+          rowKey: `${st.agentCascadeId || slice.cascadeId || 'conv'}-${st.stepIndex}`,
+          hasTurn: Boolean(tKey),
+          hasUp,
+          hasDown,
+          isStart: getStepIsStart(st),
+          isLatest: getStepIsLatest(st),
+          prompt: getStepPrompt(st),
+        };
+      });
+
       // 1. 单步测速表增量对账：以 `<agentCascadeId>-<stepIndex>` 为稳定行键，仅在签名变化时刷新单元格
-      patchKeyedList(stepsTbody, steps, {
-        keyFn: (st) => `${st.agentCascadeId || slice.cascadeId || 'conv'}-${st.stepIndex}`,
-        sigFn: (st) => {
+      patchKeyedList(stepsTbody, decoratedSteps, {
+        keyFn: (item) => item.rowKey,
+        sigFn: (item) => {
+          const { st } = item;
           const disp = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
-          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}`;
+          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}:${item.hasTurn}:${item.hasUp}:${item.hasDown}:${item.isStart}:${item.isLatest}:${item.prompt}`;
         },
         createRow: () => {
+          const railLineEl = h('span', { className: 'turn-rail-line', hidden: true });
+          const railDotEl = h('span', { className: 'turn-rail-dot', hidden: true });
+          const railEl = h(
+            'span',
+            { className: 'turn-rail', 'aria-hidden': 'true', hidden: true },
+            [railLineEl, railDotEl]
+          );
           const agentBadgeEl = h('span', {
             className: 'agent-badge is-clickable',
             hidden: true,
             style: 'margin-right: 4px;',
           });
           const stepNumText = h('span');
-          const tdStep = h('td', {}, [agentBadgeEl, stepNumText]);
+          const tdStep = h('td', { className: 'step-cell' }, [
+            railEl,
+            agentBadgeEl,
+            stepNumText,
+          ]);
 
           const tdModel = h('td', {
             style: 'max-width: 140px; overflow: hidden; text-overflow: ellipsis;',
@@ -5544,6 +5628,10 @@ const StepsDetailView = defineComponent({
           return {
             el: tr,
             refs: {
+              tdStep,
+              railEl,
+              railLineEl,
+              railDotEl,
               agentBadgeEl,
               stepNumText,
               tdModel,
@@ -5556,7 +5644,34 @@ const StepsDetailView = defineComponent({
             },
           };
         },
-        updateRow: (refs, st) => {
+        updateRow: (refs, item) => {
+          const { st, hasTurn, hasUp, hasDown, isStart, isLatest, prompt } = item;
+          patchAttr(refs.railEl, 'hidden', !hasTurn);
+          if (hasTurn) {
+            patchClasses(refs.railEl, {
+              'is-latest': isLatest,
+              'has-up': hasUp,
+              'has-down': hasDown,
+            });
+            patchAttr(refs.railLineEl, 'hidden', !hasUp && !hasDown);
+            const showOrigin = isStart;
+            const showCap = !showOrigin && !hasUp && hasDown;
+            patchAttr(refs.railDotEl, 'hidden', !showOrigin && !showCap);
+            patchClasses(refs.railDotEl, {
+              'is-origin': showOrigin,
+              'is-cap': showCap,
+            });
+          }
+
+          refs.tdStep.onmouseenter = (ev) => {
+            if (ev?.target === refs.agentBadgeEl || !hasTurn || !prompt) {
+              hideTurnTip();
+              return;
+            }
+            showTurnTip(refs.tdStep, prompt);
+          };
+          refs.tdStep.onmouseleave = hideTurnTip;
+
           patchAttr(refs.agentBadgeEl, 'hidden', !hasSubagents);
           if (hasSubagents) {
             const badgeCls = getAgentBadgeClass(st.agentIndex || 0, !st.isSubagent);
@@ -5688,6 +5803,8 @@ const StepsDetailView = defineComponent({
     );
 
     onCleanup(() => {
+      stepsTablePane.removeEventListener('scroll', hideTurnTip);
+      stepsTbody.removeEventListener('mouseleave', hideTurnTip);
       unsubUi();
       unsubTelemetry();
       unsubView();

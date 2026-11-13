@@ -104,3 +104,105 @@
   border: 1px solid var(--border-hairline);
   background: var(--surface-subtle);
 }
+
+/* --- 3. 极简对话轮次导轨与起点圆点 (Minimalist Turn Rail & Origin Dot) --- */
+.steps-data-table th.step-col-head,
+.steps-data-table td.step-cell {
+  padding-left: 17px;
+}
+
+.steps-data-table td.step-cell {
+  position: relative;
+}
+
+.turn-rail {
+  --rail-line: color-mix(in srgb, var(--text-secondary) 28%, var(--border-hairline));
+  --rail-dot: color-mix(in srgb, var(--accent-primary) 52%, var(--text-secondary));
+  position: absolute;
+  top: 0;
+  bottom: -1px;
+  left: 5px;
+  width: 8px;
+  pointer-events: none;
+}
+
+.turn-rail.is-latest {
+  --rail-line: color-mix(in srgb, var(--accent-primary) 62%, var(--surface-panel));
+  --rail-dot: var(--accent-primary);
+}
+
+.steps-data-table tbody tr:hover .turn-rail {
+  --rail-line: color-mix(in srgb, var(--accent-primary) 78%, var(--surface-panel));
+  --rail-dot: var(--accent-primary);
+}
+
+.turn-rail-line {
+  position: absolute;
+  left: 3.25px;
+  width: 1.5px;
+  background: var(--rail-line);
+}
+
+.turn-rail.has-up.has-down .turn-rail-line {
+  top: 0;
+  bottom: 0;
+}
+
+.turn-rail.has-up:not(.has-down) .turn-rail-line {
+  top: 0;
+  bottom: 50%;
+}
+
+.turn-rail.has-down:not(.has-up) .turn-rail-line {
+  top: 50%;
+  bottom: 0;
+}
+
+.turn-rail-dot {
+  position: absolute;
+  top: 50%;
+  left: 4px;
+  transform: translate(-50%, -50%);
+  border-radius: var(--radius-pill);
+}
+
+.turn-rail-dot.is-cap {
+  width: 3.5px;
+  height: 3.5px;
+  background: var(--rail-line);
+}
+
+.turn-rail-dot.is-origin {
+  width: 6px;
+  height: 6px;
+  background: var(--surface-panel);
+  border: 1.5px solid var(--rail-dot);
+  box-shadow: 0 0 0 1px var(--surface-panel);
+}
+
+.turn-rail.is-latest .turn-rail-dot.is-origin {
+  background: var(--rail-dot);
+}
+
+/* 极简紧凑提问文本小气泡 */
+.turn-prompt-tip {
+  position: absolute;
+  z-index: 45;
+  max-width: min(268px, calc(100% - 16px));
+  padding: 5px 8px;
+  font-size: 11px;
+  line-height: 1.42;
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-popover);
+  white-space: pre-line;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  pointer-events: none;
+  animation: anim-popover-in var(--dur-instant) var(--ease-fast);
+}
