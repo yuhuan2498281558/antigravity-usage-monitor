@@ -26,7 +26,9 @@ import {
   DATA_DIR,
   DEFAULT_ARCHIVE_FALLBACK_URL,
   DEFAULT_DOWNLOAD_URL,
+  LEGACY_GITHUB_REPOS,
   LS_ADDR,
+  OFFICIAL_GITHUB_REPO,
   PLUGIN_ROOT,
   REMOTE_CATALOG_CACHE_FILE,
   cloudSyncState,
@@ -159,6 +161,31 @@ function pruneExtraneousFiles(targetDir, referenceDir) {
 }
 
 /**
+ * 若本地 Git 仓库的 `origin` 仍指向已迁移的旧官方仓库地址，返回同协议的新官方仓库地址；
+ * 对于非旧官方仓库（如已是新地址或用户自建 Fork）返回空字符串，不做改动。
+ *
+ * @param {string} rawUrl
+ * @returns {string}
+ */
+export function resolveMigratedGitRemoteUrl(rawUrl) {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return '';
+  for (const legacyRepo of LEGACY_GITHUB_REPOS) {
+    const escaped = legacyRepo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`^https://github\\.com/${escaped}(?:\\.git)?/?$`, 'i').test(trimmed)) {
+      return `https://github.com/${OFFICIAL_GITHUB_REPO}.git`;
+    }
+    if (new RegExp(`^git@github\\.com:${escaped}(?:\\.git)?/?$`, 'i').test(trimmed)) {
+      return `git@github.com:${OFFICIAL_GITHUB_REPO}.git`;
+    }
+    if (new RegExp(`^ssh://git@github\\.com/${escaped}(?:\\.git)?/?$`, 'i').test(trimmed)) {
+      return `ssh://git@github.com/${OFFICIAL_GITHUB_REPO}.git`;
+    }
+  }
+  return '';
+}
+
+/**
  * 在真实运行环境下对目标目录的核心 JS 文件执行 `node --check` 语法预检。
  *
  * @param {string} rootDir 插件根目录或解压目录
@@ -277,7 +304,31 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
         const targetBranch = currentBranch || 'main';
         const remoteRef = `origin/${targetBranch}`;
 
-        // 3. 只读拉取远端分支引用，并严格从 origin/<branch>:plugin.json 读取远端版本号（严禁回退使用缓存版本）
+        // 3. 存量旧仓库远程地址平滑迁移：若 origin 仍指向已更换的旧官方仓库，自动切换至新仓库地址
+        try {
+          const remoteUrlRes = await runExecFile('git', [
+            '-C',
+            PLUGIN_ROOT,
+            'remote',
+            'get-url',
+            'origin',
+          ]);
+          const migratedRemoteUrl = resolveMigratedGitRemoteUrl(remoteUrlRes.stdout);
+          if (migratedRemoteUrl) {
+            await runExecFile('git', [
+              '-C',
+              PLUGIN_ROOT,
+              'remote',
+              'set-url',
+              'origin',
+              migratedRemoteUrl,
+            ]);
+          }
+        } catch {
+          // 忽略非标准 remote 配置异常，不阻断常规拉取
+        }
+
+        // 4. 只读拉取远端分支引用，并严格从 origin/<branch>:plugin.json 读取远端版本号（严禁回退使用缓存版本）
         await runExecFile('git', ['-C', PLUGIN_ROOT, 'fetch', 'origin', targetBranch, '--tags']);
 
         let remoteVersion = '';
@@ -298,7 +349,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
           remoteVersion = '';
         }
 
-        // 4. 强制版本门禁：远端版本无法确认或不高于当前版本时，严禁执行 git pull 降级/覆盖
+        // 5. 强制版本门禁：远端版本无法确认或不高于当前版本时，严禁执行 git pull 降级/覆盖
         if (!remoteVersion || compareSemver(remoteVersion, previousVersion) <= 0) {
           const msg = `当前已是最新版本 (v${previousVersion})`;
           const result = {
@@ -317,7 +368,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
           return result;
         }
 
-        // 5. 提交拓扑预检：确保当前 HEAD 是远端分支的祖先提交（无本地超前或分叉提交）
+        // 6. 提交拓扑预检：确保当前 HEAD 是远端分支的祖先提交（无本地超前或分叉提交）
         try {
           await runExecFile('git', [
             '-C',
@@ -343,7 +394,7 @@ export async function performPluginUpdate({ isAuto = false } = {}) {
           return pluginUpdateState.lastResult;
         }
 
-        // 6. 确认全部门禁通过后，执行快进合并并校验 JS 语法
+        // 7. 确认全部门禁通过后，执行快进合并并校验 JS 语法
         await runExecFile('git', ['-C', PLUGIN_ROOT, 'pull', '--ff-only', 'origin', targetBranch]);
         await verifyPluginJsSyntax(PLUGIN_ROOT);
         rebuildActiveCatalog();

@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "catalogVersion": "2026.11.11.4",
+  "catalogVersion": "2026.11.12.1",
   "updatedAt": "2026-11-13T13:20:00+09:00",
   "latestPluginVersion": "1.4.4",
-  "releaseUrl": "https://github.com/yuhuan2498281558/antigravity-usage-monitor/releases/latest",
-  "downloadUrl": "https://github.com/yuhuan2498281558/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip",
-  "archiveFallbackUrl": "https://codeload.github.com/yuhuan2498281558/antigravity-usage-monitor/zip/refs/heads/main",
+  "releaseUrl": "https://github.com/yuhuan-dev/antigravity-usage-monitor/releases/latest",
+  "downloadUrl": "https://github.com/yuhuan-dev/antigravity-usage-monitor/releases/latest/download/usage-monitor.zip",
+  "archiveFallbackUrl": "https://codeload.github.com/yuhuan-dev/antigravity-usage-monitor/zip/refs/heads/main",
   "pricing": {
     "gemini-4-carbon-high": { "input": 2.00, "cache": 0.10, "output": 10.0, "short": "carbon-4-high", "family": "Gemini" },
     "gemini-4-carbon-medium": { "input": 2.00, "cache": 0.10, "output": 10.0, "short": "carbon-4", "family": "Gemini" },

@@ -16,7 +16,9 @@ import {
   DEFAULT_ARCHIVE_FALLBACK_URL,
   DEFAULT_DOWNLOAD_URL,
   DEFAULT_RELEASE_URL,
+  LEGACY_GITHUB_REPOS,
   LOCAL_CATALOG_FILE,
+  OFFICIAL_GITHUB_REPO,
   PLUGIN_MANIFEST_FILE,
   PLUGIN_ROOT,
   REMOTE_CATALOG_CACHE_FILE,
@@ -44,7 +46,35 @@ export function isValidSemver(v) {
   );
 }
 
-const OFFICIAL_REPO_PATH_PREFIX = '/yuhuan2498281558/antigravity-usage-monitor';
+const OFFICIAL_REPO_PATH_PREFIX = `/${OFFICIAL_GITHUB_REPO.toLowerCase()}`;
+const LEGACY_REPO_PATH_PREFIXES = LEGACY_GITHUB_REPOS.map((repo) => `/${repo.toLowerCase()}`);
+
+/**
+ * 判断来源 URL 是否属于已迁移的旧官方 GitHub 仓库地址。
+ *
+ * @param {*} rawUrl
+ * @returns {boolean}
+ */
+function isLegacyGithubRepoUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
+  try {
+    const parsed = new URL(rawUrl.trim());
+    const host = parsed.hostname.toLowerCase();
+    const pathname = parsed.pathname.toLowerCase();
+    if (
+      host !== 'github.com' &&
+      host !== 'raw.githubusercontent.com' &&
+      host !== 'codeload.github.com'
+    ) {
+      return false;
+    }
+    return LEGACY_REPO_PATH_PREFIXES.some(
+      (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * 校验更新/下载链接是否属于可信的 GitHub 官方仓库与 HTTPS 域名白名单。
@@ -245,6 +275,8 @@ export function sanitizeCatalogPayload(raw) {
   const explicitReleaseUrl = sanitizeTrustedGithubUrl(raw.releaseUrl, '');
   const explicitDownloadUrl = sanitizeTrustedGithubUrl(raw.downloadUrl, '');
   const explicitArchiveUrl = sanitizeTrustedGithubUrl(raw.archiveFallbackUrl, '');
+  const rawSourceUrl = typeof raw.sourceUrl === 'string' ? raw.sourceUrl.trim() : '';
+  const isLegacySource = isLegacyGithubRepoUrl(rawSourceUrl);
 
   return {
     schemaVersion: Number(raw.schemaVersion || 1),
@@ -261,8 +293,8 @@ export function sanitizeCatalogPayload(raw) {
     hasReleaseUrl: Boolean(explicitReleaseUrl),
     hasDownloadUrl: Boolean(explicitDownloadUrl),
     hasArchiveFallbackUrl: Boolean(explicitArchiveUrl),
-    fetchedAtMs: Number(raw.fetchedAtMs || 0),
-    sourceUrl: typeof raw.sourceUrl === 'string' ? raw.sourceUrl : '',
+    fetchedAtMs: isLegacySource ? 0 : Number(raw.fetchedAtMs || 0),
+    sourceUrl: isLegacySource ? '' : rawSourceUrl,
     pricing,
     placeholders,
   };
